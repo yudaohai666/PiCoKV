@@ -31,7 +31,7 @@ EXPECTED_ANSWER="eat a sandwich and sit in Dolores Park on a sunny day."
 
 # ── K/V 组合列表（按需修改）────────────────────────────────
 CONFIGS=(
-  "256 256"
+  "320 256"
 )
 
 # ── 逐组实验 ──────────────────────────────────────────────
