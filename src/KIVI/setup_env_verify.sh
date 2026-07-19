@@ -8,7 +8,7 @@ VENV="$(cd "$SCRIPT_DIR/../.." && pwd)/.venv"
 
 # Base model used by both verification scripts. Override with:
 #   MODEL_NAME_OR_PATH=/path/to/model bash setup_env_verify.sh
-MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct}"
+MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-2-7b-chat-hf}"
 
 source "$VENV/bin/activate"
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"

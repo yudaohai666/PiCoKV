@@ -61,8 +61,7 @@ def load_kivi(model_name_or_path, cache_dir):
         pretrained_model_name_or_path=model_name_or_path,
         config=config,
         cache_dir=cache_dir,
-        torch_dtype=torch.float16,
-        low_cpu_mem_usage=True,
+        torch_dtype=torch.float16
     )
     return model.cuda().eval()
 
@@ -75,7 +74,6 @@ def load_baseline(model_name_or_path, cache_dir):
         config=config,
         cache_dir=cache_dir,
         torch_dtype=torch.float16,
-        low_cpu_mem_usage=True,
         attn_implementation="flash_attention_2",
         device_map={"": "cuda:0"},
     )

@@ -21,7 +21,7 @@ cd "${REPO_ROOT}"
 export HOTPOTQA_JSON="${SCRIPT_DIR}/ruler_qa/hotpot_dev_distractor_v1.json"
 
 # ── 基础配置 ──────────────────────────────────────────────
-GPU=4
+GPU=3
 MODEL="/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct"
 
 # RULER 参数
@@ -31,7 +31,9 @@ BATCH_SIZE=1
 MAX_GEN_TOKS=128
 LIMIT=100
 # All RULER tasks - use "ruler" to run all tasks at once
-TASKS="ruler"
+# TASKS="ruler"
+# CWE value-precision ablation: 只跑 cwe，快（仅100样本）
+TASKS="ruler_cwe"
 # Or specify individual tasks:
 # TASKS="niah_single_1,niah_single_2,niah_single_3,niah_multikey_1,niah_multikey_2,niah_multikey_3,niah_multiquery,niah_multivalue,ruler_vt,ruler_cwe,ruler_fwe,ruler_qa_squad,ruler_qa_hotpot"
 # TASKS="ruler_qa_hotpot"
@@ -46,20 +48,43 @@ METHODS=(
   # sdpa
 )
 
-# quantpc 的 K/V 组合列表（仅 method=quantpc 时生效）
+# quantpc 消融配置列表（仅 method=quantpc 时生效）
+# 格式："K V EXP_BITS ZEROROPE"
+#   K/V       = key/value 每 token 二进制投影分量数（存储精度），越大越精确
+#   EXP_BITS  = softmax 权重量化位宽，CUDA 仅支持 {1,2,4,8}
+#   ZEROROPE  = 量化 key 前置零的 RoPE 维数，须 0 <= ZR <= head_dim/2 (=64)
+# 全部只跑 cwe、单任务单跑 -> RNG 流位置一致，各点可直接横比。
+# 输出目录用显式 --output_path 编码全部变量，避免同 K/V 不同 exp/zr 相互覆盖。
 CONFIGS=(
-  "320 256"
+  # K   V   exp  zr    ── 锚点（当前默认配置）
+  "320 320  4   20"
+  # ── value 精度消融（固定 exp4 zr20）
+  # ── exp-bits 消融（固定 K320 V320 zr20）
+  "320 320  2   20"
+  "320 320  6   20"
+  "320 320  8   20"
+  # ── zerorope 消融（固定 K320 V320 exp4）
+  "320 320  4   0"
+  "320 320  4   5"
+  "320 320  4   10"
+  "320 320  4   15"
+  "320 320  4   25"
+  "320 320  4   30"
 )
 
 # ── 逐方法实验 ────────────────────────────────────────────
 for method in "${METHODS[@]}"; do
   if [ "${method}" = "quantpc" ]; then
+    MODEL_NAME="$(basename "${MODEL}")"
     for cfg in "${CONFIGS[@]}"; do
-      K=$(echo "$cfg" | awk '{print $1}')
-      V=$(echo "$cfg" | awk '{print $2}')
+      read -r K V EXP ZR <<< "$cfg"
+
+      # 显式输出目录，编码全部消融变量，避免相互覆盖
+      OUT="results/ruler/${MODEL_NAME}_quantpc_k${K}_v${V}_exp${EXP}_zr${ZR}/"
 
       echo "========================================"
-      echo "Running RULER: method=quantpc  k-bits=${K}  v-bits=${V}"
+      echo "Running RULER: quantpc  k=${K} v=${V} exp-bits=${EXP} zerorope=${ZR}"
+      echo "  -> ${OUT}"
       echo "========================================"
 
       CUDA_VISIBLE_DEVICES=${GPU} \
@@ -75,13 +100,14 @@ for method in "${METHODS[@]}"; do
         --k-bits "${K}" \
         --v-bits "${V}" \
         --projected-query-bits 8 \
-        --exp-bits 4 \
+        --exp-bits "${EXP}" \
         --eas 0.01 \
-        --zerorope 20 \
+        --zerorope "${ZR}" \
         --cuda-v1-exp8 \
+        --output_path "${OUT}" \
         --apply_chat_template
 
-      echo "Done: method=quantpc  k-bits=${K}  v-bits=${V}"
+      echo "Done: quantpc  k=${K} v=${V} exp-bits=${EXP} zerorope=${ZR}"
       echo ""
     done
   else

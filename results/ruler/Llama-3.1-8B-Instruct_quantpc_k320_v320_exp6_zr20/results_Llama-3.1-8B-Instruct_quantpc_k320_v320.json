@@ -1,0 +1,28 @@
+{
+  "results": {
+    "ruler_cwe": {
+      "name": "ruler_cwe",
+      "alias": "ruler_cwe",
+      "sample_len": 100,
+      "4096,none": -1,
+      "4096_stderr,none": "N/A",
+      "32768,none": 0.081,
+      "32768_stderr,none": "N/A"
+    }
+  },
+  "config": {
+    "model": "MyModel",
+    "model_args": "pretrained=/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct,max_length=131072",
+    "batch_size": 1,
+    "batch_sizes": [],
+    "device": null,
+    "use_cache": null,
+    "limit": 100,
+    "bootstrap_iters": 100000,
+    "gen_kwargs": null,
+    "random_seed": 0,
+    "numpy_seed": 1234,
+    "torch_seed": 1234,
+    "fewshot_seed": 1234
+  }
+}
