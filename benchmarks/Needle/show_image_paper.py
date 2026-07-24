@@ -155,7 +155,7 @@ def main(args):
         linestyle='--',
         vmin=0, vmax=100,
     )
-    ax.set_aspect(0.6) 
+    ax.set_aspect('auto')
 
     # tick_labels = [f"{x//1024}k" for x in locations]
     if "mistral" in model.lower():

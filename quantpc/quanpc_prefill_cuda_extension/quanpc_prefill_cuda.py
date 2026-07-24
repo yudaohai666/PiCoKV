@@ -146,6 +146,20 @@ def select_eas_cuda(key_err, value_err, eas_size: int, verbose: bool = False):
     return ext.quanpc_prefill_select_eas_fn(key_err.contiguous(), value_err.contiguous(), int(eas_size))
 
 
+def gather_pack_cuda(full_key, full_value, key_codes, value_codes, eas_indices, kept_indices, sink_size: int, local_size: int, verbose: bool = False):
+    ext = load_quanpc_prefill_extension(verbose)
+    return ext.quanpc_prefill_gather_pack_fn(
+        full_key.contiguous(),
+        full_value.contiguous(),
+        key_codes.contiguous(),
+        value_codes.contiguous(),
+        eas_indices.contiguous(),
+        kept_indices.contiguous(),
+        int(sink_size),
+        int(local_size),
+    )
+
+
 def gather_pack_from_packed_cuda(full_key, full_value, packed_key_all, packed_value_token, eas_indices, kept_indices, sink_size: int, local_size: int, verbose: bool = False):
     ext = load_quanpc_prefill_extension(verbose)
     return ext.quanpc_prefill_gather_pack_from_packed_fn(

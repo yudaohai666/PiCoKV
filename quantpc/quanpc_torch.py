@@ -93,12 +93,13 @@ class MixedCacheTensor:
 
 
 class QuantCache(Cache):
-    def __init__(self, bits: int, sink_size: int = 64, local_size: int = 1024):
+    def __init__(self, bits: int, sink_size: int = 64, local_size: int = 1024, refit_decoder: bool = False):
         if bits <= 0:
             raise ValueError(f"bits must be positive; got {bits}")
         self.bits_per_token = bits
         self.sink_size = sink_size
         self.local_size = local_size
+        self.refit_decoder = refit_decoder
         self.reset()
 
     def reset(self):
@@ -113,6 +114,28 @@ class QuantCache(Cache):
     @staticmethod
     def _code_norm(token_count: int, device, dtype) -> torch.Tensor:
         return torch.tensor(float(token_count), device=device, dtype=dtype).sqrt()
+
+    @staticmethod
+    def _refit_decoder_from_codes(codes: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Fit decode-time reconstruction vectors for fixed binary codes."""
+        decoder = torch.linalg.pinv(codes.float()) @ target.float()
+        return decoder.to(dtype=target.dtype).contiguous()
+
+    @staticmethod
+    def _reconstruction_error(
+        codes: torch.Tensor,
+        target: torch.Tensor,
+        decoder: torch.Tensor,
+        chunk_size: int = 8192,
+    ) -> torch.Tensor:
+        B, H, L, _ = codes.shape
+        err = torch.empty(B, H, L, device=target.device, dtype=torch.float32)
+        decoder_fp32 = decoder.float()
+        for start in range(0, L, chunk_size):
+            end = min(start + chunk_size, L)
+            recon = codes[:, :, start:end, :].float() @ decoder_fp32
+            err[:, :, start:end] = (target[:, :, start:end, :].float() - recon).norm(dim=-1, p=2)
+        return err.contiguous()
 
     def _learn_projection_chunk(self, A: torch.Tensor, code_dim: int) -> torch.Tensor:
         """Learn binary projection vectors from the current residual."""
@@ -139,7 +162,14 @@ class QuantCache(Cache):
         bits = self.bits_per_token if bits is None else bits
         return QuantProjection(self._learn_projection_chunk(A, bits).contiguous())
 
-    def quantize_with_projection(self, A: torch.Tensor, projection: QuantProjection) -> QuantizedTensor:
+    def quantize_with_projection(
+        self,
+        A: torch.Tensor,
+        projection: QuantProjection,
+        refit_decoder: Optional[bool] = None,
+    ) -> QuantizedTensor:
+        if refit_decoder is None:
+            refit_decoder = self.refit_decoder
         B, H, L, _ = A.shape
         C = projection.proj.shape[-2]
         codes = torch.empty(B, H, L, C, device=A.device, dtype=A.dtype)
@@ -157,12 +187,27 @@ class QuantCache(Cache):
             codes[:, :, :, bit_idx] = code
             block_proj[:, :, bit_idx, :] = folded_direction
 
-        err = residual.norm(dim=-1, p=2).float()
+        if refit_decoder:
+            block_proj = self._refit_decoder_from_codes(codes, A)
+            err = self._reconstruction_error(codes, A, block_proj)
+        else:
+            err = residual.norm(dim=-1, p=2).float()
         return QuantizedTensor(
             codes.contiguous(),
             block_proj.contiguous(),
             err.contiguous(),
             proj_t=block_proj.transpose(-1, -2).contiguous(),
+        )
+
+    def refit_quantized_tensor(self, block: QuantizedTensor, target: torch.Tensor) -> QuantizedTensor:
+        decoder = self._refit_decoder_from_codes(block.codes, target)
+        err = self._reconstruction_error(block.codes, target, decoder)
+        return QuantizedTensor(
+            block.codes.contiguous(),
+            decoder,
+            err,
+            block.packed_cuda,
+            decoder.transpose(-1, -2).contiguous(),
         )
 
     def qpc(self, A: torch.Tensor) -> tuple[QuantizedTensor, QuantProjection]:
@@ -189,25 +234,32 @@ class QuantCache(Cache):
 
 
 class KQuantCache(QuantCache):
-    def __init__(self, bits: int, sink_size: int = 64, local_size: int = 1024, zerorope: int = 30):
+    def __init__(self, bits: int, sink_size: int = 64, local_size: int = 1024, zerorope: int = 30, refit_decoder: bool = False):
         if zerorope < 0:
             raise ValueError(f"zerorope must be non-negative; got {zerorope}")
-        super().__init__(bits=bits, sink_size=sink_size, local_size=local_size)
+        super().__init__(bits=bits, sink_size=sink_size, local_size=local_size, refit_decoder=refit_decoder)
         self.zerorope = zerorope
 
-    def compress(self, glob: torch.Tensor, layer_idx: int) -> QuantizedTensor:
+    def quantization_target(self, glob: torch.Tensor) -> torch.Tensor:
         glob = glob.clone()
         half_head_dim = glob.shape[-1] // 2
         if self.zerorope > half_head_dim:
             raise ValueError(f"zerorope ({self.zerorope}) must be <= half_head_dim ({half_head_dim})")
         glob[:, :, :, :self.zerorope] = 0
         glob[:, :, :, half_head_dim:half_head_dim + self.zerorope] = 0
+        return glob
+
+    def compress(self, glob: torch.Tensor, layer_idx: int) -> QuantizedTensor:
+        glob = self.quantization_target(glob)
         quantized, projection = self.qpc(glob)
         self.projections[layer_idx] = projection
         return quantized
 
 
 class VQuantCache(QuantCache):
+    def __init__(self, bits: int, sink_size: int = 64, local_size: int = 1024, refit_decoder: bool = False):
+        super().__init__(bits=bits, sink_size=sink_size, local_size=local_size, refit_decoder=refit_decoder)
+
     def compress(self, glob: torch.Tensor, layer_idx: int) -> QuantizedTensor:
         quantized, projection = self.qpc(glob)
         self.projections[layer_idx] = projection
@@ -226,14 +278,16 @@ class QuantKVCache(Cache):
         eas: float = 0.01,
         zerorope: int = 30,
         use_cuda_v1_exp8: bool = False,
+        refit_decoder: bool = False,
     ):
         projected_query_bits, exp_bits = _validate_attention_quant_bits(projected_query_bits, exp_bits)
-        self.kcache = KQuantCache(k_bits, sink_size, local_size, zerorope)
-        self.vcache = VQuantCache(v_bits, sink_size, local_size)
+        self.kcache = KQuantCache(k_bits, sink_size, local_size, zerorope, refit_decoder=refit_decoder)
+        self.vcache = VQuantCache(v_bits, sink_size, local_size, refit_decoder=refit_decoder)
         self.projected_query_bits = projected_query_bits
         self.exp_bits = exp_bits
         self.eas = eas
         self.use_cuda_v1_exp8 = False
+        self.refit_decoder = refit_decoder
         self.k_dense = {}
         self.v_dense = {}
 
@@ -268,6 +322,14 @@ class QuantKVCache(Cache):
         err = block.err[mask].reshape(B, H, L - keep_indices.shape[-1]).contiguous()
         return QuantizedTensor(codes, block.proj, err, block.packed_cuda, block.proj_t)
 
+    @staticmethod
+    def _drop_token_states(states: torch.Tensor, keep_indices: torch.Tensor) -> torch.Tensor:
+        L = states.shape[-2]
+        mask = torch.ones(states.shape[:3], device=states.device, dtype=torch.bool)
+        mask.scatter_(-1, keep_indices, False)
+        B, H, _, D = states.shape
+        return states[mask].reshape(B, H, L - keep_indices.shape[-1], D).contiguous()
+
     def _make_mixed(self, layer_idx: int):
         return (
             MixedCacheTensor(
@@ -301,6 +363,11 @@ class QuantKVCache(Cache):
             self.v_dense[layer_idx] = torch.cat(dense_vals, dim=-2).contiguous()
             self.kcache.glob[layer_idx] = self._drop_tokens(self.kcache.glob[layer_idx], eas_indices)
             self.vcache.glob[layer_idx] = self._drop_tokens(self.vcache.glob[layer_idx], eas_indices)
+            if self.refit_decoder:
+                key_target = self._drop_token_states(self.kcache.quantization_target(key_glob), eas_indices)
+                value_target = self._drop_token_states(val_glob, eas_indices)
+                self.kcache.glob[layer_idx] = self.kcache.refit_quantized_tensor(self.kcache.glob[layer_idx], key_target)
+                self.vcache.glob[layer_idx] = self.vcache.refit_quantized_tensor(self.vcache.glob[layer_idx], value_target)
             self.kcache.projections.pop(layer_idx, None)
             self.vcache.projections.pop(layer_idx, None)
             return keys, vals

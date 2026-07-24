@@ -21,10 +21,19 @@ from quantpc.quanpc import QuantProjection, QuantizedTensor
 from quantpc.quanpc_cuda_extension.quanpc_cuda import load_quanpc_extension, pack_quanpc_key_transposed_torch, pack_quanpc_value_1bit_transposed_torch
 
 try:
-    from quantpc.quanpc_prefill_cuda_extension.quanpc_prefill_cuda import learn_projection_cuda, prepare_prefill_cuda
+    from quantpc.quanpc_prefill_cuda_extension.quanpc_prefill_cuda import (
+        learn_projection_cuda,
+        prepare_prefill_cuda,
+        quantize_unpacked_cuda,
+        select_eas_cuda,
+        gather_pack_cuda,
+    )
 except Exception:  # pragma: no cover - CUDA extension may be unavailable at import time.
     learn_projection_cuda = None
     prepare_prefill_cuda = None
+    quantize_unpacked_cuda = None
+    select_eas_cuda = None
+    gather_pack_cuda = None
 
 SUPPORTED_CODE_BITS = (128, 192, 256, 320, 384, 448, 512)
 SUPPORTED_EXP_BITS = (1, 2, 4, 8)
@@ -53,6 +62,8 @@ class PreparedKVCache:
     projected_query_bits: int = PROJECTED_QUERY_BITS
     key_projection_t: Optional[torch.Tensor] = None
     value_projection_t: Optional[torch.Tensor] = None
+    key_encoder_projection: Optional[torch.Tensor] = None
+    value_encoder_projection: Optional[torch.Tensor] = None
     _workspace: dict[tuple, tuple[torch.Tensor, ...]] = field(default_factory=dict, repr=False)
     _dense_stream: Optional[torch.cuda.Stream] = field(default=None, repr=False)
 
@@ -223,6 +234,14 @@ def _drop_quantized_tokens(block: QuantizedTensor, keep_indices: torch.Tensor) -
     return QuantizedTensor(codes, block.proj, err, proj_t=block.proj_t)
 
 
+def _drop_token_states(states: torch.Tensor, keep_indices: torch.Tensor) -> torch.Tensor:
+    length = states.shape[-2]
+    mask = torch.ones(states.shape[:3], device=states.device, dtype=torch.bool)
+    mask.scatter_(-1, keep_indices, False)
+    bsz, heads, _, dim = states.shape
+    return states[mask].reshape(bsz, heads, length - keep_indices.shape[-1], dim).contiguous()
+
+
 def _prepare_kv_cache_torch(
     full_key: torch.Tensor,
     full_value: torch.Tensor,
@@ -233,14 +252,26 @@ def _prepare_kv_cache_torch(
     eas: float,
     zerorope: int,
     exp_bits: int,
+    refit_decoder: bool,
 ) -> PreparedKVCache:
     glob_start, glob_len = _global_span(full_key, sink_size, local_size)
     key_glob = full_key[:, :, glob_start:glob_start + glob_len, :].clone()
     _apply_zerorope_(key_glob, zerorope)
     value_glob = full_value[:, :, glob_start:glob_start + glob_len, :]
 
-    k_cache = quanpc.KQuantCache(key_projection.shape[-2], sink_size=sink_size, local_size=local_size, zerorope=zerorope)
-    v_cache = quanpc.VQuantCache(value_projection.shape[-2], sink_size=sink_size, local_size=local_size)
+    k_cache = quanpc.KQuantCache(
+        key_projection.shape[-2],
+        sink_size=sink_size,
+        local_size=local_size,
+        zerorope=zerorope,
+        refit_decoder=refit_decoder,
+    )
+    v_cache = quanpc.VQuantCache(
+        value_projection.shape[-2],
+        sink_size=sink_size,
+        local_size=local_size,
+        refit_decoder=refit_decoder,
+    )
     k_block = k_cache.quantize_with_projection(key_glob, QuantProjection(key_projection))
     v_block = v_cache.quantize_with_projection(value_glob, QuantProjection(value_projection))
 
@@ -264,6 +295,11 @@ def _prepare_kv_cache_torch(
     ).contiguous()
     k_block = _drop_quantized_tokens(k_block, eas_indices)
     v_block = _drop_quantized_tokens(v_block, eas_indices)
+    if refit_decoder:
+        k_target = _drop_token_states(key_glob, eas_indices)
+        v_target = _drop_token_states(value_glob, eas_indices)
+        k_block = k_cache.refit_quantized_tensor(k_block, k_target)
+        v_block = v_cache.refit_quantized_tensor(v_block, v_target)
     packed_key = pack_quanpc_key_transposed_torch(k_block.codes).contiguous()
     packed_value = pack_quanpc_value_1bit_transposed_torch(v_block.codes).contiguous()
     return PreparedKVCache(
@@ -275,9 +311,109 @@ def _prepare_kv_cache_torch(
         value_projection=v_block.proj,
         key_projection_t=k_block.proj_t,
         value_projection_t=v_block.proj_t,
+        key_encoder_projection=key_projection,
+        value_encoder_projection=value_projection,
         key_err=k_block.err,
         value_err=v_block.err,
         eas_indices=eas_indices,
+        sink_size=sink_size,
+        local_size=local_size,
+        eas=eas,
+        zerorope=zerorope,
+        exp_bits=exp_bits,
+    )
+
+
+def _prepare_kv_cache_cuda_refit(
+    full_key: torch.Tensor,
+    full_value: torch.Tensor,
+    key_projection: torch.Tensor,
+    value_projection: torch.Tensor,
+    sink_size: int,
+    local_size: int,
+    eas: float,
+    zerorope: int,
+    exp_bits: int,
+    verbose: bool = False,
+) -> PreparedKVCache:
+    """CUDA prefill path for refit_decoder.
+
+    Heavy steps (quantization, EAS selection, dense gather + packing) run on the
+    CUDA prefill kernels; the two decode-matrix refits are batched least-squares
+    solves that run on the GPU via ``torch.linalg``. Codes are unchanged by refit,
+    so packing is done from the original CUDA codes plus the kept indices.
+    """
+    glob_start, glob_len = _global_span(full_key, sink_size, local_size)
+
+    # Refit targets must match what the quantizer saw: K is zero-roped, V is not.
+    key_glob = full_key[:, :, glob_start:glob_start + glob_len, :].clone()
+    _apply_zerorope_(key_glob, zerorope)
+    value_glob = full_value[:, :, glob_start:glob_start + glob_len, :].contiguous()
+
+    # 1) Quantize on CUDA, keeping the raw int8 codes (unpacked).
+    k_codes, _, _ = quantize_unpacked_cuda(
+        full_key, key_projection, glob_start, glob_len,
+        zerorope=zerorope, apply_zerorope=True, verbose=verbose,
+    )
+    v_codes, _, _ = quantize_unpacked_cuda(
+        full_value, value_projection, glob_start, glob_len,
+        zerorope=0, apply_zerorope=False, verbose=verbose,
+    )
+
+    k_cache = quanpc.KQuantCache(
+        key_projection.shape[-2], sink_size=sink_size, local_size=local_size,
+        zerorope=zerorope, refit_decoder=True,
+    )
+    v_cache = quanpc.VQuantCache(
+        value_projection.shape[-2], sink_size=sink_size, local_size=local_size,
+        refit_decoder=True,
+    )
+
+    # 2) Refit #1: decoder fit over the full global set, only to produce the
+    #    reconstruction error that drives EAS token selection.
+    k_dec1 = k_cache._refit_decoder_from_codes(k_codes, key_glob)
+    v_dec1 = v_cache._refit_decoder_from_codes(v_codes, value_glob)
+    k_err = k_cache._reconstruction_error(k_codes, key_glob, k_dec1)
+    v_err = v_cache._reconstruction_error(v_codes, value_glob, v_dec1)
+
+    # 3) Joint EAS selection on CUDA.
+    eas_size = max(1, int(glob_len * float(eas)))
+    eas_indices, _mask, kept_indices = select_eas_cuda(k_err, v_err, eas_size, verbose=verbose)
+
+    # 4) Refit #2: re-solve the decoder over exactly the retained (quantized)
+    #    tokens; this is the final key/value reconstruction matrix.
+    Ck = key_projection.shape[-2]
+    Cv = value_projection.shape[-2]
+    D = full_key.shape[-1]
+    keep = kept_indices.long()
+    kept_k_codes = torch.gather(k_codes, 2, keep.unsqueeze(-1).expand(-1, -1, -1, Ck))
+    kept_v_codes = torch.gather(v_codes, 2, keep.unsqueeze(-1).expand(-1, -1, -1, Cv))
+    kept_k_target = torch.gather(key_glob, 2, keep.unsqueeze(-1).expand(-1, -1, -1, D))
+    kept_v_target = torch.gather(value_glob, 2, keep.unsqueeze(-1).expand(-1, -1, -1, D))
+    key_proj = k_cache._refit_decoder_from_codes(kept_k_codes, kept_k_target)
+    value_proj = v_cache._refit_decoder_from_codes(kept_v_codes, kept_v_target)
+
+    # 5) Dense gather + packing on CUDA (codes are unaffected by refit).
+    dense_key, dense_value, packed_key, packed_value = gather_pack_cuda(
+        full_key, full_value, k_codes, v_codes,
+        eas_indices, kept_indices, sink_size, local_size, verbose=verbose,
+    )
+
+    return PreparedKVCache(
+        dense_key=dense_key,
+        dense_value=dense_value,
+        packed_key=packed_key,
+        packed_value=packed_value,
+        key_projection=key_proj,
+        value_projection=value_proj,
+        key_projection_t=key_proj.transpose(-1, -2).contiguous(),
+        value_projection_t=value_proj.transpose(-1, -2).contiguous(),
+        key_encoder_projection=key_projection,
+        value_encoder_projection=value_projection,
+        key_err=k_err,
+        value_err=v_err,
+        eas_indices=eas_indices,
+        kept_indices=kept_indices,
         sink_size=sink_size,
         local_size=local_size,
         eas=eas,
@@ -297,6 +433,7 @@ def prepare_kv_cache(
     eas: float = 0.01,
     zerorope: int = 20,
     exp_bits: int = 4,
+    refit_decoder: bool = False,
     use_cuda: bool = True,
     keep_intermediates: bool = False,
     verbose: bool = False,
@@ -307,7 +444,20 @@ def prepare_kv_cache(
     _check_code_bits("key bits", key_projection.shape[-2])
     _check_code_bits("value bits", value_projection.shape[-2])
     exp_bits = _check_exp_bits(exp_bits)
-    if use_cuda and full_key.is_cuda and prepare_prefill_cuda is not None:
+    if use_cuda and refit_decoder and full_key.is_cuda and quantize_unpacked_cuda is not None:
+        return _prepare_kv_cache_cuda_refit(
+            full_key,
+            full_value,
+            key_projection,
+            value_projection,
+            sink_size,
+            local_size,
+            eas,
+            zerorope,
+            exp_bits,
+            verbose=verbose,
+        )
+    if use_cuda and not refit_decoder and full_key.is_cuda and prepare_prefill_cuda is not None:
         out = prepare_prefill_cuda(
             full_key,
             full_value,
@@ -329,6 +479,8 @@ def prepare_kv_cache(
             value_projection=out.value_proj,
             key_projection_t=out.key_proj.transpose(-1, -2).contiguous(),
             value_projection_t=out.value_proj.transpose(-1, -2).contiguous(),
+            key_encoder_projection=key_projection,
+            value_encoder_projection=value_projection,
             key_err=out.key_err,
             value_err=out.value_err,
             eas_indices=out.eas_indices,
@@ -349,6 +501,7 @@ def prepare_kv_cache(
         eas,
         zerorope,
         exp_bits,
+        refit_decoder,
     )
 
 

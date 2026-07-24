@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """RULER evaluation runner for the QuanPC quantized KV-cache algorithm.
 
@@ -39,6 +40,79 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.lmeval import MyModel  # noqa: E402
+
+
+def _make_local_read_hotpotqa(module):
+    """Build a read_hotpotqa bound to `module` that prefers the local JSON file.
+
+    Reuses the module's own `download_json` for the network fallback so behavior
+    matches upstream when HOTPOTQA_JSON is absent.
+    """
+    from functools import cache
+
+    @cache
+    def read_hotpotqa(
+        url="http://curtis.ml.cmu.edu/datasets/hotpot/hotpot_dev_distractor_v1.json",
+    ):
+        local = os.environ.get("HOTPOTQA_JSON")
+        if local and os.path.exists(local):
+            logger.info(f"Loading hotpotqa from local file: {local}")
+            with open(local, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        else:
+            logger.info(f"HOTPOTQA_JSON not set/found; downloading from {url}")
+            data = module.download_json(url)
+
+        total_docs = [f"{t}\n{''.join(p)}" for d in data for t, p in d["context"]]
+        total_docs = sorted(list(set(total_docs)))
+        total_docs_dict = {c: idx for idx, c in enumerate(total_docs)}
+
+        total_qas = []
+        for d in data:
+            total_qas.append(
+                {
+                    "query": d["question"],
+                    "outputs": [d["answer"]],
+                    "context": [
+                        total_docs_dict[f"{t}\n{''.join(p)}"] for t, p in d["context"]
+                    ],
+                }
+            )
+        return total_qas, total_docs
+
+    return read_hotpotqa
+
+
+def patch_ruler_hotpotqa_local():
+    """Redirect RULER hotpotqa loading to a local JSON file.
+
+    Upstream ``lm_eval.tasks.ruler.qa_utils.read_hotpotqa`` hardcodes the CMU URL
+    (http://curtis.ml.cmu.edu/...), which is frequently 502. When ``HOTPOTQA_JSON``
+    points to an existing file, load from disk instead of the network.
+
+    lm_eval resolves ``!function qa_utils.get_hotpotqa`` through
+    ``lm_eval.tasks._yaml_loader._load_module_with_cache``, which re-executes
+    qa_utils.py into a fresh module object at task-load time. Patching the
+    already-imported module is therefore useless (it gets overwritten). Instead
+    we wrap the loader so that whatever qa_utils module object it returns gets our
+    local-file read_hotpotqa injected before the task uses it (reload-proof).
+    """
+    from lm_eval.tasks import _yaml_loader as yl
+
+    if getattr(yl, "_hotpotqa_local_patched", False):
+        return
+
+    orig_loader = yl._load_module_with_cache
+
+    def loader(module_path):
+        module = orig_loader(module_path)
+        norm = str(module_path).replace("\\", "/")
+        if norm.endswith("/ruler/qa_utils.py"):
+            module.read_hotpotqa = _make_local_read_hotpotqa(module)
+        return module
+
+    yl._load_module_with_cache = loader
+    yl._hotpotqa_local_patched = True
 
 
 def seed_everything(seed):
@@ -293,6 +367,12 @@ def run_evaluation(ruler_model, args, output_path):
         model_args=model_args_str,
         apply_chat_template=args.apply_chat_template,
         fewshot_as_multiturn=args.fewshot_as_multiturn,
+        # Override lm_eval's default seeds (0 / 1234) so args.seed applies
+        # consistently across python/numpy/torch and the fewshot sampler.
+        random_seed=args.seed,
+        numpy_random_seed=args.seed,
+        torch_random_seed=args.seed,
+        fewshot_random_seed=args.seed,
     )
     return results
 
@@ -353,6 +433,9 @@ def main():
     """Main function."""
     args = parse_arguments()
     seed_everything(args.seed)
+
+    # Use local hotpotqa file (HOTPOTQA_JSON) instead of the flaky CMU URL.
+    patch_ruler_hotpotqa_local()
 
     logger.info("RULER Evaluation")
     logger.info(f"Model: {args.model}")
