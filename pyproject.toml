@@ -9,8 +9,10 @@ dependencies = [
     "flash-attn==2.7.4.post1",
     "lm-eval==0.4.12",
     "loguru>=0.7.3",
+    "seaborn>=0.13.2",
     "torch==2.9.1",
     "torchaudio==2.9.1",
     "torchvision>=0.24.1",
+    "transformers==4.53.0",
     "wonderwords>=3.0.1",
 ]

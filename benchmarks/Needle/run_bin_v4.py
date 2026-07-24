@@ -40,7 +40,6 @@ class Transformer(ModelProvider):
         zerorope: int = 30,
         cuda_v1_exp8: bool = False,
         refit_decoder: bool = False,
-        refit_solver: str = "lstsq",
     ):
         self.method = method
         self.k_bits = k_bits
@@ -51,7 +50,6 @@ class Transformer(ModelProvider):
         self.zerorope = zerorope
         self.cuda_v1_exp8 = cuda_v1_exp8
         self.refit_decoder = refit_decoder
-        self.refit_solver = refit_solver
 
         from_pretrained_kwargs = {"torch_dtype": "bfloat16"}
 
@@ -128,10 +126,6 @@ class Transformer(ModelProvider):
                     use_cuda_v1_exp8=self.cuda_v1_exp8,
                     refit_decoder=self.refit_decoder,
                 )
-                # refit_solver is only supported by the CUDA-runtime QuantKVCache
-                # (quantpc.quanpc); the torch reference keeps its default solver.
-                if self.cuda_v1_exp8:
-                    cache_kwargs["refit_solver"] = self.refit_solver
                 past_key_values = self._QuantKVCache(**cache_kwargs)
                 generate_kwargs["past_key_values"] = past_key_values
             output = self.model.generate(**generate_kwargs)
@@ -158,8 +152,8 @@ class Transformer(ModelProvider):
             },
             {
                 "role": "user",
-                # "content": f"{retrieval_question} Don't give information outside the document or repeat your findings",
-                "content": f"{retrieval_question} Don't give information outside the document or repeat your findings. The document definitely contains the answer, and I'm 100% sure. So try your best to find it"
+                "content": f"{retrieval_question} Don't give information outside the document or repeat your findings",
+                # "content": f"{retrieval_question} Don't give information outside the document or repeat your findings. The document definitely contains the answer, and I'm 100% sure. So try your best to find it"
             },
         ]
 
@@ -190,7 +184,6 @@ def run_experiment(
     zerorope: int,
     cuda_v1_exp8: bool,
     refit_decoder: bool = False,
-    refit_solver: str = "lstsq",
 ) -> dict[tuple[int, int], str]:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -206,7 +199,6 @@ def run_experiment(
         zerorope=zerorope,
         cuda_v1_exp8=cuda_v1_exp8,
         refit_decoder=refit_decoder,
-        refit_solver=refit_solver,
     )
     tester = LLMNeedleHaystackTester(model)
     results = {}
@@ -280,12 +272,6 @@ def main() -> None:
         action="store_true",
         help="启用解码矩阵重拟合；开启后 CUDA prefill 回退 torch",
     )
-    parser.add_argument(
-        "--refit-solver",
-        default="lstsq",
-        choices=["lstsq", "pinv", "cholesky"],
-        help="refit 最小二乘求解器：lstsq(QR，快且稳，默认)、pinv(SVD，慢) 或 cholesky(正规方程，最快但可能掉精度)；仅 CUDA 后端生效",
-    )
     args = parser.parse_args()
 
     seed_everything(42)
@@ -303,7 +289,6 @@ def main() -> None:
         zerorope=args.zerorope,
         cuda_v1_exp8=args.cuda_v1_exp8,
         refit_decoder=args.refit_decoder,
-        refit_solver=args.refit_solver,
     )
 
 

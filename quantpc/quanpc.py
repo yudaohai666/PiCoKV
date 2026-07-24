@@ -131,16 +131,13 @@ class MixedCacheTensor:
         return (B, H, L, D)
 
 class QuantCache(Cache):
-    def __init__(self, bits, sink_size = 64, local_size = 1024, refit_decoder = False, refit_solver = "lstsq"):
+    def __init__(self, bits, sink_size = 64, local_size = 1024, refit_decoder = False):
         if bits <= 0:
             raise ValueError(f"bits must be positive; got {bits}")
-        if refit_solver not in ("lstsq", "pinv", "cholesky"):
-            raise ValueError(f"refit_solver must be 'lstsq', 'pinv' or 'cholesky'; got {refit_solver!r}")
         self.bits_per_token = bits
         self.sink_size = sink_size
         self.local_size = local_size
         self.refit_decoder = refit_decoder
-        self.refit_solver = refit_solver
         self.reset()
 
     def reset(self):
@@ -164,20 +161,7 @@ class QuantCache(Cache):
         """Fit decode-time reconstruction vectors for fixed binary codes."""
         A = codes.float()
         b = target.float()
-        if self.refit_solver == "pinv":
-            decoder = torch.linalg.pinv(A) @ b
-        elif self.refit_solver == "cholesky":
-            # Normal equations: (AᵀA + eps·I) x = Aᵀb, solved via Cholesky.
-            # Fast but squares the condition number; a small ridge guards against
-            # near-singular Gram matrices.
-            gram = A.transpose(-1, -2) @ A
-            rhs = A.transpose(-1, -2) @ b
-            eps = 1e-6 * gram.diagonal(dim1 = -2, dim2 = -1).mean(dim = -1, keepdim = True).clamp_min(1.0)
-            gram = gram + eps.unsqueeze(-1) * torch.eye(gram.shape[-1], device = gram.device, dtype = gram.dtype)
-            chol = torch.linalg.cholesky(gram)
-            decoder = torch.cholesky_solve(rhs, chol)
-        else:
-            decoder = torch.linalg.lstsq(A, b).solution
+        decoder = torch.linalg.pinv(A) @ b
         return decoder.to(dtype = target.dtype).contiguous()
 
     def _reconstruction_error(self, codes, target, decoder, chunk_size = 8192):
@@ -285,10 +269,10 @@ class QuantCache(Cache):
         self.seq_length[layer_idx] = self.seq_length[layer_idx] + vecs.shape[-2]
 
 class KQuantCache(QuantCache):
-    def __init__(self, bits, sink_size = 64, local_size = 1024, zerorope = 30, refit_decoder = False, refit_solver = "lstsq"):
+    def __init__(self, bits, sink_size = 64, local_size = 1024, zerorope = 30, refit_decoder = False):
         if zerorope < 0:
             raise ValueError(f"zerorope must be non-negative; got {zerorope}")
-        super().__init__(bits = bits, sink_size = sink_size, local_size = local_size, refit_decoder = refit_decoder, refit_solver = refit_solver)
+        super().__init__(bits = bits, sink_size = sink_size, local_size = local_size, refit_decoder = refit_decoder)
         self.zerorope = zerorope
 
     def quantization_target(self, glob):
@@ -307,8 +291,8 @@ class KQuantCache(QuantCache):
         return quantized
 
 class VQuantCache(QuantCache):
-    def __init__(self, bits, sink_size = 64, local_size = 1024, refit_decoder = False, refit_solver = "lstsq"):
-        super().__init__(bits = bits, sink_size = sink_size, local_size = local_size, refit_decoder = refit_decoder, refit_solver = refit_solver)
+    def __init__(self, bits, sink_size = 64, local_size = 1024, refit_decoder = False):
+        super().__init__(bits = bits, sink_size = sink_size, local_size = local_size, refit_decoder = refit_decoder)
 
     def compress(self, glob, layer_idx):
         quantized, projection = self.qpc(glob)
@@ -328,17 +312,15 @@ class QuantKVCache(Cache):
         zerorope = 30,
         use_cuda_v1_exp8 = False,
         refit_decoder = False,
-        refit_solver = "lstsq",
     ):
         projected_query_bits, exp_bits = _validate_attention_quant_bits(projected_query_bits, exp_bits)
-        self.kcache = KQuantCache(k_bits, sink_size, local_size, zerorope, refit_decoder = refit_decoder, refit_solver = refit_solver)
-        self.vcache = VQuantCache(v_bits, sink_size, local_size, refit_decoder = refit_decoder, refit_solver = refit_solver)
+        self.kcache = KQuantCache(k_bits, sink_size, local_size, zerorope, refit_decoder = refit_decoder)
+        self.vcache = VQuantCache(v_bits, sink_size, local_size, refit_decoder = refit_decoder)
         self.projected_query_bits = projected_query_bits
         self.exp_bits = exp_bits
         self.eas = eas
         self.use_cuda_v1_exp8 = use_cuda_v1_exp8
         self.refit_decoder = refit_decoder
-        self.refit_solver = refit_solver
         self.k_dense = {}
         self.v_dense = {}
 
