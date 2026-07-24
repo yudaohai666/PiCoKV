@@ -4,6 +4,23 @@ This workspace contains QuanPC-style quantized KV-cache attention code for
 long-context decoding. The cleaned Python-facing API is intentionally small;
 experiments and legacy model-patching code remain available for reproduction.
 
+## Environment Setup
+
+The project uses [uv](https://docs.astral.sh/uv/) for dependency management
+(`pyproject.toml` + `uv.lock`, Python `>=3.12`). Create the environment with:
+
+```bash
+uv sync
+```
+
+This installs all pinned dependencies (torch 2.9.1, transformers 4.53.0,
+flash-attn, lm-eval, etc.) into `.venv/`. Run commands via `uv run <cmd>` or
+activate the venv with `source .venv/bin/activate`.
+
+CUDA is required for the fast decode/prefill kernels; the CUDA extensions under
+`quantpc/quanpc_cuda_extension/` and `quantpc/quanpc_prefill_cuda_extension/`
+build on first use.
+
 ## Public API
 
 Use `quantpc/quanpc_api.py` for new code. It exposes three operations:
