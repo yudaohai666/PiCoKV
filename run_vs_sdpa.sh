@@ -6,9 +6,13 @@ set -euo pipefail
 
 # ============ 需要你确认/修改的项 ============
 # 模型路径（系统默认的 /data/Llama-3.1-8B-Instruct 不存在，请改成真实路径）
-MODEL="${MODEL:-/data/Llama-3.1-8B-Instruct}"
-# 用哪块 GPU（本机 0-7 共 8 张 H800）。挑一张空闲的，避免被其他任务干扰计时。
-GPU="${GPU:-0}"
+MODEL="${MODEL:-/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct}"
+# 用哪些 GPU（本机 0-7 共 8 张 H800）。
+#   单卡: GPUS=0            —— 计时干净，100k 单张 H800(80GB) 通常够
+#   多卡: GPUS=0,1,2,3      —— 用 device_map=auto 分摊显存加载模型/prefill，避免 OOM
+# 注意：无论几张卡，最终 decode 计时只落在目标层所在的那一张卡上（单卡算子，公平对比）。
+# 目标层(layer1)会落在列表里靠前的卡，所以把最空闲的卡放第一个。
+GPUS="${GPUS:-${GPU:-0}}"
 # ============================================
 
 # ---- benchmark 参数（可用环境变量覆盖）----
@@ -40,13 +44,13 @@ if [ ! -d "$MODEL" ]; then
 fi
 
 echo "==== 运行配置 ===="
-echo "MODEL=$MODEL  GPU=$GPU  LENGTH=$LENGTH  LAYER_IDX=$LAYER_IDX"
+echo "MODEL=$MODEL  GPUS=$GPUS  LENGTH=$LENGTH  LAYER_IDX=$LAYER_IDX"
 echo "K:V bits=$K_BITS:$V_BITS  q_bits=$Q_BITS  exp_bits=$EXP_BITS  prune_mode=$PRUNE_MODE  log_eps=$PRUNE_LOG_EPS"
 echo "warmup=$WARMUP  iters=$ITERS"
 echo "输出 JSON: $OUT_JSON"
 echo "=================="
 
-CUDA_VISIBLE_DEVICES="$GPU" \
+CUDA_VISIBLE_DEVICES="$GPUS" \
 python quantpc/quanpc_cuda_extension/benchmark_llama_layer_vs_sdpa.py \
   --model "$MODEL" \
   --length "$LENGTH" \
