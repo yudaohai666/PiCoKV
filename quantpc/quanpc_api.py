@@ -21,19 +21,10 @@ from quantpc.quanpc import QuantProjection, QuantizedTensor
 from quantpc.quanpc_cuda_extension.quanpc_cuda import load_quanpc_extension, pack_quanpc_key_transposed_torch, pack_quanpc_value_1bit_transposed_torch
 
 try:
-    from quantpc.quanpc_prefill_cuda_extension.quanpc_prefill_cuda import (
-        learn_projection_cuda,
-        prepare_prefill_cuda,
-        quantize_unpacked_cuda,
-        select_eas_cuda,
-        gather_pack_cuda,
-    )
+    from quantpc.quanpc_prefill_cuda_extension.quanpc_prefill_cuda import learn_projection_cuda, prepare_prefill_cuda
 except Exception:  # pragma: no cover - CUDA extension may be unavailable at import time.
     learn_projection_cuda = None
     prepare_prefill_cuda = None
-    quantize_unpacked_cuda = None
-    select_eas_cuda = None
-    gather_pack_cuda = None
 
 SUPPORTED_CODE_BITS = (128, 192, 256, 320, 384, 448, 512)
 SUPPORTED_EXP_BITS = (1, 2, 4, 8)
@@ -147,7 +138,6 @@ def _torch_learn_projection(
     residual = full_states[:, :, glob_start:glob_start + glob_len, :].clone()
     if apply_zerorope:
         _apply_zerorope_(residual, zerorope)
-    code_norm = math.sqrt(float(glob_len))
     projection = torch.empty_like(init_vectors)
     for bit_idx in range(init_vectors.shape[-2]):
         probe = init_vectors[:, :, bit_idx, :]
@@ -155,9 +145,8 @@ def _torch_learn_projection(
         direction = torch.einsum("bhde,bhe->bhd", ata, probe)
         scores = torch.einsum("bhld,bhd->bhl", residual, direction)
         sign = torch.where(scores >= 0, torch.ones_like(scores), -torch.ones_like(scores))
-        basis = sign / code_norm
-        direction = torch.einsum("bhld,bhl->bhd", residual, basis)
-        residual = residual - torch.einsum("bhl,bhd->bhld", basis, direction)
+        direction = torch.einsum("bhld,bhl->bhd", residual, sign) / float(glob_len)
+        residual = residual - torch.einsum("bhl,bhd->bhld", sign, direction)
         projection[:, :, bit_idx, :] = direction
     return projection.contiguous()
 
@@ -177,8 +166,8 @@ def learn_projection(
     """Learn one QuanPC binary projection for a full prefill K or V tensor.
 
     ``full_states`` is ``[B, KVH, L, D]``. The learned projection has shape
-    ``[B, KVH, bits, D]`` and is intentionally not folded by ``sqrt(global_len)``;
-    folding happens during ``prepare_kv_cache`` quantization.
+    ``[B, KVH, bits, D]`` and stores decoder-scale reconstruction directions,
+    i.e. each bit direction is ``residual^T @ sign / global_len``.
     """
     bits = _check_code_bits("bits", bits)
     glob_start, glob_len = _global_span(full_states, sink_size, local_size)
@@ -324,104 +313,6 @@ def _prepare_kv_cache_torch(
     )
 
 
-def _prepare_kv_cache_cuda_refit(
-    full_key: torch.Tensor,
-    full_value: torch.Tensor,
-    key_projection: torch.Tensor,
-    value_projection: torch.Tensor,
-    sink_size: int,
-    local_size: int,
-    eas: float,
-    zerorope: int,
-    exp_bits: int,
-    verbose: bool = False,
-) -> PreparedKVCache:
-    """CUDA prefill path for refit_decoder.
-
-    Heavy steps (quantization, EAS selection, dense gather + packing) run on the
-    CUDA prefill kernels; the two decode-matrix refits are batched least-squares
-    solves that run on the GPU via ``torch.linalg``. Codes are unchanged by refit,
-    so packing is done from the original CUDA codes plus the kept indices.
-    """
-    glob_start, glob_len = _global_span(full_key, sink_size, local_size)
-
-    # Refit targets must match what the quantizer saw: K is zero-roped, V is not.
-    key_glob = full_key[:, :, glob_start:glob_start + glob_len, :].clone()
-    _apply_zerorope_(key_glob, zerorope)
-    value_glob = full_value[:, :, glob_start:glob_start + glob_len, :].contiguous()
-
-    # 1) Quantize on CUDA, keeping the raw int8 codes (unpacked).
-    k_codes, _, _ = quantize_unpacked_cuda(
-        full_key, key_projection, glob_start, glob_len,
-        zerorope=zerorope, apply_zerorope=True, verbose=verbose,
-    )
-    v_codes, _, _ = quantize_unpacked_cuda(
-        full_value, value_projection, glob_start, glob_len,
-        zerorope=0, apply_zerorope=False, verbose=verbose,
-    )
-
-    k_cache = quanpc.KQuantCache(
-        key_projection.shape[-2], sink_size=sink_size, local_size=local_size,
-        zerorope=zerorope, refit_decoder=True,
-    )
-    v_cache = quanpc.VQuantCache(
-        value_projection.shape[-2], sink_size=sink_size, local_size=local_size,
-        refit_decoder=True,
-    )
-
-    # 2) Refit #1: decoder fit over the full global set, only to produce the
-    #    reconstruction error that drives EAS token selection.
-    k_dec1 = k_cache._refit_decoder_from_codes(k_codes, key_glob)
-    v_dec1 = v_cache._refit_decoder_from_codes(v_codes, value_glob)
-    k_err = k_cache._reconstruction_error(k_codes, key_glob, k_dec1)
-    v_err = v_cache._reconstruction_error(v_codes, value_glob, v_dec1)
-
-    # 3) Joint EAS selection on CUDA.
-    eas_size = max(1, int(glob_len * float(eas)))
-    eas_indices, _mask, kept_indices = select_eas_cuda(k_err, v_err, eas_size, verbose=verbose)
-
-    # 4) Refit #2: re-solve the decoder over exactly the retained (quantized)
-    #    tokens; this is the final key/value reconstruction matrix.
-    Ck = key_projection.shape[-2]
-    Cv = value_projection.shape[-2]
-    D = full_key.shape[-1]
-    keep = kept_indices.long()
-    kept_k_codes = torch.gather(k_codes, 2, keep.unsqueeze(-1).expand(-1, -1, -1, Ck))
-    kept_v_codes = torch.gather(v_codes, 2, keep.unsqueeze(-1).expand(-1, -1, -1, Cv))
-    kept_k_target = torch.gather(key_glob, 2, keep.unsqueeze(-1).expand(-1, -1, -1, D))
-    kept_v_target = torch.gather(value_glob, 2, keep.unsqueeze(-1).expand(-1, -1, -1, D))
-    key_proj = k_cache._refit_decoder_from_codes(kept_k_codes, kept_k_target)
-    value_proj = v_cache._refit_decoder_from_codes(kept_v_codes, kept_v_target)
-
-    # 5) Dense gather + packing on CUDA (codes are unaffected by refit).
-    dense_key, dense_value, packed_key, packed_value = gather_pack_cuda(
-        full_key, full_value, k_codes, v_codes,
-        eas_indices, kept_indices, sink_size, local_size, verbose=verbose,
-    )
-
-    return PreparedKVCache(
-        dense_key=dense_key,
-        dense_value=dense_value,
-        packed_key=packed_key,
-        packed_value=packed_value,
-        key_projection=key_proj,
-        value_projection=value_proj,
-        key_projection_t=key_proj.transpose(-1, -2).contiguous(),
-        value_projection_t=value_proj.transpose(-1, -2).contiguous(),
-        key_encoder_projection=key_projection,
-        value_encoder_projection=value_projection,
-        key_err=k_err,
-        value_err=v_err,
-        eas_indices=eas_indices,
-        kept_indices=kept_indices,
-        sink_size=sink_size,
-        local_size=local_size,
-        eas=eas,
-        zerorope=zerorope,
-        exp_bits=exp_bits,
-    )
-
-
 def prepare_kv_cache(
     full_key: torch.Tensor,
     full_value: torch.Tensor,
@@ -444,19 +335,6 @@ def prepare_kv_cache(
     _check_code_bits("key bits", key_projection.shape[-2])
     _check_code_bits("value bits", value_projection.shape[-2])
     exp_bits = _check_exp_bits(exp_bits)
-    if use_cuda and refit_decoder and full_key.is_cuda and quantize_unpacked_cuda is not None:
-        return _prepare_kv_cache_cuda_refit(
-            full_key,
-            full_value,
-            key_projection,
-            value_projection,
-            sink_size,
-            local_size,
-            eas,
-            zerorope,
-            exp_bits,
-            verbose=verbose,
-        )
     if use_cuda and not refit_decoder and full_key.is_cuda and prepare_prefill_cuda is not None:
         out = prepare_prefill_cuda(
             full_key,

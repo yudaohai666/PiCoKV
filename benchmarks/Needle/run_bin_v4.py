@@ -4,27 +4,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Optional
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from needle import LLMNeedleHaystackTester, ModelProvider
+# Make `import quantpc` / `from benchmarks.common import ...` resolvable from any CWD.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-
-# Dense-baseline attn implementations selectable via --method (mirrors
-# benchmarks/Ruler/run_ruler_evaluation.py). Anything not in this set and not
-# "quantpc" is rejected.
-BASELINE_ATTN = {"flash_attention_2", "sdpa", "eager"}
-
-
-def seed_everything(seed: int = 42) -> None:
-    import random
-    random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+from needle import LLMNeedleHaystackTester, ModelProvider  # noqa: E402
+from benchmarks.common import load_quantpc_model, seed_everything  # noqa: E402
 
 
 class Transformer(ModelProvider):
@@ -40,58 +32,31 @@ class Transformer(ModelProvider):
         zerorope: int = 30,
         cuda_v1_exp8: bool = False,
         refit_decoder: bool = False,
+        use_pruning: bool = True,
+        prune_mode: int = 3,
+        log_eps: float = -10.0,
+        group_size: int = 32,
+        residual_length: int = 32,
     ):
         self.method = method
-        self.k_bits = k_bits
-        self.v_bits = v_bits
-        self.projected_query_bits = projected_query_bits
-        self.exp_bits = exp_bits
-        self.eas = eas
-        self.zerorope = zerorope
-        self.cuda_v1_exp8 = cuda_v1_exp8
-        self.refit_decoder = refit_decoder
-
-        from_pretrained_kwargs = {"torch_dtype": "bfloat16"}
-
-        # Method dispatch (mirrors the Ruler runner):
-        #   quantpc            -> apply modify() + inject QuantKVCache per request.
-        #                         Backend (CUDA vs torch reference) via cuda_v1_exp8.
-        #   flash_attention_2  -> dense full-precision baseline (flash-attn-2)
-        #   sdpa / eager       -> dense full-precision baseline (torch attn)
-        # For baselines we DO NOT modify the model and use its default KV cache.
-        if method == "quantpc":
-            if cuda_v1_exp8:
-                from quantpc.quanpc import QuantKVCache, modify
-            else:
-                from quantpc.quanpc_torch import QuantKVCache, modify
-            self._QuantKVCache = QuantKVCache
-            self._modify = modify
-        elif method in BASELINE_ATTN:
-            self._QuantKVCache = None
-            self._modify = None
-            from_pretrained_kwargs["attn_implementation"] = method
-        else:
-            raise ValueError(
-                f"Unknown method '{method}'. Supported: 'quantpc', "
-                f"{sorted(BASELINE_ATTN)}."
-            )
-
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        try:
-            import accelerate  # noqa: F401
-            device_map = "auto"
-        except ImportError:
-            device_map = None
-        self.model = AutoModelForCausalLM.from_pretrained(
+        # Shared loader handles method dispatch + modify() + KV-cache factory.
+        self.model, self.tokenizer, self._make_cache = load_quantpc_model(
             model_name,
-            device_map=device_map,
-            **from_pretrained_kwargs,
+            method=method,
+            k_bits=k_bits,
+            v_bits=v_bits,
+            projected_query_bits=projected_query_bits,
+            exp_bits=exp_bits,
+            eas=eas,
+            zerorope=zerorope,
+            cuda_v1_exp8=cuda_v1_exp8,
+            refit_decoder=refit_decoder,
+            use_pruning=use_pruning,
+            prune_mode=prune_mode,
+            log_eps=log_eps,
+            group_size=group_size,
+            residual_length=residual_length,
         )
-        if device_map is None and torch.cuda.is_available():
-            self.model = self.model.to("cuda")
-        if self._modify is not None:
-            self._modify(self.model)
-        self.model.eval()
 
     def evaluate_model(self, prompt, needle=None) -> str:
         if torch.cuda.is_available():
@@ -114,19 +79,8 @@ class Transformer(ModelProvider):
             )
             # quantpc injects a fresh QuantKVCache per request; baselines use the
             # model's default cache (no past_key_values override).
-            past_key_values = None
-            if self._QuantKVCache is not None:
-                cache_kwargs = dict(
-                    k_bits=self.k_bits,
-                    v_bits=self.v_bits,
-                    projected_query_bits=self.projected_query_bits,
-                    exp_bits=self.exp_bits,
-                    eas=self.eas,
-                    zerorope=self.zerorope,
-                    use_cuda_v1_exp8=self.cuda_v1_exp8,
-                    refit_decoder=self.refit_decoder,
-                )
-                past_key_values = self._QuantKVCache(**cache_kwargs)
+            past_key_values = self._make_cache() if self._make_cache is not None else None
+            if past_key_values is not None:
                 generate_kwargs["past_key_values"] = past_key_values
             output = self.model.generate(**generate_kwargs)
             generated_ids = output.sequences[:, input_ids.shape[1]:]
@@ -184,6 +138,11 @@ def run_experiment(
     zerorope: int,
     cuda_v1_exp8: bool,
     refit_decoder: bool = False,
+    use_pruning: bool = True,
+    prune_mode: int = 3,
+    log_eps: float = -10.0,
+    group_size: int = 32,
+    residual_length: int = 32,
 ) -> dict[tuple[int, int], str]:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -199,6 +158,11 @@ def run_experiment(
         zerorope=zerorope,
         cuda_v1_exp8=cuda_v1_exp8,
         refit_decoder=refit_decoder,
+        use_pruning=use_pruning,
+        prune_mode=prune_mode,
+        log_eps=log_eps,
+        group_size=group_size,
+        residual_length=residual_length,
     )
     tester = LLMNeedleHaystackTester(model)
     results = {}
@@ -235,8 +199,9 @@ def main() -> None:
         "--method",
         default="quantpc",
         help=(
-            "evaluation method: 'quantpc' (quantized KV cache), or a dense "
-            "baseline attn implementation 'flash_attention_2' / 'sdpa' / 'eager'"
+            "evaluation method: 'quantpc' (quantized KV cache), 'kivi' (KIVI "
+            "quantized KV cache), or a dense baseline attn implementation "
+            "'flash_attention_2' / 'sdpa' / 'eager'"
         ),
     )
     parser.add_argument("--lengths", default="64000,80000,100000", help="comma-separated context lengths")
@@ -272,6 +237,27 @@ def main() -> None:
         action="store_true",
         help="启用解码矩阵重拟合；开启后 CUDA prefill 回退 torch",
     )
+    parser.add_argument(
+        "--no-pruning",
+        dest="use_pruning",
+        action="store_false",
+        help="关闭解码时的 global 剪枝（gqa4 CUDA 路径），默认开启",
+    )
+    parser.add_argument("--prune-mode", type=int, default=3, help="解码剪枝模式（CUDA v1_exp8 路径）")
+    parser.add_argument("--log-eps", type=float, default=-10.0, help="解码剪枝 log-epsilon 阈值")
+    parser.set_defaults(use_pruning=True)
+    parser.add_argument(
+        "--group-size",
+        type=int,
+        default=32,
+        help="KIVI per-group quantization size (method='kivi' only)",
+    )
+    parser.add_argument(
+        "--residual-length",
+        type=int,
+        default=32,
+        help="KIVI number of recent fp16 tokens kept unquantized (method='kivi' only)",
+    )
     args = parser.parse_args()
 
     seed_everything(42)
@@ -289,6 +275,11 @@ def main() -> None:
         zerorope=args.zerorope,
         cuda_v1_exp8=args.cuda_v1_exp8,
         refit_decoder=args.refit_decoder,
+        use_pruning=args.use_pruning,
+        prune_mode=args.prune_mode,
+        log_eps=args.log_eps,
+        group_size=args.group_size,
+        residual_length=args.residual_length,
     )
 
 

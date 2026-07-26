@@ -1,0 +1,17 @@
+{
+    "datasets": [
+        "lcc",
+        "qasper",
+        "multifieldqa_en",
+        "narrativeqa",
+        "hotpotqa",
+        "2wikimqa",
+        "musique",
+        "qmsum",
+        "trec",
+        "samsum",
+        "passage_count",
+        "passage_retrieval_en",
+        "multi_news"
+    ]
+}

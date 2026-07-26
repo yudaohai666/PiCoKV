@@ -89,7 +89,6 @@ __global__ void quantize_all_bits_subwarp_d128_codedim_kernel(
     int glob_len,
     int zerorope,
     bool apply_zerorope,
-    float inv_sqrt_len,
     int pack_layout) {
   static_assert(Subwarp == 2 || Subwarp == 4 || Subwarp == 8 || Subwarp == 16,
                 "Subwarp must divide a CUDA warp");
@@ -156,7 +155,7 @@ __global__ void quantize_all_bits_subwarp_d128_codedim_kernel(
         }
       }
     }
-    const float coeff = static_cast<float>(sign) * inv_sqrt_len;
+    const float coeff = static_cast<float>(sign);
     #pragma unroll
     for (int i = 0; i < kValsPerLane; ++i) {
       const int d = sublane + i * Subwarp;
@@ -276,7 +275,7 @@ __global__ void learn_sign_vh_partial_d128_kernel(
     int rows,
     int glob_len,
     int num_tiles,
-    float inv_sqrt_len) {
+    float inv_len) {
   __shared__ float warp_acc[kLearnWarps][kLearnDim];
   const int lane = threadIdx.x & 31;
   const int warp = threadIdx.x >> 5;
@@ -305,7 +304,7 @@ __global__ void learn_sign_vh_partial_d128_kernel(
     if (lane == 0) {
       signs[static_cast<int64_t>(row) * glob_len + token] = static_cast<int8_t>(sign);
     }
-    const float coeff = static_cast<float>(sign) * inv_sqrt_len;
+    const float coeff = static_cast<float>(sign) * inv_len;
     #pragma unroll
     for (int i = 0; i < 4; ++i) {
       local_acc[i] += vals[i] * coeff;
@@ -360,8 +359,7 @@ __global__ void learn_update_residual_from_sign_d128_kernel(
     int glob_len,
     int code_dim,
     int bit_idx,
-    int num_update_tiles,
-    float inv_sqrt_len) {
+    int num_update_tiles) {
   __shared__ float proj_sh[kLearnDim];
   const int lane = threadIdx.x & 31;
   const int warp = threadIdx.x >> 5;
@@ -384,7 +382,7 @@ __global__ void learn_update_residual_from_sign_d128_kernel(
     if (lane == 0) {
       sign = static_cast<float>(signs[static_cast<int64_t>(row) * glob_len + token]);
     }
-    sign = __shfl_sync(0xffffffffu, sign, 0) * inv_sqrt_len;
+    sign = __shfl_sync(0xffffffffu, sign, 0);
     const int64_t residual_base = (static_cast<int64_t>(row) * glob_len + token) * kLearnDim;
     #pragma unroll
     for (int i = 0; i < 4; ++i) {
@@ -425,19 +423,6 @@ __global__ void init_residual_kernel(
 }
 
 template <typename scalar_t>
-__global__ void scale_projection_kernel(
-    const scalar_t *__restrict__ projection,
-    scalar_t *__restrict__ folded_projection,
-    int64_t total,
-    float inv_sqrt_len) {
-  for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-       idx < total;
-       idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
-    folded_projection[idx] = store_scalar<scalar_t>(load_scalar(projection, idx) * inv_sqrt_len);
-  }
-}
-
-template <typename scalar_t>
 __global__ void quantize_bit_kernel(
     scalar_t *__restrict__ residual,
     const scalar_t *__restrict__ projection,
@@ -449,7 +434,6 @@ __global__ void quantize_bit_kernel(
     int code_dim,
     int dim,
     int bit_idx,
-    float inv_sqrt_len,
     int pack_layout,
     int packed_blocks) {
   const int lane = threadIdx.x & 31;
@@ -498,7 +482,7 @@ __global__ void quantize_bit_kernel(
     const int64_t ridx = residual_base + d;
     const float updated =
         load_scalar(residual, ridx) -
-        static_cast<float>(sign) * inv_sqrt_len * load_scalar(projection, proj_base + d);
+        static_cast<float>(sign) * load_scalar(projection, proj_base + d);
     residual[ridx] = store_scalar<scalar_t>(updated);
     if (bit_idx == code_dim - 1) {
       norm2 += updated * updated;
@@ -526,7 +510,6 @@ __global__ void quantize_bits_chunk_kernel(
     int code_dim,
     int dim,
     int bit_start,
-    float inv_sqrt_len,
     int pack_layout,
     int packed_blocks) {
   const int lane = threadIdx.x & 31;
@@ -591,7 +574,7 @@ __global__ void quantize_bits_chunk_kernel(
         }
       }
     }
-    const float coeff = static_cast<float>(sign) * inv_sqrt_len;
+    const float coeff = static_cast<float>(sign);
     #pragma unroll
     for (int i = 0; i < MaxLaneVals; ++i) {
       if (i < nvals) {
@@ -635,7 +618,6 @@ __global__ void quantize_all_bits_kernel(
     int dim,
     int zerorope,
     bool apply_zerorope,
-    float inv_sqrt_len,
     int pack_layout,
     int packed_blocks) {
   const int lane = threadIdx.x & 31;
@@ -704,7 +686,7 @@ __global__ void quantize_all_bits_kernel(
         }
       }
     }
-    const float coeff = static_cast<float>(sign) * inv_sqrt_len;
+    const float coeff = static_cast<float>(sign);
     #pragma unroll
     for (int i = 0; i < MaxLaneVals; ++i) {
       if (i < nvals) {
@@ -749,7 +731,6 @@ __global__ void quantize_all_bits_subwarp_d128_kernel(
     int code_dim,
     int zerorope,
     bool apply_zerorope,
-    float inv_sqrt_len,
     int pack_layout,
     int packed_blocks) {
   static_assert(Subwarp == 2 || Subwarp == 4 || Subwarp == 8 || Subwarp == 16,
@@ -818,7 +799,7 @@ __global__ void quantize_all_bits_subwarp_d128_kernel(
         }
       }
     }
-    const float coeff = static_cast<float>(sign) * inv_sqrt_len;
+    const float coeff = static_cast<float>(sign);
     #pragma unroll
     for (int i = 0; i < kValsPerLane; ++i) {
       const int d = sublane + i * Subwarp;
@@ -1277,7 +1258,6 @@ void launch_quantize_typed(
     const scalar_t *full_ptr,
     const scalar_t *proj_ptr,
     scalar_t *residual_ptr,
-    scalar_t *folded_ptr,
     int8_t *codes_ptr,
     int64_t *packed_ptr,
     float *err_ptr,
@@ -1292,14 +1272,6 @@ void launch_quantize_typed(
     int pack_layout,
     cudaStream_t stream) {
   (void)residual_ptr;
-  const int64_t proj_total = static_cast<int64_t>(rows) * code_dim * dim;
-  const float inv_sqrt_len = rsqrtf(static_cast<float>(glob_len));
-  const int proj_blocks = static_cast<int>(std::min<int64_t>(ceil_div_i64(proj_total, kThreads), 65535));
-  scale_projection_kernel<scalar_t><<<proj_blocks, kThreads, 0, stream>>>(
-      proj_ptr,
-      folded_ptr,
-      proj_total,
-      inv_sqrt_len);
 
   dim3 block(kThreads);
   if (dim == 128) {
@@ -1318,7 +1290,6 @@ void launch_quantize_typed(
           glob_len,
           zerorope,
           apply_zerorope,
-          inv_sqrt_len,
           pack_layout);
     }
     else if (code_dim == 192) {
@@ -1334,7 +1305,6 @@ void launch_quantize_typed(
           glob_len,
           zerorope,
           apply_zerorope,
-          inv_sqrt_len,
           pack_layout);
     }
     else if (code_dim == 256) {
@@ -1350,7 +1320,6 @@ void launch_quantize_typed(
           glob_len,
           zerorope,
           apply_zerorope,
-          inv_sqrt_len,
           pack_layout);
     }
     else if (code_dim == 320) {
@@ -1366,7 +1335,6 @@ void launch_quantize_typed(
           glob_len,
           zerorope,
           apply_zerorope,
-          inv_sqrt_len,
           pack_layout);
     }
     else if (code_dim == 384) {
@@ -1382,7 +1350,6 @@ void launch_quantize_typed(
           glob_len,
           zerorope,
           apply_zerorope,
-          inv_sqrt_len,
           pack_layout);
     }
     else if (code_dim == 448) {
@@ -1398,7 +1365,6 @@ void launch_quantize_typed(
           glob_len,
           zerorope,
           apply_zerorope,
-          inv_sqrt_len,
           pack_layout);
     }
     else if (code_dim == 512) {
@@ -1414,7 +1380,6 @@ void launch_quantize_typed(
           glob_len,
           zerorope,
           apply_zerorope,
-          inv_sqrt_len,
           pack_layout);
     } else {
       quantize_all_bits_subwarp_d128_kernel<scalar_t, 2><<<grid, block, 0, stream>>>(
@@ -1430,7 +1395,6 @@ void launch_quantize_typed(
           code_dim,
           zerorope,
           apply_zerorope,
-          inv_sqrt_len,
           pack_layout,
           code_dim / 64);
     }
@@ -1450,7 +1414,6 @@ void launch_quantize_typed(
         dim,
         zerorope,
         apply_zerorope,
-        inv_sqrt_len,
         pack_layout,
         code_dim / 64);
   } else {
@@ -1469,7 +1432,6 @@ void launch_quantize_typed(
         dim,
         zerorope,
         apply_zerorope,
-        inv_sqrt_len,
         pack_layout,
         code_dim / 64);
   }
@@ -1607,7 +1569,7 @@ void launch_learn_projection_typed(
       zerorope,
       apply_zerorope);
 
-  const float inv_sqrt_len = rsqrtf(static_cast<float>(glob_len));
+  const float inv_len = 1.0f / static_cast<float>(glob_len);
   dim3 partial_grid(static_cast<unsigned int>(num_tiles), rows);
   dim3 vector_block(kLearnWarps * 32);
   dim3 reduce_block(kLearnDim);
@@ -1639,7 +1601,7 @@ void launch_learn_projection_typed(
         rows,
         glob_len,
         num_tiles,
-        inv_sqrt_len);
+        inv_len);
     learn_reduce_partial_projection_d128_kernel<scalar_t><<<rows, reduce_block, 0, stream>>>(
         partial_ptr,
         projection_ptr,
@@ -1655,8 +1617,7 @@ void launch_learn_projection_typed(
         glob_len,
         code_dim,
         bit,
-        num_update_tiles,
-        inv_sqrt_len);
+        num_update_tiles);
   }
 }
 
@@ -1828,7 +1789,6 @@ std::vector<at::Tensor> quanpc_prefill_quantize(
   auto code_options = full_states.options().dtype(at::kChar);
   auto float_options = full_states.options().dtype(at::kFloat);
   auto codes = at::empty({B, H, glob_len, C}, code_options);
-  auto folded_projection = at::empty_like(projection);
   auto err = at::empty({B, H, glob_len}, float_options);
 
   if (full_states.scalar_type() == at::kBFloat16) {
@@ -1836,7 +1796,6 @@ std::vector<at::Tensor> quanpc_prefill_quantize(
         reinterpret_cast<const __nv_bfloat16 *>(full_states.data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16 *>(projection.data_ptr<at::BFloat16>()),
         nullptr,
-        reinterpret_cast<__nv_bfloat16 *>(folded_projection.data_ptr<at::BFloat16>()),
         codes.data_ptr<int8_t>(),
         nullptr,
         err.data_ptr<float>(),
@@ -1855,7 +1814,6 @@ std::vector<at::Tensor> quanpc_prefill_quantize(
         full_states.data_ptr<float>(),
         projection.data_ptr<float>(),
         nullptr,
-        folded_projection.data_ptr<float>(),
         codes.data_ptr<int8_t>(),
         nullptr,
         err.data_ptr<float>(),
@@ -1871,7 +1829,7 @@ std::vector<at::Tensor> quanpc_prefill_quantize(
         stream);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return {codes, folded_projection, err};
+  return {codes, projection, err};
 }
 
 
@@ -1919,7 +1877,6 @@ std::vector<at::Tensor> quanpc_prefill_quantize_pack(
   } else {
     packed = at::empty({B, H, glob_len, blocks_per_code}, long_options);
   }
-  auto folded_projection = at::empty_like(projection);
   auto err = at::empty({B, H, glob_len}, float_options);
   const int pack_layout = pack_key_layout ? 1 : 2;
 
@@ -1928,7 +1885,6 @@ std::vector<at::Tensor> quanpc_prefill_quantize_pack(
         reinterpret_cast<const __nv_bfloat16 *>(full_states.data_ptr<at::BFloat16>()),
         reinterpret_cast<const __nv_bfloat16 *>(projection.data_ptr<at::BFloat16>()),
         nullptr,
-        reinterpret_cast<__nv_bfloat16 *>(folded_projection.data_ptr<at::BFloat16>()),
         nullptr,
         packed.data_ptr<int64_t>(),
         err.data_ptr<float>(),
@@ -1947,7 +1903,6 @@ std::vector<at::Tensor> quanpc_prefill_quantize_pack(
         full_states.data_ptr<float>(),
         projection.data_ptr<float>(),
         nullptr,
-        folded_projection.data_ptr<float>(),
         nullptr,
         packed.data_ptr<int64_t>(),
         err.data_ptr<float>(),
@@ -1963,7 +1918,7 @@ std::vector<at::Tensor> quanpc_prefill_quantize_pack(
         stream);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return {packed, folded_projection, err};
+  return {packed, projection, err};
 }
 
 std::vector<at::Tensor> quanpc_prefill_select_eas(

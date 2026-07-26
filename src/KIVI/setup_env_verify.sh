@@ -20,7 +20,7 @@ uv pip install datasets sentencepiece protobuf accelerate
 
 # CUDA kernel kivi_gemv (--no-build-isolation: build against venv torch)
 cd "$SCRIPT_DIR/quant"
-# uv pip install -e . --no-build-isolation
+uv pip install -e . --no-build-isolation
 
 python -c "import torch, transformers, datasets, kivi_gemv; print('deps OK')"
 
@@ -31,7 +31,7 @@ echo "model: $MODEL_NAME_OR_PATH"
 echo "=========================================="
 
 echo "[1/2] verifying example.py ..."
-# python example.py --model_name_or_path "$MODEL_NAME_OR_PATH"
+python example.py --model_name_or_path "$MODEL_NAME_OR_PATH"
 
 echo "[2/2] verifying mem_spd_test.py (KIVI vs. standard attention) ..."
 python mem_spd_test.py --model_name_or_path "$MODEL_NAME_OR_PATH"

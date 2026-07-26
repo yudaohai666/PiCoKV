@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 from pathlib import Path
 
 import torch
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from quantpc.quanpc_prefill_cuda_extension.quanpc_prefill_cuda import learn_projection_cuda, quantize_unpacked_cuda  # noqa: E402
+from quanpc_prefill_cuda_extension.quanpc_prefill_cuda import learn_projection_cuda, quantize_unpacked_cuda  # noqa: E402
 
 
 def torch_learn_projection(full: torch.Tensor, init: torch.Tensor, sink: int, glob_len: int, zerorope: int, apply_zerorope: bool, power_iters: int = 2):
@@ -22,7 +21,6 @@ def torch_learn_projection(full: torch.Tensor, init: torch.Tensor, sink: int, gl
         half = residual.shape[-1] // 2
         residual[:, :, :, :zerorope] = 0
         residual[:, :, :, half:half + zerorope] = 0
-    code_norm = math.sqrt(float(glob_len))
     proj = torch.empty_like(init)
     for bit in range(init.shape[-2]):
         vh0 = init[:, :, bit, :]
@@ -32,10 +30,9 @@ def torch_learn_projection(full: torch.Tensor, init: torch.Tensor, sink: int, gl
             direction = torch.einsum("bhde,bhe->bhd", ata, direction)
         scores = torch.einsum("bhld,bhd->bhl", residual, direction)
         sign = torch.where(scores >= 0, torch.ones_like(scores), -torch.ones_like(scores))
-        basis = sign / code_norm
-        vh = torch.einsum("bhld,bhl->bhd", residual, basis)
-        residual = residual - torch.einsum("bhl,bhd->bhld", basis, vh)
-        proj[:, :, bit, :] = vh
+        direction = torch.einsum("bhld,bhl->bhd", residual, sign) / float(glob_len)
+        residual = residual - torch.einsum("bhl,bhd->bhld", sign, direction)
+        proj[:, :, bit, :] = direction
     return proj.contiguous()
 
 

@@ -88,7 +88,8 @@ class MixedCacheTensor:
     @property
     def shape(self):
         B, H, _, D = self.dense.shape
-        L = self.dense.shape[-2] + self.glob.codes.shape[-2]
+        glob_len = 0 if self.glob is None else self.glob.codes.shape[-2]
+        L = self.dense.shape[-2] + glob_len
         return (B, H, L, D)
 
 
@@ -111,9 +112,6 @@ class QuantCache(Cache):
     def _binary_codes(scores: torch.Tensor) -> torch.Tensor:
         return torch.where(scores >= 0, torch.ones_like(scores), -torch.ones_like(scores))
 
-    @staticmethod
-    def _code_norm(token_count: int, device, dtype) -> torch.Tensor:
-        return torch.tensor(float(token_count), device=device, dtype=dtype).sqrt()
 
     @staticmethod
     def _refit_decoder_from_codes(codes: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -142,8 +140,6 @@ class QuantCache(Cache):
         B, H, L, D = A.shape
         residual = A
         proj = torch.empty(B, H, code_dim, D, device=A.device, dtype=A.dtype)
-        code_norm = self._code_norm(L, A.device, A.dtype)
-
         for bit_idx in range(code_dim):
             probe = torch.randn(B, H, D, device=A.device, dtype=A.dtype)
             AtA = residual.transpose(-1, -2) @ residual
@@ -151,9 +147,9 @@ class QuantCache(Cache):
             direction = torch.einsum("bhde,bhe->bhd", AtA, direction)
 
             scores = torch.einsum("bhld,bhd->bhl", residual, direction)
-            basis = self._binary_codes(scores) / code_norm
-            direction = torch.einsum("bhld,bhl->bhd", residual, basis)
-            residual = residual - torch.einsum("bhl,bhd->bhld", basis, direction)
+            code = self._binary_codes(scores)
+            direction = torch.einsum("bhld,bhl->bhd", residual, code) / float(L)
+            residual = residual - torch.einsum("bhl,bhd->bhld", code, direction)
             proj[:, :, bit_idx, :] = direction
 
         return proj
@@ -175,17 +171,14 @@ class QuantCache(Cache):
         codes = torch.empty(B, H, L, C, device=A.device, dtype=A.dtype)
         block_proj = torch.empty_like(projection.proj)
         residual = A
-        code_norm = self._code_norm(L, A.device, A.dtype)
 
         for bit_idx in range(C):
             direction = projection.proj[:, :, bit_idx, :]
             scores = torch.einsum("bhld,bhd->bhl", residual, direction)
             code = self._binary_codes(scores)
-            basis = code / code_norm
-            folded_direction = direction / code_norm
-            residual = residual - torch.einsum("bhl,bhd->bhld", basis, direction)
+            residual = residual - torch.einsum("bhl,bhd->bhld", code, direction)
             codes[:, :, :, bit_idx] = code
-            block_proj[:, :, bit_idx, :] = folded_direction
+            block_proj[:, :, bit_idx, :] = direction
 
         if refit_decoder:
             block_proj = self._refit_decoder_from_codes(codes, A)
@@ -222,11 +215,25 @@ class QuantCache(Cache):
 
     def init_prefill(self, vecs: torch.Tensor, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         assert layer_idx not in self.glob
-        self.seq_length[layer_idx] = vecs.shape[-2]
-        sink_vecs = vecs[:, :, :self.sink_size, :].contiguous()
-        local_vecs = vecs[:, :, -self.local_size:, :].contiguous()
-        glob_vecs = vecs[:, :, self.sink_size:-self.local_size, :]
-        self.glob[layer_idx] = self.compress(glob_vecs, layer_idx)
+        total_len = vecs.shape[-2]
+        self.seq_length[layer_idx] = total_len
+        # Clamp sink/local so the three regions (sink | glob | local) stay a
+        # non-overlapping partition on short sequences. Without this,
+        # `vecs[:, :, -local_size:]` starts before `sink_size`, duplicating the
+        # sink tokens into the dense cache and leaving the glob slice empty,
+        # which then divides by zero in projection learning.
+        eff_sink = min(self.sink_size, total_len)
+        eff_local = min(self.local_size, total_len - eff_sink)
+        glob_end = total_len - eff_local
+        sink_vecs = vecs[:, :, :eff_sink, :].contiguous()
+        local_vecs = vecs[:, :, glob_end:, :].contiguous()
+        glob_vecs = vecs[:, :, eff_sink:glob_end, :]
+        if glob_vecs.shape[-2] == 0:
+            # No compressible global region: skip compression (projection
+            # learning would divide by glob_len == 0).
+            self.glob[layer_idx] = None
+        else:
+            self.glob[layer_idx] = self.compress(glob_vecs, layer_idx)
         return sink_vecs, glob_vecs, local_vecs
 
     def append_local(self, vecs: torch.Tensor, layer_idx: int):
@@ -234,7 +241,14 @@ class QuantCache(Cache):
 
 
 class KQuantCache(QuantCache):
-    def __init__(self, bits: int, sink_size: int = 64, local_size: int = 1024, zerorope: int = 30, refit_decoder: bool = False):
+    def __init__(
+        self,
+        bits: int,
+        sink_size: int = 64,
+        local_size: int = 1024,
+        zerorope: int = 30,
+        refit_decoder: bool = False,
+    ):
         if zerorope < 0:
             raise ValueError(f"zerorope must be non-negative; got {zerorope}")
         super().__init__(bits=bits, sink_size=sink_size, local_size=local_size, refit_decoder=refit_decoder)
@@ -353,6 +367,15 @@ class QuantKVCache(Cache):
         if L > 1:
             key_sink, key_glob, key_local = self.kcache.init_prefill(keys, layer_idx)
             val_sink, val_glob, val_local = self.vcache.init_prefill(vals, layer_idx)
+            if self.kcache.glob[layer_idx] is None:
+                # Short sequence (total_len <= sink + local): no compressible
+                # global region, so the whole sequence stays in the dense cache.
+                # sink and local already partition it without overlap.
+                self.k_dense[layer_idx] = torch.cat([key_sink, key_local], dim=-2).contiguous()
+                self.v_dense[layer_idx] = torch.cat([val_sink, val_local], dim=-2).contiguous()
+                self.kcache.projections.pop(layer_idx, None)
+                self.vcache.projections.pop(layer_idx, None)
+                return keys, vals
             eas_indices = self._joint_eas_indices(self.kcache.glob[layer_idx], self.vcache.glob[layer_idx])
 
             eas_keys = self._gather_tokens(key_glob, eas_indices)
@@ -508,7 +531,12 @@ def eager_attention_forward(query_states, key_states, value_states):
     if isinstance(key_states, MixedCacheTensor) or isinstance(value_states, MixedCacheTensor):
         assert isinstance(key_states, MixedCacheTensor)
         assert isinstance(value_states, MixedCacheTensor)
-        return quantized_cache_attention_forward(query_states, key_states, value_states)
+        if key_states.glob is not None:
+            return quantized_cache_attention_forward(query_states, key_states, value_states)
+        # Empty global cache (short sequence): only the dense region exists, so
+        # fall through to the same dense attention path as the non-quantized case.
+        key_states = key_states.dense
+        value_states = value_states.dense
 
     return torch.nn.functional.scaled_dot_product_attention(
         query_states,

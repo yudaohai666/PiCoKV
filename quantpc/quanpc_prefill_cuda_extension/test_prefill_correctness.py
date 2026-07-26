@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 from pathlib import Path
 
 import torch
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from quantpc.quanpc_prefill_cuda_extension.quanpc_prefill_cuda import (  # noqa: E402
+from quanpc_prefill_cuda_extension.quanpc_prefill_cuda import (  # noqa: E402
     gather_pack_from_packed_cuda,
     quantize_pack_cuda,
     quantize_unpacked_cuda,
@@ -56,17 +55,15 @@ def torch_quantize(full: torch.Tensor, proj: torch.Tensor, sink: int, glob_len: 
         half = residual.shape[-1] // 2
         residual[:, :, :, :zerorope] = 0
         residual[:, :, :, half:half + zerorope] = 0
-    code_norm = math.sqrt(float(glob_len))
     codes = torch.empty(*residual.shape[:-1], proj.shape[-2], device=full.device, dtype=torch.int8)
-    folded = proj / code_norm
     for bit in range(proj.shape[-2]):
         direction = proj[:, :, bit, :]
         score = torch.einsum("bhld,bhd->bhl", residual, direction)
         sign = torch.where(score >= 0, torch.ones_like(score), -torch.ones_like(score))
         codes[:, :, :, bit] = sign.to(torch.int8)
-        residual = residual - torch.einsum("bhl,bhd->bhld", sign / code_norm, direction)
+        residual = residual - torch.einsum("bhl,bhd->bhld", sign, direction)
     err = residual.norm(dim=-1, p=2).float()
-    return codes.contiguous(), folded.contiguous(), err.contiguous()
+    return codes.contiguous(), proj.contiguous(), err.contiguous()
 
 
 def joint_eas_ref(k_err: torch.Tensor, v_err: torch.Tensor, eas_size: int):
@@ -113,25 +110,25 @@ def run_case(dtype: torch.dtype):
     k_proj = (torch.randn(b, h, ck, d, device=device, dtype=dtype) * 0.02).contiguous()
     v_proj = (torch.randn(b, h, cv, d, device=device, dtype=dtype) * 0.02).contiguous()
 
-    k_codes, k_folded, k_err = quantize_unpacked_cuda(full_k, k_proj, sink, glob_len, zerorope, True)
-    v_codes, v_folded, v_err = quantize_unpacked_cuda(full_v, v_proj, sink, glob_len, 0, False)
-    pk_all, k_folded_fused, k_err_fused = quantize_pack_cuda(full_k, k_proj, sink, glob_len, zerorope, True, True)
-    pv_token, v_folded_fused, v_err_fused = quantize_pack_cuda(full_v, v_proj, sink, glob_len, 0, False, False)
+    k_codes, k_proj_out, k_err = quantize_unpacked_cuda(full_k, k_proj, sink, glob_len, zerorope, True)
+    v_codes, v_proj_out, v_err = quantize_unpacked_cuda(full_v, v_proj, sink, glob_len, 0, False)
+    pk_all, k_proj_out_fused, k_err_fused = quantize_pack_cuda(full_k, k_proj, sink, glob_len, zerorope, True, True)
+    pv_token, v_proj_out_fused, v_err_fused = quantize_pack_cuda(full_v, v_proj, sink, glob_len, 0, False, False)
 
     assert torch.equal(pk_all, pack_key_ref(k_codes)), "fused packed K does not match unpacked CUDA codes"
     assert torch.equal(pv_token, pack_value_token_ref(v_codes)), "fused token-packed V does not match unpacked CUDA codes"
-    assert torch.allclose(k_folded.float(), k_folded_fused.float(), atol=0, rtol=0)
-    assert torch.allclose(v_folded.float(), v_folded_fused.float(), atol=0, rtol=0)
+    assert torch.allclose(k_proj_out.float(), k_proj_out_fused.float(), atol=0, rtol=0)
+    assert torch.allclose(v_proj_out.float(), v_proj_out_fused.float(), atol=0, rtol=0)
     assert torch.allclose(k_err, k_err_fused, atol=0, rtol=0)
     assert torch.allclose(v_err, v_err_fused, atol=0, rtol=0)
 
     if dtype == torch.float32:
-        k_ref_codes, k_ref_folded, k_ref_err = torch_quantize(full_k, k_proj, sink, glob_len, zerorope, True)
-        v_ref_codes, v_ref_folded, v_ref_err = torch_quantize(full_v, v_proj, sink, glob_len, 0, False)
+        k_ref_codes, k_ref_proj_out, k_ref_err = torch_quantize(full_k, k_proj, sink, glob_len, zerorope, True)
+        v_ref_codes, v_ref_proj_out, v_ref_err = torch_quantize(full_v, v_proj, sink, glob_len, 0, False)
         assert torch.equal(k_codes, k_ref_codes), "CUDA K codes differ from torch fp32 reference"
         assert torch.equal(v_codes, v_ref_codes), "CUDA V codes differ from torch fp32 reference"
-        assert torch.allclose(k_folded, k_ref_folded, atol=1e-6, rtol=1e-6)
-        assert torch.allclose(v_folded, v_ref_folded, atol=1e-6, rtol=1e-6)
+        assert torch.allclose(k_proj_out, k_ref_proj_out, atol=1e-6, rtol=1e-6)
+        assert torch.allclose(v_proj_out, v_ref_proj_out, atol=1e-6, rtol=1e-6)
         assert torch.allclose(k_err, k_ref_err, atol=1e-5, rtol=1e-5)
         assert torch.allclose(v_err, v_ref_err, atol=1e-5, rtol=1e-5)
 

@@ -24,22 +24,24 @@ Usage:
 import argparse
 import json
 import os
-import random
 import sys
 from pathlib import Path
 
-import numpy as np
 import torch
 from lm_eval import evaluator
 from loguru import logger
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# Make `import src.lmeval` / `import quantpc` resolvable from any CWD.
+# Make `import src.lmeval` / `import quantpc` / `benchmarks.common` resolvable from any CWD.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.lmeval import MyModel  # noqa: E402
+from benchmarks.common import (  # noqa: E402
+    load_quantpc_model,
+    output_tag,
+    seed_everything,
+)
 
 
 def _make_local_read_hotpotqa(module):
@@ -115,17 +117,6 @@ def patch_ruler_hotpotqa_local():
     yl._hotpotqa_local_patched = True
 
 
-def seed_everything(seed):
-    """Set random seed for reproducibility."""
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
-    torch.cuda.manual_seed_all(seed)
-
-
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -144,7 +135,7 @@ def parse_arguments():
     #   quantpc            -> my quantized KV-cache method (modify + QuantKVCache)
     #   flash_attention_2  -> dense full-precision baseline (flash-attn-2)
     #   sdpa               -> dense full-precision baseline (torch SDPA)
-    #   (more methods to be added in load_model_and_tokenizer)
+    #   (dispatch handled by benchmarks.common.load_quantpc_model)
     parser.add_argument(
         "--method",
         type=str,
@@ -182,6 +173,20 @@ def parse_arguments():
             "torch-only reference backend (quantpc.quanpc_torch) is used"
         ),
     )
+    parser.add_argument(
+        "--refit-decoder",
+        action="store_true",
+        help="enable decode-matrix refit (CUDA prefill falls back to torch)",
+    )
+    parser.add_argument(
+        "--no-pruning",
+        dest="use_pruning",
+        action="store_false",
+        help="disable decode-time global pruning (gqa4 CUDA path); pruning is on by default",
+    )
+    parser.add_argument("--prune-mode", type=int, default=3, help="decode pruning mode (CUDA v1_exp8 path)")
+    parser.add_argument("--log-eps", type=float, default=-10.0, help="decode pruning log-epsilon threshold")
+    parser.set_defaults(use_pruning=True)
 
     # Task configuration
     parser.add_argument(
@@ -223,90 +228,13 @@ def parse_arguments():
     return parser.parse_args()
 
 
-# Dense-baseline attn implementations selectable via --method.
-BASELINE_ATTN = {"flash_attention_2", "sdpa", "eager"}
-
-
-def load_model_and_tokenizer(args):
-    """Load the HF model + tokenizer for the requested --method.
-
-    - quantpc: apply modify(model) and (later) inject a QuantKVCache, exactly
-      like benchmarks/Needle/run_bin_v4.py. Backend (CUDA vs torch reference)
-      is selected by --cuda-v1-exp8.
-    - flash_attention_2 / sdpa: dense full-precision baseline. No modify, no
-      QuantKVCache injection (model uses its default cache).
-    """
-    logger.info(f"Loading model: {args.model} (method={args.method})")
-
-    from_pretrained_kwargs = {"torch_dtype": "bfloat16"}
-    QuantKVCache = None
-    modify = None
-
-    if args.method == "quantpc":
-        if args.cuda_v1_exp8:
-            from quantpc.quanpc import QuantKVCache, modify
-        else:
-            from quantpc.quanpc_torch import QuantKVCache, modify
-    elif args.method in BASELINE_ATTN:
-        from_pretrained_kwargs["attn_implementation"] = args.method
-    else:
-        raise ValueError(
-            f"Unknown method '{args.method}'. Supported: 'quantpc', "
-            f"{sorted(BASELINE_ATTN)}. Add new methods in load_model_and_tokenizer."
-        )
-
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
-
-    try:
-        import accelerate  # noqa: F401
-        device_map = "auto"
-    except ImportError:
-        device_map = None
-
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
-        device_map=device_map,
-        **from_pretrained_kwargs,
-    )
-    if device_map is None and torch.cuda.is_available():
-        model = model.to("cuda")
-
-    if modify is not None:
-        modify(model)
-        logger.info("QuanPC method applied (modify)")
-    else:
-        logger.info(f"Baseline (dense), attn_implementation={args.method}")
-    model.eval()
-
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    return model, tokenizer, QuantKVCache
-
-
-def make_kv_cache_factory(QuantKVCache, args):
-    """Return a zero-arg callable that builds a fresh QuantKVCache per request."""
-    def factory():
-        return QuantKVCache(
-            k_bits=args.k_bits,
-            v_bits=args.v_bits,
-            projected_query_bits=args.projected_query_bits,
-            exp_bits=args.exp_bits,
-            eas=args.eas,
-            zerorope=args.zerorope,
-            use_cuda_v1_exp8=args.cuda_v1_exp8,
-        )
-    return factory
-
-
 def get_output_path(args):
     """Auto-generate an output path keyed by model name and method."""
     if args.output_path:
         return args.output_path
     model_key = Path(args.model).name
-    if args.method == "quantpc":
-        return f"results/ruler/{model_key}_quantpc_k{args.k_bits}_v{args.v_bits}/"
-    return f"results/ruler/{model_key}_{args.method}/"
+    tag = output_tag(args.method, args.k_bits, args.v_bits, args.refit_decoder)
+    return f"results/ruler/{model_key}_{tag}/"
 
 
 def create_ruler_model(model, tokenizer, kv_cache_factory, args):
@@ -380,7 +308,7 @@ def run_evaluation(ruler_model, args, output_path):
 def save_results(results, args, output_path):
     """Save evaluation results to files."""
     model_key = Path(args.model).name
-    tag = f"quantpc_k{args.k_bits}_v{args.v_bits}" if args.method == "quantpc" else args.method
+    tag = output_tag(args.method, args.k_bits, args.v_bits, args.refit_decoder)
 
     results_lite = {
         "results": results.get("results", {}),
@@ -451,18 +379,30 @@ def main():
         logger.info(f"Sample limit: {args.limit}")
 
     try:
-        model, tokenizer, QuantKVCache = load_model_and_tokenizer(args)
+        model, tokenizer, kv_cache_factory = load_quantpc_model(
+            args.model,
+            method=args.method,
+            k_bits=args.k_bits,
+            v_bits=args.v_bits,
+            projected_query_bits=args.projected_query_bits,
+            exp_bits=args.exp_bits,
+            eas=args.eas,
+            zerorope=args.zerorope,
+            cuda_v1_exp8=args.cuda_v1_exp8,
+            refit_decoder=args.refit_decoder,
+            use_pruning=args.use_pruning,
+            prune_mode=args.prune_mode,
+            log_eps=args.log_eps,
+        )
+        # RULER's lm_eval harness pads batches; ensure a pad token exists.
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
 
         output_path = get_output_path(args)
         os.makedirs(output_path, exist_ok=True)
         logger.info(f"Output path: {output_path}")
 
-        # Baseline methods (QuantKVCache is None) use the model's default cache.
-        kv_cache_factory = (
-            make_kv_cache_factory(QuantKVCache, args)
-            if QuantKVCache is not None
-            else None
-        )
+        # Baseline methods yield kv_cache_factory=None -> model's default cache.
         ruler_model = create_ruler_model(model, tokenizer, kv_cache_factory, args)
 
         results = run_evaluation(ruler_model, args, output_path)

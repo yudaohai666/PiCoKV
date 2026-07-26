@@ -718,7 +718,7 @@ class LlamaModel_KIVI(LlamaPreTrainedModel):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
 
-        if getattr(self.config, "_flash_attn_2_enabled", False):
+        if getattr(self.config, "use_flash", False) or getattr(self.config, "_flash_attn_2_enabled", False):
             # 2d mask is passed through the layers
             attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask) else None
         else:
@@ -836,6 +836,7 @@ class LlamaForCausalLM_KIVI(LlamaPreTrainedModel, GenerationMixin):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        logits_to_keep: int = 0,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
         Args:
@@ -882,12 +883,15 @@ class LlamaForCausalLM_KIVI(LlamaPreTrainedModel, GenerationMixin):
         )
 
         hidden_states = outputs[0]
+        # Only run lm_head over the kept positions (HF `logits_to_keep` semantics):
+        # logits_to_keep=1 during generation avoids materializing full-sequence fp32 logits.
+        slice_indices = slice(-logits_to_keep, None) if logits_to_keep else slice(None)
         if self.config.pretraining_tp > 1:
             lm_head_slices = self.lm_head.weight.split(self.vocab_size // self.config.pretraining_tp, dim=0)
-            logits = [F.linear(hidden_states, lm_head_slices[i]) for i in range(self.config.pretraining_tp)]
+            logits = [F.linear(hidden_states[:, slice_indices, :], lm_head_slices[i]) for i in range(self.config.pretraining_tp)]
             logits = torch.cat(logits, dim=-1)
         else:
-            logits = self.lm_head(hidden_states)
+            logits = self.lm_head(hidden_states[:, slice_indices, :])
         logits = logits.float()
 
         loss = None
@@ -953,6 +957,7 @@ class LlamaForCausalLM_KIVI(LlamaPreTrainedModel, GenerationMixin):
                 "past_key_values": past_key_values,
                 "use_cache": kwargs.get("use_cache"),
                 "attention_mask": attention_mask,
+                "logits_to_keep": 1,
             }
         )
         return model_inputs

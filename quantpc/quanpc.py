@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Optional, Tuple
 import math
+import warnings
 
 import torch
 from transformers.cache_utils import Cache
@@ -115,6 +116,9 @@ class MixedCacheTensor:
     use_cuda_v1_exp8: bool = False
     projected_query_bits: int = 8
     exp_bits: int = 4
+    use_pruning: bool = True     # decode-time global block/token pruning (gqa4 CUDA only)
+    prune_mode: int = 3
+    log_eps: float = -10.0
 
     @property
     def device(self):
@@ -127,7 +131,8 @@ class MixedCacheTensor:
     @property
     def shape(self):
         B, H, _, D = self.dense.shape
-        L = self.dense.shape[-2] + self.glob.codes.shape[-2]
+        glob_len = 0 if self.glob is None else self.glob.codes.shape[-2]
+        L = self.dense.shape[-2] + glob_len
         return (B, H, L, D)
 
 class QuantCache(Cache):
@@ -154,14 +159,10 @@ class QuantCache(Cache):
             -torch.ones_like(scores),
         )
 
-    def _code_norm(self, token_count, device, dtype):
-        return torch.tensor(float(token_count), device = device, dtype = dtype).sqrt()
 
     def _refit_decoder_from_codes(self, codes, target):
         """Fit decode-time reconstruction vectors for fixed binary codes."""
-        A = codes.float()
-        b = target.float()
-        decoder = torch.linalg.pinv(A) @ b
+        decoder = torch.linalg.pinv(codes.float()) @ target.float()
         return decoder.to(dtype = target.dtype).contiguous()
 
     def _reconstruction_error(self, codes, target, decoder, chunk_size = 8192):
@@ -179,16 +180,15 @@ class QuantCache(Cache):
         B, H, L, D = A.shape
         residual = A
         proj = torch.empty(B, H, code_dim, D, device = A.device, dtype = A.dtype)
-        code_norm = self._code_norm(L, A.device, A.dtype)
         for bit_idx in range(code_dim):
             Vh = torch.randn(B, H, D, device = A.device, dtype = A.dtype)
             AtA = residual.transpose(-1, -2) @ residual
             spectral_direction = torch.einsum("bhde,bhe->bhd", AtA, Vh)
             spectral_direction = torch.einsum("bhde,bhe->bhd", AtA, spectral_direction)
             scores = torch.einsum("bhld,bhd->bhl", residual, spectral_direction)
-            basis = self._binary_codes(scores) / code_norm
-            Vh = torch.einsum("bhld,bhl->bhd", residual, basis)
-            residual = residual - torch.einsum("bhl,bhd->bhld", basis, Vh)
+            code = self._binary_codes(scores)
+            Vh = torch.einsum("bhld,bhl->bhd", residual, code) / float(L)
+            residual = residual - torch.einsum("bhl,bhd->bhld", code, Vh)
             proj[:, :, bit_idx, :] = Vh
         return proj
 
@@ -207,16 +207,13 @@ class QuantCache(Cache):
         codes = torch.empty(B, H, L, C, device = A.device, dtype = A.dtype)
         block_proj = torch.empty_like(projection.proj)
         residual = A
-        code_norm = self._code_norm(L, A.device, A.dtype)
         for bit_idx in range(C):
             direction = projection.proj[:, :, bit_idx, :]
             scores = torch.einsum("bhld,bhd->bhl", residual, direction)
             Uq = self._binary_codes(scores)
-            basis = Uq / code_norm
-            folded_direction = direction / code_norm
-            residual = residual - torch.einsum("bhl,bhd->bhld", basis, direction)
+            residual = residual - torch.einsum("bhl,bhd->bhld", Uq, direction)
             codes[:, :, :, bit_idx] = Uq
-            block_proj[:, :, bit_idx, :] = folded_direction
+            block_proj[:, :, bit_idx, :] = direction
         if refit_decoder:
             block_proj = self._refit_decoder_from_codes(codes, A)
             token_err = self._reconstruction_error(codes, A, block_proj)
@@ -256,11 +253,26 @@ class QuantCache(Cache):
         assert layer_idx not in self.sink
         assert layer_idx not in self.glob
         assert layer_idx not in self.locl
-        self.seq_length[layer_idx] = vecs.shape[-2]
-        self.sink[layer_idx] = vecs[:, :, :self.sink_size, :].contiguous()
-        self.locl[layer_idx] = vecs[:, :, (- self.local_size):, :].contiguous()
-        glob_vecs = vecs[:, :, self.sink_size:(- self.local_size), :]
-        self.glob[layer_idx] = self.compress(glob_vecs, layer_idx)
+        total_len = vecs.shape[-2]
+        self.seq_length[layer_idx] = total_len
+        # Clamp sink/local so the three regions (sink | glob | local) form a
+        # non-overlapping partition even when the sequence is short. Without
+        # this, `vecs[:, :, -local_size:]` starts before `sink_size` and the
+        # sink tokens get duplicated into the dense cache; the glob slice also
+        # becomes empty, which later divides by zero in projection learning and
+        # launches CUDA kernels with gridDim.x == 0.
+        eff_sink = min(self.sink_size, total_len)
+        eff_local = min(self.local_size, total_len - eff_sink)
+        glob_end = total_len - eff_local
+        self.sink[layer_idx] = vecs[:, :, :eff_sink, :].contiguous()
+        self.locl[layer_idx] = vecs[:, :, glob_end:, :].contiguous()
+        glob_vecs = vecs[:, :, eff_sink:glob_end, :]
+        if glob_vecs.shape[-2] == 0:
+            # No compressible global region: leave glob empty and skip
+            # compression (projection learning would divide by glob_len == 0).
+            self.glob[layer_idx] = None
+        else:
+            self.glob[layer_idx] = self.compress(glob_vecs, layer_idx)
         return glob_vecs
 
     def append_local(self, vecs, layer_idx):
@@ -289,7 +301,7 @@ class KQuantCache(QuantCache):
         quantized, projection = self.qpc(glob)
         self.projections[layer_idx] = projection
         return quantized
-
+        
 class VQuantCache(QuantCache):
     def __init__(self, bits, sink_size = 64, local_size = 1024, refit_decoder = False):
         super().__init__(bits = bits, sink_size = sink_size, local_size = local_size, refit_decoder = refit_decoder)
@@ -312,6 +324,9 @@ class QuantKVCache(Cache):
         zerorope = 30,
         use_cuda_v1_exp8 = False,
         refit_decoder = False,
+        use_pruning = True,
+        prune_mode = 3,
+        log_eps = -10.0,
     ):
         projected_query_bits, exp_bits = _validate_attention_quant_bits(projected_query_bits, exp_bits)
         self.kcache = KQuantCache(k_bits, sink_size, local_size, zerorope, refit_decoder = refit_decoder)
@@ -321,6 +336,9 @@ class QuantKVCache(Cache):
         self.eas = eas
         self.use_cuda_v1_exp8 = use_cuda_v1_exp8
         self.refit_decoder = refit_decoder
+        self.use_pruning = use_pruning
+        self.prune_mode = prune_mode
+        self.log_eps = log_eps
         self.k_dense = {}
         self.v_dense = {}
 
@@ -357,8 +375,7 @@ class QuantKVCache(Cache):
         err = block.err[mask].reshape(B, H, L - keep_indices.shape[-1]).contiguous()
         return QuantizedTensor(codes, block.proj, err, block.packed_cuda, block.proj_t)
 
-    @staticmethod
-    def _drop_token_states(states, keep_indices):
+    def _drop_token_states(self, states, keep_indices):
         L = states.shape[-2]
         mask = torch.ones(states.shape[:3], device = states.device, dtype = torch.bool)
         mask.scatter_(-1, keep_indices, False)
@@ -373,6 +390,9 @@ class QuantKVCache(Cache):
                 self.use_cuda_v1_exp8,
                 self.projected_query_bits,
                 self.exp_bits,
+                self.use_pruning,
+                self.prune_mode,
+                self.log_eps,
             ),
             MixedCacheTensor(
                 self.v_dense[layer_idx],
@@ -380,6 +400,9 @@ class QuantKVCache(Cache):
                 self.use_cuda_v1_exp8,
                 self.projected_query_bits,
                 self.exp_bits,
+                self.use_pruning,
+                self.prune_mode,
+                self.log_eps,
             ),
         )
 
@@ -424,6 +447,25 @@ class QuantKVCache(Cache):
         if L > 1:
             key_glob = self.kcache.init_prefill(keys, layer_idx)
             val_glob = self.vcache.init_prefill(vals, layer_idx)
+            if self.kcache.glob[layer_idx] is None:
+                # Short sequence (total_len <= sink + local): there is no
+                # compressible global region, so the whole sequence stays in the
+                # full-precision dense cache. sink and local already partition
+                # the sequence without overlap, so concatenating them reproduces
+                # the original token order exactly once.
+                self.k_dense[layer_idx] = torch.cat(
+                    [self.kcache.sink[layer_idx], self.kcache.locl[layer_idx]], dim = -2
+                ).contiguous()
+                self.v_dense[layer_idx] = torch.cat(
+                    [self.vcache.sink[layer_idx], self.vcache.locl[layer_idx]], dim = -2
+                ).contiguous()
+                self.kcache.sink[layer_idx] = None
+                self.kcache.locl[layer_idx] = None
+                self.vcache.sink[layer_idx] = None
+                self.vcache.locl[layer_idx] = None
+                self.kcache.projections.pop(layer_idx, None)
+                self.vcache.projections.pop(layer_idx, None)
+                return keys, vals
             eas_indices = self._joint_eas_indices(self.kcache.glob[layer_idx], self.vcache.glob[layer_idx])
 
             eas_keys = self._gather_tokens(key_glob, eas_indices)
@@ -478,6 +520,9 @@ def _repeat_mixed_cache(cache, target_heads):
         cache.use_cuda_v1_exp8,
         cache.projected_query_bits,
         cache.exp_bits,
+        cache.use_pruning,
+        cache.prune_mode,
+        cache.log_eps,
     )
 
 
@@ -676,6 +721,21 @@ def _dense_flash_and_project_workspace(query_states, key_states, value_states, s
     return dense_output, dense_lse_for_global, projected_query
 
 
+_PRUNING_WARNED_GQA: set = set()
+
+
+def _warn_pruning_unavailable(gqa):
+    if gqa in _PRUNING_WARNED_GQA:
+        return
+    _PRUNING_WARNED_GQA.add(gqa)
+    warnings.warn(
+        f"QuanPC decode pruning requested but unavailable for gqa={gqa}; the pruned "
+        f"CUDA kernel only supports gqa==4. Falling back to the non-pruned decode path.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+
+
 def _run_cuda_decode_tail(
     ext,
     projected_query,
@@ -687,6 +747,32 @@ def _run_cuda_decode_tail(
     scale,
 ):
     if hasattr(ext, "quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic_fn"):
+        gqa = dense_output.shape[1] // key_states.dense.shape[1]
+        use_pruning = getattr(key_states, "use_pruning", False)
+        has_pruned = hasattr(ext, "quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned_fn")
+        if use_pruning and gqa == 4 and has_pruned:
+            ext.quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned_fn(
+                projected_query,
+                workspace.packed_query,
+                key_states.glob.packed_cuda,
+                value_states.glob.packed_cuda,
+                workspace.query_scale,
+                dense_lse_for_global,
+                dense_output.contiguous(),
+                workspace.glob_code_output,
+                workspace.glob_den,
+                value_states.glob.proj.contiguous(),
+                workspace.attn_output,
+                int(key_states.exp_bits),
+                256,
+                1,
+                float(scale),
+                int(getattr(key_states, "prune_mode", 3)),
+                float(getattr(key_states, "log_eps", -10.0)),
+            )
+            return workspace.attn_output
+        if use_pruning and gqa != 4:
+            _warn_pruning_unavailable(gqa)
         ext.quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic_fn(
             projected_query,
             workspace.packed_query,
@@ -946,7 +1032,12 @@ def eager_attention_forward(query_states, key_states, value_states):
     if isinstance(key_states, MixedCacheTensor) or isinstance(value_states, MixedCacheTensor):
         assert isinstance(key_states, MixedCacheTensor)
         assert isinstance(value_states, MixedCacheTensor)
-        return quantized_cache_attention_forward(query_states, key_states, value_states)
+        if key_states.glob is not None:
+            return quantized_cache_attention_forward(query_states, key_states, value_states)
+        # Empty global cache (short sequence): only the dense region exists, so
+        # fall through to the same dense attention path as the non-quantized case.
+        key_states = key_states.dense
+        value_states = value_states.dense
 
     attn_output = torch.nn.functional.scaled_dot_product_attention(
         query_states,
