@@ -22,6 +22,35 @@ void quanpc_fused_output_projection(
   at::Tensor attn_output
 );
 
+// Fused RMSNorm over the last dimension. input: contiguous [..., N];
+// weight: [N]; output: same shape/dtype as input. Matches HF RMSNorm dtype flow.
+void quanpc_rmsnorm(
+  at::Tensor input,
+  at::Tensor weight,
+  at::Tensor output,
+  double eps
+);
+
+// Two-pass non-atomic split-K variant of the fused output projection.
+void quanpc_fused_output_projection_splitk(
+  at::Tensor dense_output,
+  at::Tensor glob_code_output,
+  at::Tensor glob_den,
+  at::Tensor value_proj,
+  at::Tensor attn_output,
+  int64_t k_splits
+);
+
+// Single-launch atomic ("last block finalizes") split-K fused output projection.
+void quanpc_fused_output_projection_atomic(
+  at::Tensor dense_output,
+  at::Tensor glob_code_output,
+  at::Tensor glob_den,
+  at::Tensor value_proj,
+  at::Tensor attn_output,
+  int64_t k_splits
+);
+
 
 // GQA-specialized L-tiled packed QuanPC global attention for QH/KVH == 4.
 void quanpc_global_code_output_packed_value_tiled_gqa4(

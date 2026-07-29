@@ -97,6 +97,8 @@ def load_quantpc_model(
     *,
     k_bits: int = 128,
     v_bits: int = 256,
+    sink_size: int = 64,
+    local_size: int = 1024,
     projected_query_bits: int = 8,
     exp_bits: int = 4,
     eas: float = 0.01,
@@ -184,6 +186,8 @@ def load_quantpc_model(
             return QuantKVCache(
                 k_bits=k_bits,
                 v_bits=v_bits,
+                sink_size=sink_size,
+                local_size=local_size,
                 projected_query_bits=projected_query_bits,
                 exp_bits=exp_bits,
                 eas=eas,

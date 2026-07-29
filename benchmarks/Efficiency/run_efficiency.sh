@@ -20,11 +20,11 @@ RESULT_DIR="results/efficiency"
 mkdir -p "${RESULT_DIR}"
 
 # prompt 长度（与 NIAH 保持同量级，便于横比）
-LENGTHS="16384,32768,65536,131072"
+LENGTHS="131072"
 DECODE_TOKENS=8
 BATCH_SIZE=1
 WARMUP=2
-REPEATS=1
+REPEATS=3
 
 run_one() {
   # $1=method  $2=tag  剩余参数透传给 run_efficiency.py
@@ -55,8 +55,8 @@ run_one quantpc quantpc_k320_v320 \
   --k-bits 320 --v-bits 320 --cuda-v1-exp8
 
 # ── kivi（K/V 各 2bit）────────────────────────────────────
-run_one kivi kivi_k2_v2 \
-  --k-bits 2 --v-bits 2 --group-size 32 --residual-length 128
+# run_one kivi kivi_k2_v2 \
+#   --k-bits 2 --v-bits 2 --group-size 32 --residual-length 128
 
 # ── 聚合对比表 ────────────────────────────────────────────
 echo "========================================"

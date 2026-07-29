@@ -59,12 +59,12 @@ def main() -> None:
     p.add_argument("--record-shapes", action="store_true", help="record op input shapes (adds overhead)")
     p.add_argument("--trace", default=None, help="export a chrome trace to this path")
     # KV-cache config (same semantics as run_efficiency.py).
-    p.add_argument("--k-bits", type=int, default=128)
+    p.add_argument("--k-bits", type=int, default=256)
     p.add_argument("--v-bits", type=int, default=256)
     p.add_argument("--projected-query-bits", type=int, default=8)
     p.add_argument("--exp-bits", type=int, default=4)
     p.add_argument("--eas", type=float, default=0.01)
-    p.add_argument("--zerorope", type=int, default=30)
+    p.add_argument("--zerorope", type=int, default=20)
     p.add_argument("--cuda-v1-exp8", action="store_true")
     p.add_argument("--refit-decoder", action="store_true")
     p.add_argument("--no-pruning", dest="use_pruning", action="store_false",
@@ -74,6 +74,8 @@ def main() -> None:
     p.set_defaults(use_pruning=True)
     p.add_argument("--group-size", type=int, default=32)
     p.add_argument("--residual-length", type=int, default=32)
+    p.add_argument("--sort", default=None, choices=["cpu", "cuda"],
+                   help="override sort key: cpu=self_cpu_time_total, cuda=self_cuda_time_total")
     args = p.parse_args()
 
     seed_everything(42)
@@ -123,6 +125,10 @@ def main() -> None:
         _sync()
 
     sort_key = "self_cuda_time_total" if torch.cuda.is_available() else "self_cpu_time_total"
+    if args.sort == "cpu":
+        sort_key = "self_cpu_time_total"
+    elif args.sort == "cuda":
+        sort_key = "self_cuda_time_total"
     print(f"\n[{args.method}] decode profile  (length={args.length}, active={args.active} steps)\n")
     print(prof.key_averages(group_by_input_shape=args.group_by_shape).table(
         sort_by=sort_key, row_limit=args.rows))

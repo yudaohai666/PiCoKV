@@ -12,11 +12,11 @@ MODEL="${MODEL:-/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/L
 #   多卡: GPUS=0,1,2,3      —— 用 device_map=auto 分摊显存加载模型/prefill，避免 OOM
 # 注意：无论几张卡，最终 decode 计时只落在目标层所在的那一张卡上（单卡算子，公平对比）。
 # 目标层(layer1)会落在列表里靠前的卡，所以把最空闲的卡放第一个。
-GPUS="${GPUS:-${GPU:-0}}"
+GPUS="${GPUS:-${GPU:-0,1,2,3,4,5,6,7}}"
 # ============================================
 
 # ---- benchmark 参数（可用环境变量覆盖）----
-LENGTH="${LENGTH:-100000}"        # 上下文长度
+LENGTH="${LENGTH:-128000}"        # 上下文长度
 LAYER_IDX="${LAYER_IDX:-1}"       # 0-based 层号，1=第二层（与结果文件一致）
 K_BITS="${K_BITS:-256}"
 V_BITS="${V_BITS:-256}"

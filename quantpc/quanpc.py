@@ -20,6 +20,19 @@ from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers.models.llama.modeling_llama import LlamaAttention, LlamaMLP, apply_rotary_pos_emb
 from transformers.processing_utils import Unpack
 
+# Qwen3 shares Llama's GQA topology (QH=32, KVH=8, group=4, D=128) and RoPE math,
+# but adds per-head QK-Norm (q_norm/k_norm) before RoPE. Patch both when available.
+try:
+    from transformers.models.qwen3.modeling_qwen3 import Qwen3Attention, Qwen3MLP
+    _QWEN3_ATTENTION = (Qwen3Attention,)
+    _QWEN3_MLP = (Qwen3MLP,)
+except ImportError:  # older transformers without Qwen3
+    _QWEN3_ATTENTION = ()
+    _QWEN3_MLP = ()
+
+_PATCHABLE_ATTENTION = (LlamaAttention,) + _QWEN3_ATTENTION
+_PATCHABLE_MLP = (LlamaMLP,) + _QWEN3_MLP
+
 try:
     from quantpc.quanpc_cuda_extension.quanpc_cuda import (
         load_quanpc_extension,
@@ -820,6 +833,83 @@ def _run_cuda_decode_tail(
     return workspace.attn_output
 
 
+def _can_use_fused_packed_decode(ext, query_states, key_states, value_states):
+    """Gate the fused project+quantize+pack decode path.
+
+    The fused path replaces the Python bmm query projection (``_project_query_gqa``)
+    and the separate quantize+pack with a single CUDA kernel that writes the packed
+    query directly into the workspace, then feeds a decode tail that consumes only
+    the packed query. It requires the pruned gqa4 CUDA kernels and the same shape
+    limits as ``quanpc_project_quantize_pack_query`` (C%64==0, C<=512, D<=256).
+    """
+    if not (
+        hasattr(ext, "quanpc_project_quantize_pack_query_fn")
+        and hasattr(ext, "quanpc_decode_tail_packed_v1_exp8_tiled_gqa4_atomic_pruned_fn")
+    ):
+        return False
+    if not getattr(key_states, "use_pruning", False):
+        return False
+    if query_states.shape[1] // key_states.dense.shape[1] != 4:
+        return False
+    proj = key_states.glob.proj
+    C = proj.shape[-2]
+    D = proj.shape[-1]
+    return C % 64 == 0 and C <= 512 and D <= 256
+
+
+def _dense_flash_and_fused_pack_workspace(ext, query_states, key_states, value_states, scale, workspace):
+    """Run dense flash on a side stream while the fused project+quantize+pack query
+    kernel runs on the current stream, then sync. Eliminates the Python bmm."""
+    current_stream = torch.cuda.current_stream(query_states.device)
+    dense_stream = _get_cuda_dense_flash_stream(query_states)
+    dense_stream.wait_stream(current_stream)
+    with torch.cuda.stream(dense_stream):
+        dense_output, dense_lse_for_global = _dense_attention_numerator_flash_gqa(
+            query_states,
+            key_states.dense,
+            value_states.dense,
+            scale,
+        )
+    ext.quanpc_project_quantize_pack_query_fn(
+        query_states.contiguous(),
+        key_states.glob.proj.contiguous(),
+        workspace.packed_query,
+        workspace.query_scale,
+    )
+    current_stream.wait_stream(dense_stream)
+    return dense_output, dense_lse_for_global
+
+
+def _run_cuda_decode_tail_fused_packed(
+    ext,
+    workspace,
+    key_states,
+    value_states,
+    dense_output,
+    dense_lse_for_global,
+    scale,
+):
+    ext.quanpc_decode_tail_packed_v1_exp8_tiled_gqa4_atomic_pruned_fn(
+        workspace.packed_query,
+        key_states.glob.packed_cuda,
+        value_states.glob.packed_cuda,
+        workspace.query_scale,
+        dense_lse_for_global,
+        dense_output.contiguous(),
+        workspace.glob_code_output,
+        workspace.glob_den,
+        value_states.glob.proj.contiguous(),
+        workspace.attn_output,
+        int(key_states.exp_bits),
+        256,
+        1,
+        float(scale),
+        int(getattr(key_states, "prune_mode", 3)),
+        float(getattr(key_states, "log_eps", -10.0)),
+    )
+    return workspace.attn_output
+
+
 def _dense_attention_numerator(query_states, key_states, value_states, scale):
     dense_scores = torch.matmul(query_states, key_states.transpose(-1, -2)) * scale
     dense_lse = torch.logsumexp(dense_scores.float(), dim = -1, keepdim = True)
@@ -874,6 +964,24 @@ def _quantized_cache_attention_forward_cuda_v1_exp8(query_states, key_states, va
     if can_use_dense_flash and can_use_workspace_without_dense:
         workspace = _get_cuda_attention_workspace(query_states, key_states, value_states)
         ext = load_quanpc_extension()
+        if _can_use_fused_packed_decode(ext, query_states, key_states, value_states):
+            dense_output, dense_lse_for_global = _dense_flash_and_fused_pack_workspace(
+                ext,
+                query_states,
+                key_states,
+                value_states,
+                scale,
+                workspace,
+            )
+            return _run_cuda_decode_tail_fused_packed(
+                ext,
+                workspace,
+                key_states,
+                value_states,
+                dense_output,
+                dense_lse_for_global,
+                scale,
+            )
         dense_output, dense_lse_for_global, projected_query = _dense_flash_and_project_workspace(
             query_states,
             key_states,
@@ -1049,7 +1157,12 @@ def eager_attention_forward(query_states, key_states, value_states):
     return attn_output
 
 kproj_cache = {}
-vproj_cache = {}
+# Decode-time rotation constants precomputed at prefill (方式 A: originals in
+# kproj_cache are kept for the prefill path; these avoid per-step reshape/transpose).
+#   kproj_decode_cache[layer] = (kproj0_T, kproj1_exp)
+#     kproj0_T   = A.transpose(-1,-2).contiguous()            [B,KVH,D,D]  for K-rot
+#     kproj1_exp = Ainv.repeat_interleave(group, dim=1)       [B,QH,D,D]   for Q-rot
+kproj_decode_cache = {}
 
 def find_orth_proj(X):
     U, S, V = torch.svd((X.transpose(-1, -2) @ X).float())
@@ -1058,7 +1171,53 @@ def find_orth_proj(X):
     A = (V * S.unsqueeze(-2)) @ V.transpose(-1, -2)
     Ainv = (V / S.unsqueeze(-2)) @ V.transpose(-1, -2)
     return A, Ainv
-    
+
+
+def _fold_value_output_rotation(module):
+    """Bake the constant value/output rotations (vproj) into v_proj/o_proj weights.
+
+    ``vproj = find_orth_proj(output_proj)`` is derived purely from ``o_proj.weight``,
+    so it is data-independent and can be folded into the projection weights once at
+    load time instead of running two per-token rotation bmms in the forward:
+        V rotation  ``value @ vproj[0].T`` -> ``W_v'[h]  = vproj[0][h] @ W_v[h]``   (per KV head)
+        O un-rotate ``attn @ vproj[1].T``  -> ``W_o'[qh] = W_o[qh] @ vproj[1][qh//G]`` (per query head)
+    ``vproj`` MUST be computed from the original ``o_proj.weight`` before that weight
+    is modified (it is derived from it), hence the up-front derivation.
+    The fold matmuls run in fp32 for accuracy, then cast back to the weight dtype.
+    """
+    if getattr(module, "_quantpc_vo_folded", False):
+        return
+    D = module.head_dim
+    Wo = module.o_proj.weight            # [hidden, QH*D]
+    Wv = module.v_proj.weight            # [KVH*D, hidden]
+    hidden = Wo.shape[0]
+    QH = Wo.shape[1] // D
+    KVH = Wv.shape[0] // D
+    G = QH // KVH
+    # Derive the (constant) rotation exactly as the prefill branch did, from the
+    # ORIGINAL o_proj.weight.
+    output_proj = Wo.reshape(hidden, KVH, -1, D).transpose(0, 1).reshape(KVH, -1, D)
+    A, Ainv = find_orth_proj(output_proj)          # each [KVH, D, D]
+    with torch.no_grad():
+        Ainv_f = Ainv.float()
+        A_f = A.float()
+        # O un-rotation folded into o_proj.weight (per query head, kvh = qh // G).
+        Wo_f = Wo.reshape(hidden, QH, D).float()
+        for qh in range(QH):
+            Wo_f[:, qh, :] = Wo_f[:, qh, :] @ Ainv_f[qh // G]
+        Wo.copy_(Wo_f.reshape(hidden, QH * D).to(Wo.dtype))
+        # V rotation folded into v_proj.weight (per KV head).
+        Wv_f = Wv.reshape(KVH, D, hidden).float()
+        for h in range(KVH):
+            Wv_f[h] = A_f[h] @ Wv_f[h]
+        Wv.copy_(Wv_f.reshape(KVH * D, hidden).to(Wv.dtype))
+        if module.v_proj.bias is not None:
+            bv = module.v_proj.bias.reshape(KVH, D).float()
+            for h in range(KVH):
+                bv[h] = A_f[h] @ bv[h]
+            module.v_proj.bias.copy_(bv.reshape(KVH * D).to(module.v_proj.bias.dtype))
+    module._quantpc_vo_folded = True
+
 
 def chunked_llama_mlp_forward(self, x, chunk_size = 8192):
     if x.shape[-2] <= chunk_size:
@@ -1070,13 +1229,15 @@ def chunked_llama_mlp_forward(self, x, chunk_size = 8192):
 
 def modify(model):
     for module in model.modules():
-        if isinstance(module, LlamaMLP):
+        if isinstance(module, _PATCHABLE_MLP):
             module.forward = partial(chunked_llama_mlp_forward, module)
 
     for module in model.modules():
-        if not isinstance(module, LlamaAttention):
+        if not isinstance(module, _PATCHABLE_ATTENTION):
             continue
-    
+
+        _fold_value_output_rotation(module)
+
         def modified_forward(
             self,
             hidden_states: torch.Tensor,
@@ -1088,9 +1249,16 @@ def modify(model):
         ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
             input_shape = hidden_states.shape[:-1]
             hidden_shape = (*input_shape, -1, self.head_dim)
-    
-            query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-            key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+
+            query_states = self.q_proj(hidden_states).view(hidden_shape)
+            key_states = self.k_proj(hidden_states).view(hidden_shape)
+            # Qwen3 applies per-head RMSNorm to Q/K on the [.., H, D] view before
+            # the transpose and before RoPE. Llama has no q_norm/k_norm -> skipped.
+            if getattr(self, "q_norm", None) is not None:
+                query_states = self.q_norm(query_states)
+                key_states = self.k_norm(key_states)
+            query_states = query_states.transpose(1, 2)
+            key_states = key_states.transpose(1, 2)
             value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
         
             cos, sin = position_embeddings
@@ -1098,24 +1266,33 @@ def modify(model):
             query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
             B, H, L, D = key_states.shape
-            query_states = query_states.reshape(B, H, -1, D)
-        
-            if L != 1:
-                kproj_cache[self.layer_idx] = find_orth_proj(query_states)
-                output_proj = self.o_proj.weight.reshape(
-                    self.o_proj.weight.shape[0],
-                    H,
-                    -1,
-                    self.head_dim,
-                )
-                output_proj = output_proj.transpose(0, 1).reshape(H, -1, self.head_dim)
-                vproj_cache[self.layer_idx] = find_orth_proj(output_proj)
-                
-            query_states = query_states @ kproj_cache[self.layer_idx][1]
-            key_states = key_states @ kproj_cache[self.layer_idx][0].transpose(-1, -2)
-            value_states = value_states @ vproj_cache[self.layer_idx][0].transpose(-1, -2)
+            QH = query_states.shape[1]
+            group = QH // H
 
-            query_states = query_states.reshape(B, -1, L, D)
+            # V rotation (value @ vproj[0].T) is folded into v_proj.weight at load
+            # time by _fold_value_output_rotation, so value_states is already rotated.
+            if L != 1:
+                # Prefill: derive the rotation basis from the GQA-grouped query, then
+                # precompute the decode-time constant forms (方式 A: keep originals).
+                query_states = query_states.reshape(B, H, -1, D)
+                A, Ainv = find_orth_proj(query_states)
+                kproj_cache[self.layer_idx] = (A, Ainv)
+                kproj_decode_cache[self.layer_idx] = (
+                    A.transpose(-1, -2).contiguous(),        # kproj0_T for K-rot
+                    Ainv.repeat_interleave(group, dim=1),    # kproj1_exp [B,QH,D,D] for Q-rot
+                )
+                query_states = query_states @ Ainv
+                key_states = key_states @ A.transpose(-1, -2)
+                query_states = query_states.reshape(B, -1, L, D)
+            else:
+                # Decode fast path: no reshape round-trip, no per-step transpose.
+                # Numerically equivalent to the prefill form (kproj1_exp[qh] == Ainv[qh//group]);
+                # not bit-exact because bf16 cuBLAS picks a different kernel for the
+                # [B,QH,1,D] batch vs the old [B,KVH,group,D] batch, but argmax is preserved.
+                kproj0_T, kproj1_exp = kproj_decode_cache[self.layer_idx]
+                query_states = query_states @ kproj1_exp     # [B,QH,1,D] @ [B,QH,D,D]
+                key_states = key_states @ kproj0_T           # [B,KVH,1,D] @ [B,KVH,D,D]
+
     
             if past_key_value is not None:
                 # sin and cos are specific to RoPE models; cache_position needed for the static cache
@@ -1123,10 +1300,8 @@ def modify(model):
                 key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
     
             attn_output = eager_attention_forward(query_states, key_states, value_states)
-            attn_output = attn_output.reshape(B, H, -1, D)
-            attn_output = attn_output @ vproj_cache[self.layer_idx][1].transpose(-1, -2)
-            attn_output = attn_output.reshape(B, -1, L, D)
-
+            # O un-rotation (attn @ vproj[1].T) is folded into o_proj.weight at load
+            # time by _fold_value_output_rotation, so o_proj consumes the rotated output.
             attn_output = attn_output.transpose(1, 2).contiguous()
             attn_output = attn_output.reshape(*input_shape, -1).contiguous()
             attn_output = self.o_proj(attn_output)

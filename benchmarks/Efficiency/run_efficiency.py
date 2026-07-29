@@ -180,6 +180,8 @@ def run(args) -> None:
         method=args.method,
         k_bits=args.k_bits,
         v_bits=args.v_bits,
+        sink_size=args.sink_size,
+        local_size=args.local_size,
         projected_query_bits=args.projected_query_bits,
         exp_bits=args.exp_bits,
         eas=args.eas,
@@ -277,6 +279,8 @@ def main() -> None:
     # KV-cache config (shared with the NIAH runner semantics).
     parser.add_argument("--k-bits", type=int, default=256)
     parser.add_argument("--v-bits", type=int, default=256)
+    parser.add_argument("--sink-size", type=int, default=64)
+    parser.add_argument("--local-size", type=int, default=1024)
     parser.add_argument("--projected-query-bits", type=int, default=8)
     parser.add_argument("--exp-bits", type=int, default=4)
     parser.add_argument("--eas", type=float, default=0.01)
