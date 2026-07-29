@@ -37,6 +37,18 @@ def _validate_attention_quant_bits(projected_query_bits: int, exp_bits: int) -> 
     )
 
 
+def load_offline_projections(path):
+    data = torch.load(path, map_location="cpu")
+    if not isinstance(data, dict) or "key" not in data or "value" not in data:
+        raise ValueError("offline projection file must be a dict containing 'key' and 'value'")
+    if "meta" not in data:
+        data = dict(data)
+        data["meta"] = {
+            "format": "quanpc_offline_projection_legacy",
+        }
+    return data
+
+
 @dataclass
 class QuantProjection:
     """Binary reconstruction projection learned for one cache block."""
@@ -93,13 +105,14 @@ class MixedCacheTensor:
 
 
 class QuantCache(Cache):
-    def __init__(self, bits: int, sink_size: int = 64, local_size: int = 1024, refit_decoder: bool = False):
+    def __init__(self, bits: int, sink_size: int = 64, local_size: int = 1024, refit_decoder: bool = False, offline_projs = None):
         if bits <= 0:
             raise ValueError(f"bits must be positive; got {bits}")
         self.bits_per_token = bits
         self.sink_size = sink_size
         self.local_size = local_size
         self.refit_decoder = refit_decoder
+        self.offline_projs = offline_projs
         self.reset()
 
     def reset(self):
@@ -110,10 +123,6 @@ class QuantCache(Cache):
     @staticmethod
     def _binary_codes(scores: torch.Tensor) -> torch.Tensor:
         return torch.where(scores >= 0, torch.ones_like(scores), -torch.ones_like(scores))
-
-    @staticmethod
-    def _code_norm(token_count: int, device, dtype) -> torch.Tensor:
-        return torch.tensor(float(token_count), device=device, dtype=dtype).sqrt()
 
     @staticmethod
     def _refit_decoder_from_codes(codes: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -142,7 +151,6 @@ class QuantCache(Cache):
         B, H, L, D = A.shape
         residual = A
         proj = torch.empty(B, H, code_dim, D, device=A.device, dtype=A.dtype)
-        code_norm = self._code_norm(L, A.device, A.dtype)
 
         for bit_idx in range(code_dim):
             probe = torch.randn(B, H, D, device=A.device, dtype=A.dtype)
@@ -151,9 +159,9 @@ class QuantCache(Cache):
             direction = torch.einsum("bhde,bhe->bhd", AtA, direction)
 
             scores = torch.einsum("bhld,bhd->bhl", residual, direction)
-            basis = self._binary_codes(scores) / code_norm
-            direction = torch.einsum("bhld,bhl->bhd", residual, basis)
-            residual = residual - torch.einsum("bhl,bhd->bhld", basis, direction)
+            code = self._binary_codes(scores)
+            direction = torch.einsum("bhld,bhl->bhd", residual, code) / float(L)
+            residual = residual - torch.einsum("bhl,bhd->bhld", code, direction)
             proj[:, :, bit_idx, :] = direction
 
         return proj
@@ -175,17 +183,14 @@ class QuantCache(Cache):
         codes = torch.empty(B, H, L, C, device=A.device, dtype=A.dtype)
         block_proj = torch.empty_like(projection.proj)
         residual = A
-        code_norm = self._code_norm(L, A.device, A.dtype)
 
         for bit_idx in range(C):
             direction = projection.proj[:, :, bit_idx, :]
             scores = torch.einsum("bhld,bhd->bhl", residual, direction)
             code = self._binary_codes(scores)
-            basis = code / code_norm
-            folded_direction = direction / code_norm
-            residual = residual - torch.einsum("bhl,bhd->bhld", basis, direction)
+            residual = residual - torch.einsum("bhl,bhd->bhld", code, direction)
             codes[:, :, :, bit_idx] = code
-            block_proj[:, :, bit_idx, :] = folded_direction
+            block_proj[:, :, bit_idx, :] = direction
 
         if refit_decoder:
             block_proj = self._refit_decoder_from_codes(codes, A)
@@ -214,6 +219,39 @@ class QuantCache(Cache):
         projection = self.find_projection(A)
         return self.quantize_with_projection(A, projection), projection
 
+    def offline_projection(self, A: torch.Tensor, layer_idx: int) -> Optional[QuantProjection]:
+        if self.offline_projs is None:
+            return None
+
+        B, H, _, D = A.shape
+        try:
+            per_layer = self.offline_projs[layer_idx]
+        except (IndexError, KeyError, TypeError) as exc:
+            raise ValueError(f"offline projection missing layer {layer_idx}") from exc
+
+        if not torch.is_tensor(per_layer):
+            try:
+                per_layer = torch.stack([per_layer[head_idx] for head_idx in range(H)], dim=0)
+            except (IndexError, KeyError, TypeError) as exc:
+                raise ValueError(f"offline projection layer {layer_idx} cannot be indexed by head") from exc
+
+        if per_layer.dim() == 2 and H == 1:
+            per_layer = per_layer.unsqueeze(0)
+        if per_layer.dim() != 3:
+            raise ValueError(
+                f"offline projection layer {layer_idx} must have shape [heads, bits, dim]; "
+                f"got {tuple(per_layer.shape)}"
+            )
+        if per_layer.shape[0] != H or per_layer.shape[1] != self.bits_per_token or per_layer.shape[2] != D:
+            raise ValueError(
+                f"offline projection layer {layer_idx} shape mismatch: expected "
+                f"[{H}, {self.bits_per_token}, {D}], got {tuple(per_layer.shape)}"
+            )
+
+        proj = per_layer.to(device=A.device, dtype=A.dtype)
+        proj = proj.unsqueeze(0).expand(B, H, self.bits_per_token, D).contiguous()
+        return QuantProjection(proj)
+
     def get_seq_length(self, layer_idx: int = 0) -> int:
         return self.seq_length[layer_idx] if layer_idx in self.seq_length else 0
 
@@ -234,10 +272,10 @@ class QuantCache(Cache):
 
 
 class KQuantCache(QuantCache):
-    def __init__(self, bits: int, sink_size: int = 64, local_size: int = 1024, zerorope: int = 30, refit_decoder: bool = False):
+    def __init__(self, bits: int, sink_size: int = 64, local_size: int = 1024, zerorope: int = 30, refit_decoder: bool = False, offline_projs = None):
         if zerorope < 0:
             raise ValueError(f"zerorope must be non-negative; got {zerorope}")
-        super().__init__(bits=bits, sink_size=sink_size, local_size=local_size, refit_decoder=refit_decoder)
+        super().__init__(bits=bits, sink_size=sink_size, local_size=local_size, refit_decoder=refit_decoder, offline_projs=offline_projs)
         self.zerorope = zerorope
 
     def quantization_target(self, glob: torch.Tensor) -> torch.Tensor:
@@ -251,17 +289,25 @@ class KQuantCache(QuantCache):
 
     def compress(self, glob: torch.Tensor, layer_idx: int) -> QuantizedTensor:
         glob = self.quantization_target(glob)
-        quantized, projection = self.qpc(glob)
+        projection = self.offline_projection(glob, layer_idx)
+        if projection is None:
+            quantized, projection = self.qpc(glob)
+        else:
+            quantized = self.quantize_with_projection(glob, projection)
         self.projections[layer_idx] = projection
         return quantized
 
 
 class VQuantCache(QuantCache):
-    def __init__(self, bits: int, sink_size: int = 64, local_size: int = 1024, refit_decoder: bool = False):
-        super().__init__(bits=bits, sink_size=sink_size, local_size=local_size, refit_decoder=refit_decoder)
+    def __init__(self, bits: int, sink_size: int = 64, local_size: int = 1024, refit_decoder: bool = False, offline_projs = None):
+        super().__init__(bits=bits, sink_size=sink_size, local_size=local_size, refit_decoder=refit_decoder, offline_projs=offline_projs)
 
     def compress(self, glob: torch.Tensor, layer_idx: int) -> QuantizedTensor:
-        quantized, projection = self.qpc(glob)
+        projection = self.offline_projection(glob, layer_idx)
+        if projection is None:
+            quantized, projection = self.qpc(glob)
+        else:
+            quantized = self.quantize_with_projection(glob, projection)
         self.projections[layer_idx] = projection
         return quantized
 
@@ -279,10 +325,17 @@ class QuantKVCache(Cache):
         zerorope: int = 30,
         use_cuda_v1_exp8: bool = False,
         refit_decoder: bool = False,
+        offline_projs = None,
     ):
         projected_query_bits, exp_bits = _validate_attention_quant_bits(projected_query_bits, exp_bits)
-        self.kcache = KQuantCache(k_bits, sink_size, local_size, zerorope, refit_decoder=refit_decoder)
-        self.vcache = VQuantCache(v_bits, sink_size, local_size, refit_decoder=refit_decoder)
+        if offline_projs is None:
+            key_offline_projs = None
+            value_offline_projs = None
+        else:
+            key_offline_projs = offline_projs["key"]
+            value_offline_projs = offline_projs["value"]
+        self.kcache = KQuantCache(k_bits, sink_size, local_size, zerorope, refit_decoder=refit_decoder, offline_projs=key_offline_projs)
+        self.vcache = VQuantCache(v_bits, sink_size, local_size, refit_decoder=refit_decoder, offline_projs=value_offline_projs)
         self.projected_query_bits = projected_query_bits
         self.exp_bits = exp_bits
         self.eas = eas
@@ -524,7 +577,12 @@ vproj_cache = {}
 
 
 def find_orth_proj(X: torch.Tensor):
-    U, S, V = torch.svd((X.transpose(-1, -2) @ X).float())
+    # Normalize the Gram by the number of summed rows so the whitening matrix is
+    # the (inverse) sqrt of the *covariance*, not of the unnormalized sum X^T X
+    # (which grows ~L for keys and injected a sqrt(L) scale into the projection).
+    # A and Ainv stay exact inverses so Q . K^T is preserved.
+    n = X.shape[-2]
+    U, S, V = torch.svd((X.transpose(-1, -2) @ X).float() / float(n))
     S = S.sqrt()
     U, S, V = U.to(torch.bfloat16), S.to(torch.bfloat16), V.to(torch.bfloat16)
     A = (V * S.unsqueeze(-2)) @ V.transpose(-1, -2)

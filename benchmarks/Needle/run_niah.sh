@@ -14,8 +14,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}"
 
 # ── 基础配置 ──────────────────────────────────────────────
-GPU=3
-MODEL="/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct"
+GPU=0,1
+MODEL="/home/zxh/zxh/models/Llama-3.1-8B-Instruct"
 BASE_RESULT_DIR="results/niah"
 VIS_DIR="${BASE_RESULT_DIR}/vis"
 MODEL_NAME=$(basename "${MODEL}")
@@ -35,6 +35,10 @@ REFIT_DECODER="${REFIT_DECODER:-1}"
 # 仅在 REFIT_DECODER=1 且 CUDA 后端时生效。
 # 覆盖示例：REFIT_DECODER=1 REFIT_SOLVER=cholesky bash run_niah.sh
 REFIT_SOLVER="${REFIT_SOLVER:-pinv}"
+
+# offline encoder projection。默认关闭；
+# 如需开启：OFFLINE_PROJ_PATH=config/projections/k256_v256_zrope20.pt bash run_niah.sh
+OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH-}"
 
 # 期望答案（与 show_image_paper.py 默认值保持一致）
 EXPECTED_ANSWER="eat a sandwich and sit in Dolores Park on a sunny day."
@@ -60,15 +64,22 @@ for cfg in "${CONFIGS[@]}"; do
     SUBDIR="${SUBDIR}_refit_${REFIT_SOLVER}"
     REFIT_FLAG=(--refit-decoder --refit-solver "${REFIT_SOLVER}")
   fi
+  OFFLINE_FLAG=()
+  if [ -n "${OFFLINE_PROJ_PATH}" ]; then
+    SUBDIR="${SUBDIR}_offline"
+    OFFLINE_FLAG=(--offline-proj-path "${OFFLINE_PROJ_PATH}")
+  fi
   mkdir -p "${SUBDIR}"
 
   echo "========================================"
   echo "Running: k-bits=${K}  v-bits=${V}  refit=${REFIT_DECODER}  solver=${REFIT_SOLVER}"
+  echo "Offline projection: ${OFFLINE_PROJ_PATH:-disabled}"
   echo "Output : ${SUBDIR}/results_cuda.json"
   echo "========================================"
 
   CUDA_VISIBLE_DEVICES=${GPU} \
   python "${SCRIPT_DIR}/run_bin_v4.py" \
+    --model "${MODEL}" \
     --lengths "${LENGTHS}" \
     --depths "${DEPTHS}" \
     --output "${SUBDIR}/results_cuda.json" \
@@ -79,7 +90,8 @@ for cfg in "${CONFIGS[@]}"; do
     --eas 0.01 \
     --zerorope 20 \
     --cuda-v1-exp8 \
-    "${REFIT_FLAG[@]}"
+    "${REFIT_FLAG[@]}" \
+    "${OFFLINE_FLAG[@]}"
 
   echo "Done: k-bits=${K}  v-bits=${V}"
   echo ""
@@ -96,6 +108,9 @@ for cfg in "${CONFIGS[@]}"; do
   SUBDIR="${BASE_RESULT_DIR}/${MODEL_NAME}_k${K}_v${V}"
   if [ "${REFIT_DECODER}" = "1" ]; then
     SUBDIR="${SUBDIR}_refit_${REFIT_SOLVER}"
+  fi
+  if [ -n "${OFFLINE_PROJ_PATH}" ]; then
+    SUBDIR="${SUBDIR}_offline"
   fi
 
   python "${SCRIPT_DIR}/show_image_paper.py" \

@@ -41,6 +41,7 @@ class Transformer(ModelProvider):
         cuda_v1_exp8: bool = False,
         refit_decoder: bool = False,
         refit_solver: str = "lstsq",
+        offline_proj_path: Optional[str] = None,
     ):
         self.method = method
         self.k_bits = k_bits
@@ -52,6 +53,7 @@ class Transformer(ModelProvider):
         self.cuda_v1_exp8 = cuda_v1_exp8
         self.refit_decoder = refit_decoder
         self.refit_solver = refit_solver
+        self.offline_projs = None
 
         from_pretrained_kwargs = {"torch_dtype": "bfloat16"}
 
@@ -63,12 +65,17 @@ class Transformer(ModelProvider):
         # For baselines we DO NOT modify the model and use its default KV cache.
         if method == "quantpc":
             if cuda_v1_exp8:
-                from quantpc.quanpc import QuantKVCache, modify
+                from quantpc.quanpc import QuantKVCache, load_offline_projections, modify
             else:
-                from quantpc.quanpc_torch import QuantKVCache, modify
+                from quantpc.quanpc_torch import QuantKVCache, load_offline_projections, modify
             self._QuantKVCache = QuantKVCache
             self._modify = modify
+            if offline_proj_path is not None:
+                self.offline_projs = load_offline_projections(offline_proj_path)
+                print(f"[quantpc] using offline projections: {offline_proj_path}")
         elif method in BASELINE_ATTN:
+            if offline_proj_path is not None:
+                raise ValueError("--offline-proj-path only applies to --method quantpc")
             self._QuantKVCache = None
             self._modify = None
             from_pretrained_kwargs["attn_implementation"] = method
@@ -128,6 +135,8 @@ class Transformer(ModelProvider):
                     use_cuda_v1_exp8=self.cuda_v1_exp8,
                     refit_decoder=self.refit_decoder,
                 )
+                if self.offline_projs is not None:
+                    cache_kwargs["offline_projs"] = self.offline_projs
                 # refit_solver is only supported by the CUDA-runtime QuantKVCache
                 # (quantpc.quanpc); the torch reference keeps its default solver.
                 if self.cuda_v1_exp8:
@@ -191,6 +200,7 @@ def run_experiment(
     cuda_v1_exp8: bool,
     refit_decoder: bool = False,
     refit_solver: str = "lstsq",
+    offline_proj_path: Optional[str] = None,
 ) -> dict[tuple[int, int], str]:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -207,6 +217,7 @@ def run_experiment(
         cuda_v1_exp8=cuda_v1_exp8,
         refit_decoder=refit_decoder,
         refit_solver=refit_solver,
+        offline_proj_path=offline_proj_path,
     )
     tester = LLMNeedleHaystackTester(model)
     results = {}
@@ -286,6 +297,11 @@ def main() -> None:
         choices=["lstsq", "pinv", "cholesky"],
         help="refit 最小二乘求解器：lstsq(QR，快且稳，默认)、pinv(SVD，慢) 或 cholesky(正规方程，最快但可能掉精度)；仅 CUDA 后端生效",
     )
+    parser.add_argument(
+        "--offline-proj-path",
+        default=None,
+        help="offline projection .pt path; expected dict with 'key' and 'value' tensors",
+    )
     args = parser.parse_args()
 
     seed_everything(42)
@@ -304,6 +320,7 @@ def main() -> None:
         cuda_v1_exp8=args.cuda_v1_exp8,
         refit_decoder=args.refit_decoder,
         refit_solver=args.refit_solver,
+        offline_proj_path=args.offline_proj_path,
     )
 
 
