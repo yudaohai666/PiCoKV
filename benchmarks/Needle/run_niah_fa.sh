@@ -15,14 +15,14 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}"
 
 # ── 基础配置 ──────────────────────────────────────────────
-GPU=2
-MODEL="/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct"
+GPU=0,1,2,3,4,5
+MODEL="/home/zxh/zxh/models/Llama-3.1-8B-Instruct"
 BASE_RESULT_DIR="results/niah"
 VIS_DIR="${BASE_RESULT_DIR}/vis"
 MODEL_NAME=$(basename "${MODEL}")
 
 # context lengths / needle depths（与 run_niah.sh 保持一致，便于横比）
-LENGTHS="81920,90112,98304,106496,114688,122880,131072"
+LENGTHS="8192,16384,24576,32768,40960,49152,57344,65536,73728,81920,90112,98304,106496,114688,122880,131072"
 DEPTHS="0,11,22,33,44,56,67,78,89,100"
 
 # 期望答案（与 show_image_paper.py 默认值保持一致）
