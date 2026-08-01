@@ -63,8 +63,14 @@ class Transformer(ModelProvider):
         #   flash_attention_2  -> dense full-precision baseline (flash-attn-2)
         #   sdpa / eager       -> dense full-precision baseline (torch attn)
         # For baselines we DO NOT modify the model and use its default KV cache.
-        if method == "quantpc":
-            if cuda_v1_exp8:
+        if method in ("quantpc", "standalone"):
+            if method == "standalone":
+                from quantpc.quanpc_standalone import (
+                    QuantKVCache,
+                    load_offline_projections,
+                    modify,
+                )
+            elif cuda_v1_exp8:
                 from quantpc.quanpc import QuantKVCache, load_offline_projections, modify
             else:
                 from quantpc.quanpc_torch import QuantKVCache, load_offline_projections, modify
@@ -72,7 +78,7 @@ class Transformer(ModelProvider):
             self._modify = modify
             if offline_proj_path is not None:
                 self.offline_projs = load_offline_projections(offline_proj_path)
-                print(f"[quantpc] using offline projections: {offline_proj_path}")
+                print(f"[{method}] using offline projections: {offline_proj_path}")
         elif method in BASELINE_ATTN:
             if offline_proj_path is not None:
                 raise ValueError("--offline-proj-path only applies to --method quantpc")
@@ -81,7 +87,7 @@ class Transformer(ModelProvider):
             from_pretrained_kwargs["attn_implementation"] = method
         else:
             raise ValueError(
-                f"Unknown method '{method}'. Supported: 'quantpc', "
+                f"Unknown method '{method}'. Supported: 'quantpc', 'standalone', "
                 f"{sorted(BASELINE_ATTN)}."
             )
 
@@ -132,7 +138,9 @@ class Transformer(ModelProvider):
                     exp_bits=self.exp_bits,
                     eas=self.eas,
                     zerorope=self.zerorope,
-                    use_cuda_v1_exp8=self.cuda_v1_exp8,
+                    # standalone has a single CUDA path; the flag only selects a
+                    # backend for method='quantpc'.
+                    use_cuda_v1_exp8=self.cuda_v1_exp8 or self.method == "standalone",
                     refit_decoder=self.refit_decoder,
                 )
                 if self.offline_projs is not None:
@@ -254,7 +262,8 @@ def main() -> None:
         "--method",
         default="quantpc",
         help=(
-            "evaluation method: 'quantpc' (quantized KV cache), or a dense "
+            "evaluation method: 'quantpc' (greedy per-bit projections), "
+            "'standalone' (block-32 projections, no whitening), or a dense "
             "baseline attn implementation 'flash_attention_2' / 'sdpa' / 'eager'"
         ),
     )

@@ -43,6 +43,12 @@ DEFAULT_V_BITS = 256
 DEFAULT_ZEROROPE = 20
 OFFLINE_PROJECTION_FORMAT = "quanpc_offline_projection_scaled_v2"
 LEGACY_OFFLINE_PROJECTION_FORMAT = "quanpc_offline_projection_legacy_l2_normalized_v1"
+BLOCK32_PROJECTION_FORMAT = "quanpc_standalone_block32_encoder_v1"
+
+# block-32 learning only needs enough rows to resolve a 128-dim subspace, while
+# the coding/residual passes scale with the row count.  Subsample the
+# concatenated calibration states so peak memory stays bounded.
+DEFAULT_BLOCK32_LEARN_TOKENS = 1048576
 
 
 torch.manual_seed(42)
@@ -310,7 +316,15 @@ def modified_mlp_forward(self, x, chunk_size=8192):
     return torch.cat(outputs, dim=-2)
 
 
-def modify_for_collect(model):
+def modify_for_collect(model, whiten=True):
+    """Patch attention so prompt K/V can be captured.
+
+    ``whiten=True`` reproduces the greedy method's query-derived rotation, which
+    is the space that method quantizes in.  The standalone (block-32) method has
+    no rotation, so its calibration must capture raw post-RoPE K/V instead --
+    collecting in the wrong space is exactly what makes a fixed projection
+    mismatch the basis it is later applied in.
+    """
     for module in model.modules():
         if isinstance(module, LlamaMLP):
             module.forward = partial(modified_mlp_forward, module)
@@ -341,20 +355,21 @@ def modify_for_collect(model):
             B, H, L, D = key_states.shape
             query_states = query_states.reshape(B, H, -1, D)
 
-            if L != 1:
-                kproj_cache[self.layer_idx] = quanpc.find_orth_proj(query_states)
-                output_proj = self.o_proj.weight.reshape(
-                    self.o_proj.weight.shape[0],
-                    H,
-                    -1,
-                    self.head_dim,
-                )
-                output_proj = output_proj.transpose(0, 1).reshape(H, -1, self.head_dim)
-                vproj_cache[self.layer_idx] = quanpc.find_orth_proj(output_proj)
+            if whiten:
+                if L != 1:
+                    kproj_cache[self.layer_idx] = quanpc.find_orth_proj(query_states)
+                    output_proj = self.o_proj.weight.reshape(
+                        self.o_proj.weight.shape[0],
+                        H,
+                        -1,
+                        self.head_dim,
+                    )
+                    output_proj = output_proj.transpose(0, 1).reshape(H, -1, self.head_dim)
+                    vproj_cache[self.layer_idx] = quanpc.find_orth_proj(output_proj)
 
-            query_states = query_states @ kproj_cache[self.layer_idx][1]
-            key_states = key_states @ kproj_cache[self.layer_idx][0].transpose(-1, -2)
-            value_states = value_states @ vproj_cache[self.layer_idx][0].transpose(-1, -2)
+                query_states = query_states @ kproj_cache[self.layer_idx][1]
+                key_states = key_states @ kproj_cache[self.layer_idx][0].transpose(-1, -2)
+                value_states = value_states @ vproj_cache[self.layer_idx][0].transpose(-1, -2)
 
             collect_kv(self.layer_idx, key_states, value_states)
 
@@ -364,9 +379,10 @@ def modify_for_collect(model):
                 key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
             attn_output = eager_attention_forward(query_states, key_states, value_states)
-            attn_output = attn_output.reshape(B, H, -1, D)
-            attn_output = attn_output @ vproj_cache[self.layer_idx][1].transpose(-1, -2)
-            attn_output = attn_output.reshape(B, -1, L, D)
+            if whiten:
+                attn_output = attn_output.reshape(B, H, -1, D)
+                attn_output = attn_output @ vproj_cache[self.layer_idx][1].transpose(-1, -2)
+                attn_output = attn_output.reshape(B, -1, L, D)
             attn_output = attn_output.transpose(1, 2).contiguous()
             attn_output = attn_output.reshape(*input_shape, -1).contiguous()
             attn_output = self.o_proj(attn_output)
@@ -442,7 +458,7 @@ def collect_states(args, samples, layers):
     )
     if args.device_map == "none" and torch.cuda.is_available():
         model = model.to("cuda")
-    modify_for_collect(model)
+    modify_for_collect(model, whiten=(args.projection_algo != "block32"))
     model.eval()
 
     for layer_group in tqdm(list(chunk_layers(layers, args.collect_layers_per_forward)), desc="layer groups"):
@@ -504,6 +520,14 @@ def apply_key_zerorope(A, zerorope):
 
 
 def projection_meta(args):
+    if getattr(args, "projection_algo", "greedy") == "block32":
+        return {
+            "format": BLOCK32_PROJECTION_FORMAT,
+            "group_bits": 32,
+            "whitened": False,
+            "key_l2_normalize_rows": False,
+            "value_l2_normalize_rows": False,
+        }
     return {
         "format": OFFLINE_PROJECTION_FORMAT,
         "key_l2_normalize_rows": False,
@@ -519,18 +543,51 @@ def legacy_projection_meta():
     }
 
 
-def learn_head_projection(tokens, bits, device, zerorope=0, normalize_rows=False):
-    cache = quanpc.QuantCache(bits=bits)
+def _subsample_rows(tokens, max_rows):
+    """Evenly subsample concatenated calibration rows to bound peak memory."""
+    if max_rows is None or tokens.shape[0] <= int(max_rows):
+        return tokens
+    indices = torch.linspace(0, tokens.shape[0] - 1, steps=int(max_rows)).round().long()
+    return tokens.index_select(0, indices)
+
+
+def learn_head_projection(
+    tokens,
+    bits,
+    device,
+    zerorope=0,
+    normalize_rows=False,
+    algo="greedy",
+    block32_learn_tokens=DEFAULT_BLOCK32_LEARN_TOKENS,
+):
+    """Learn one head's projection from concatenated calibration states.
+
+    ``greedy`` returns the per-bit pursuit vectors used by ``quantpc.quanpc``.
+    ``block32`` returns the orthonormal per-group encoders consumed by
+    ``quantpc.standalone``; its decoder is refit per context at inference, so
+    only the encoder is worth storing.
+    """
+    if algo == "block32":
+        tokens = _subsample_rows(tokens, block32_learn_tokens)
     A = tokens.unsqueeze(0).unsqueeze(0).to(device=device, dtype=torch.bfloat16)
     A = A.clone()
     apply_key_zerorope(A, zerorope)
     with torch.no_grad():
-        projection = cache.find_projection(A)
-    out = projection.proj[0, 0].float()
+        if algo == "block32":
+            from quantpc.standalone.online import quantize_block32_online
+
+            block = quantize_block32_online(A, bits)
+            out = block.encoders[0, 0].float()
+            del block
+        else:
+            cache = quanpc.QuantCache(bits=bits)
+            projection = cache.find_projection(A)
+            out = projection.proj[0, 0].float()
+            del projection
     if normalize_rows:
         out = torch.nn.functional.normalize(out, dim=-1, p=2)
     out = out.detach().cpu().to(torch.bfloat16)
-    del A, projection
+    del A
     clear_cuda()
     return out
 
@@ -554,6 +611,8 @@ def project_layer(args, projections, progress, layer_idx, sample_count, device, 
                 device,
                 zerorope=zerorope,
                 normalize_rows=key_l2_normalize_rows,
+                algo=args.projection_algo,
+                block32_learn_tokens=args.block32_learn_tokens,
             )
             progress["key_done"][layer_idx, h_idx] = True
             save_projection_state(args, projections, progress)
@@ -571,6 +630,8 @@ def project_layer(args, projections, progress, layer_idx, sample_count, device, 
                 device,
                 zerorope=0,
                 normalize_rows=value_l2_normalize_rows,
+                algo=args.projection_algo,
+                block32_learn_tokens=args.block32_learn_tokens,
             )
             progress["value_done"][layer_idx, h_idx] = True
             save_projection_state(args, projections, progress)
@@ -635,7 +696,7 @@ def run_both(args, samples, layers, num_layers, num_kv_heads, head_dim, k_bits, 
             )
             if args.device_map == "none" and torch.cuda.is_available():
                 model = model.to("cuda")
-            modify_for_collect(model)
+            modify_for_collect(model, whiten=(args.projection_algo != "block32"))
             model.eval()
             collect_layers_states(args, model, tokenizer, samples, collect_layer_group)
             del model
@@ -682,6 +743,25 @@ def main():
     parser.add_argument("--k_bits", type=int, default=None)
     parser.add_argument("--v_bits", type=int, default=None)
     parser.add_argument("--zerorope", type=int, default=None)
+    parser.add_argument(
+        "--projection-algo",
+        dest="projection_algo",
+        choices=["greedy", "block32"],
+        default="greedy",
+        help=(
+            "'greedy' (default) matches quantpc.quanpc: per-bit pursuit vectors "
+            "learned in the query-whitened space. 'block32' matches "
+            "quantpc.standalone: orthonormal per-group encoders learned in raw "
+            "post-RoPE space. The two files are not interchangeable."
+        ),
+    )
+    parser.add_argument(
+        "--block32-learn-tokens",
+        dest="block32_learn_tokens",
+        type=int,
+        default=DEFAULT_BLOCK32_LEARN_TOKENS,
+        help="evenly subsample this many concatenated rows for block32 learning",
+    )
     args = parser.parse_args()
 
     extra_config = load_extra_config(args.extra_config)
