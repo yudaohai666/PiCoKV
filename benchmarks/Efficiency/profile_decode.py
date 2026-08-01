@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 import torch
-from torch.profiler import ProfilerActivity, profile, schedule
+from torch.profiler import ProfilerActivity, profile, record_function
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -53,7 +53,7 @@ def main() -> None:
     p.add_argument("--method", default="quantpc", help="quantpc | kivi | flash_attention_2 | sdpa | eager")
     p.add_argument("--length", type=int, default=32768, help="prompt length to prefill before decoding")
     p.add_argument("--warmup", type=int, default=8, help="untimed decode steps before profiling")
-    p.add_argument("--active", type=int, default=24, help="decode steps recorded by the profiler")
+    p.add_argument("--active", type=int, default=32, help="decode steps recorded by the profiler")
     p.add_argument("--rows", type=int, default=30, help="rows in the key_averages table")
     p.add_argument("--group-by-shape", action="store_true", help="group ops by input shape in the table")
     p.add_argument("--record-shapes", action="store_true", help="record op input shapes (adds overhead)")
@@ -115,13 +115,12 @@ def main() -> None:
         activities = [ProfilerActivity.CPU]
         if torch.cuda.is_available():
             activities.append(ProfilerActivity.CUDA)
-        sched = schedule(wait=0, warmup=1, active=args.active, repeat=1)
-        with profile(activities=activities, schedule=sched,
-                     record_shapes=args.record_shapes, with_stack=False) as prof:
-            for _ in range(1 + args.active):  # +1 for the schedule warmup step
-                pkv, gen_ids, attn = _decode_step(model, gen_ids, attn, pkv, pos, device)
-                pos += 1
-                prof.step()
+        with profile(activities=activities, record_shapes=True,
+                     profile_memory=True, with_stack=False) as prof:
+            with record_function("DECODE"):
+                for _ in range(args.active):
+                    pkv, gen_ids, attn = _decode_step(model, gen_ids, attn, pkv, pos, device)
+                    pos += 1
         _sync()
 
     sort_key = "self_cuda_time_total" if torch.cuda.is_available() else "self_cpu_time_total"

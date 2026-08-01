@@ -26,6 +26,11 @@ LENGTHS="81920,90112,98304,106496,114688,122880,131072"
 # needle depths（逗号分隔，传给 --depths）
 DEPTHS="0,11,22,33,44,56,67,78,89,100"
 
+# sink / local 全精度窗口（quantpc）。可用环境变量覆盖：
+#   SINK=128 LOCAL=2048 bash run_niah.sh
+SINK="${SINK:-64}"
+LOCAL="${LOCAL:-1024}"
+
 # 是否启用解码矩阵重拟合（refit_decoder）。
 # 置 1 开启；可用环境变量覆盖，例如：REFIT_DECODER=1 bash run_niah.sh
 # 注意：开启后 API prefill 会回退 torch（quanpc_api），pinv 有额外开销。
@@ -38,8 +43,8 @@ EXPECTED_ANSWER="eat a sandwich and sit in Dolores Park on a sunny day."
 CONFIGS=(
   # "256 256"
   # "256 320"
-  "320 256"
-  # "320 320"
+  # "320 256"
+  "320 320"
 )
 
 # ── 逐组实验 ──────────────────────────────────────────────
@@ -69,6 +74,8 @@ for cfg in "${CONFIGS[@]}"; do
     --output "${SUBDIR}/results_cuda.json" \
     --k-bits "${K}" \
     --v-bits "${V}" \
+    --sink-size "${SINK}" \
+    --local-size "${LOCAL}" \
     --projected-query-bits 8 \
     --exp-bits 4 \
     --eas 0.01 \

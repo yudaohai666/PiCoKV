@@ -1,5 +1,5 @@
 #!/bin/bash
-# Prefill vs decode 效率对比：dense 基线 / quantpc / kivi 三类方法横比。
+# Prefill vs decode 效率对比：dense 基线 / quantpc / oscar / kivi 四类方法横比。
 #
 # 用同一个 runner run_efficiency.py，每个方法各产出一份 per-method JSON 到
 # results/efficiency/，最后 --compare 聚合成按 prompt_len 分组的对比表。
@@ -14,7 +14,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}"
 
 # ── 基础配置 ──────────────────────────────────────────────
-GPU=4
+GPU=6
 MODEL="/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct"
 RESULT_DIR="results/efficiency"
 mkdir -p "${RESULT_DIR}"
@@ -23,7 +23,7 @@ mkdir -p "${RESULT_DIR}"
 LENGTHS="131072"
 DECODE_TOKENS=8
 BATCH_SIZE=1
-WARMUP=2
+WARMUP=1
 REPEATS=3
 
 run_one() {
@@ -54,7 +54,13 @@ run_one flash_attention_2 flash_attention_2
 run_one quantpc quantpc_k320_v320 \
   --k-bits 320 --v-bits 320 --cuda-v1-exp8
 
-# ── kivi（K/V 各 2bit）────────────────────────────────────
+# ── oscar（int4 k-channel，group_size 128）────────────────
+# 需先在 src/OScaR-KV-Quant 里 build 好 oscar_cuda：
+#   bash src/OScaR-KV-Quant/build_oscar_cuda.sh
+run_one oscar oscar_int4 \
+  --num-bits 4 --quant-mode k-channel --group-size 128
+
+# # ── kivi（K/V 各 2bit）────────────────────────────────────
 # run_one kivi kivi_k2_v2 \
 #   --k-bits 2 --v-bits 2 --group-size 32 --residual-length 128
 

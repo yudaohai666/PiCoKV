@@ -26,6 +26,8 @@ class Transformer(ModelProvider):
         method: str = "quantpc",
         k_bits: int = 128,
         v_bits: int = 256,
+        sink_size: int = 64,
+        local_size: int = 1024,
         projected_query_bits: int = 8,
         exp_bits: int = 4,
         eas: float = 0.01,
@@ -45,6 +47,8 @@ class Transformer(ModelProvider):
             method=method,
             k_bits=k_bits,
             v_bits=v_bits,
+            sink_size=sink_size,
+            local_size=local_size,
             projected_query_bits=projected_query_bits,
             exp_bits=exp_bits,
             eas=eas,
@@ -132,6 +136,8 @@ def run_experiment(
     method: str,
     k_bits: int,
     v_bits: int,
+    sink_size: int,
+    local_size: int,
     projected_query_bits: int,
     exp_bits: int,
     eas: float,
@@ -152,6 +158,8 @@ def run_experiment(
         method=method,
         k_bits=k_bits,
         v_bits=v_bits,
+        sink_size=sink_size,
+        local_size=local_size,
         projected_query_bits=projected_query_bits,
         exp_bits=exp_bits,
         eas=eas,
@@ -209,6 +217,18 @@ def main() -> None:
     parser.add_argument("--output", default="results/niah/results_shared_kv.json")
     parser.add_argument("--k-bits", type=int, default=128)
     parser.add_argument("--v-bits", type=int, default=256)
+    parser.add_argument(
+        "--sink-size",
+        type=int,
+        default=64,
+        help="number of initial (sink) tokens kept in full precision (quantpc only)",
+    )
+    parser.add_argument(
+        "--local-size",
+        type=int,
+        default=1024,
+        help="number of most-recent (local) tokens kept in full precision (quantpc only)",
+    )
     parser.add_argument(
         "--projected-query-bits",
         type=int,
@@ -269,6 +289,8 @@ def main() -> None:
         method=args.method,
         k_bits=args.k_bits,
         v_bits=args.v_bits,
+        sink_size=args.sink_size,
+        local_size=args.local_size,
         projected_query_bits=args.projected_query_bits,
         exp_bits=args.exp_bits,
         eas=args.eas,

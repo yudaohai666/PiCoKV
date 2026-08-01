@@ -21,6 +21,7 @@ Aggregate a directory of per-method JSONs into a comparison table:
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import statistics
 import sys
@@ -46,6 +47,20 @@ def _sync() -> None:
         torch.cuda.synchronize()
 
 
+def _free() -> None:
+    """Release freed tensors AND the caching allocator's reserved pool.
+
+    ``measure()`` chains many ``generate``/forward passes; without returning the
+    allocator's reserved blocks between them, the pool balloons (e.g. ~70GB on a
+    bs48/L4096 fp16 run) and later phases OOM from fragmentation even though the
+    per-pass live peak (~60GB) fits. Mirrors benchmark_kitty.py's per-iter
+    ``gc.collect()`` hygiene.
+    """
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def _peak_gb() -> float:
     if torch.cuda.is_available():
         return torch.cuda.max_memory_allocated() / 1024 ** 3
@@ -57,8 +72,59 @@ def build_inputs(vocab_size: int, batch_size: int, prompt_len: int, device) -> t
     return torch.randint(1, vocab_size, (batch_size, prompt_len), device=device, dtype=torch.long)
 
 
-def _time_generate(model, input_ids, max_new_tokens, make_cache) -> float:
-    """Return wall time (ms) for one greedy generate of exactly ``max_new_tokens``."""
+def _manual_generate(model, input_ids, max_new_tokens, make_cache) -> float:
+    """Wall time (ms) of a manual greedy prefill + (N-1) decode via ``model()``.
+
+    Equivalent to ``generate(max_new_tokens=N)`` but driven through direct
+    ``model()`` forwards (prefill then single-token steps), threading
+    ``past_key_values`` explicitly. Used for OScaR, whose custom cache
+    (``oscar.DynamicCache``) is NOT a ``transformers.Cache`` subclass, so HF
+    ``generate``'s cache bookkeeping (``_get_initial_cache_position`` /
+    ``_prepare_cache_for_generation``) rejects it. The model auto-threads its
+    own oscar cache through the ``prepare_inputs_for_generation`` path, matching
+    the decode-timing loop and bench_e2e's driving methodology.
+    """
+    device = input_ids.device
+    prompt_len = input_ids.shape[1]
+    pkv = make_cache() if make_cache is not None else None
+    gen_ids = input_ids
+    attn = torch.ones_like(input_ids)
+    _sync()
+    t0 = time.perf_counter()
+    with torch.no_grad():
+        mi = model.prepare_inputs_for_generation(
+            gen_ids, past_key_values=pkv, attention_mask=attn, use_cache=True,
+            cache_position=torch.arange(prompt_len, device=device), logits_to_keep=1)
+        out = model(**mi)
+        pkv = out.past_key_values
+        next_tok = out.logits[:, -1:, :].argmax(dim=-1)
+        gen_ids = torch.cat([gen_ids, next_tok], dim=1)
+        attn = torch.cat([attn, torch.ones_like(next_tok)], dim=1)
+        for step in range(max_new_tokens - 1):
+            pos = prompt_len + step
+            mi = model.prepare_inputs_for_generation(
+                gen_ids, past_key_values=pkv, attention_mask=attn, use_cache=True,
+                cache_position=torch.arange(pos, pos + 1, device=device), logits_to_keep=1)
+            out = model(**mi)
+            pkv = out.past_key_values
+            next_tok = out.logits[:, -1:, :].argmax(dim=-1)
+            gen_ids = torch.cat([gen_ids, next_tok], dim=1)
+            attn = torch.cat([attn, torch.ones_like(next_tok)], dim=1)
+    _sync()
+    elapsed = (time.perf_counter() - t0) * 1000.0
+    del pkv, gen_ids, attn, out, next_tok, mi
+    _free()
+    return elapsed
+
+
+def _time_generate(model, input_ids, max_new_tokens, make_cache, use_generate=True) -> float:
+    """Return wall time (ms) for one greedy generate of exactly ``max_new_tokens``.
+
+    ``use_generate=False`` (OScaR) drives the same work via ``_manual_generate``
+    because OScaR's cache is incompatible with HF ``generate``.
+    """
+    if not use_generate:
+        return _manual_generate(model, input_ids, max_new_tokens, make_cache)
     eos = model.config.eos_token_id
     pad_token_id = eos[0] if isinstance(eos, (list, tuple)) else eos  # Llama-3.1 eos may be a list
     gen_kwargs = dict(
@@ -67,6 +133,8 @@ def _time_generate(model, input_ids, max_new_tokens, make_cache) -> float:
         max_new_tokens=max_new_tokens,
         min_new_tokens=max_new_tokens,  # force exactly N tokens (no early EOS) for stable timing
         do_sample=False,
+        temperature=None,  # override model's generation_config defaults (silences greedy warning)
+        top_p=None,
         use_cache=True,
         pad_token_id=pad_token_id,  # silence "Setting pad_token_id to eos_token_id" warning
     )
@@ -81,6 +149,7 @@ def _time_generate(model, input_ids, max_new_tokens, make_cache) -> float:
     _sync()
     elapsed = (time.perf_counter() - t0) * 1000.0
     del pkv
+    _free()
     return elapsed
 
 
@@ -131,31 +200,32 @@ def _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats) -
                 attn = torch.cat([attn, torch.ones_like(next_tok)], dim=1)
             _sync()
         per_token.append((time.perf_counter() - t0) * 1000.0 / decode_tokens)
-        del pkv
+        del pkv, gen_ids, attn, out, next_tok, mi
+        _free()
     return statistics.median(per_token)
 
 
-def measure(model, make_cache, vocab_size, batch_size, prompt_len, decode_tokens, warmup, repeats, device) -> dict:
+def measure(model, make_cache, vocab_size, batch_size, prompt_len, decode_tokens, warmup, repeats, device, use_generate=True) -> dict:
     input_ids = build_inputs(vocab_size, batch_size, prompt_len, device)
 
     # Warmup (kernel compile / cuBLAS autotune / allocator growth), not timed.
     for _ in range(warmup):
-        _time_generate(model, input_ids, decode_tokens, make_cache)
+        _time_generate(model, input_ids, decode_tokens, make_cache, use_generate)
 
     # Prefill peak memory: reset, then a single prefill (+1 token).
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
-    _time_generate(model, input_ids, 1, make_cache)
+    _time_generate(model, input_ids, 1, make_cache, use_generate)
     prefill_peak = _peak_gb()
 
     # Prefill latency (time-to-first-token): median over repeats.
-    ttft = [_time_generate(model, input_ids, 1, make_cache) for _ in range(repeats)]
+    ttft = [_time_generate(model, input_ids, 1, make_cache, use_generate) for _ in range(repeats)]
     ttft_ms = statistics.median(ttft)
 
     # Overall peak memory for a full generate(decode_tokens).
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
-    _time_generate(model, input_ids, decode_tokens, make_cache)
+    _time_generate(model, input_ids, decode_tokens, make_cache, use_generate)
     total_peak = _peak_gb()
 
     # Decode per-token latency: timed directly (prefill excluded), so it stays
@@ -193,15 +263,23 @@ def run(args) -> None:
         log_eps=args.log_eps,
         group_size=args.group_size,
         residual_length=args.residual_length,
+        num_bits=args.num_bits,
+        quant_mode=args.quant_mode,
+        kv_rotation=args.kv_rotation,
+        kv_norm=args.kv_norm,
+        residual_evict_size=args.residual_evict_size,
     )
     device = model.device
     vocab_size = model.config.vocab_size
 
     results = {}
+    # OScaR's cache (oscar.DynamicCache) is not a transformers.Cache, so HF
+    # generate() can't drive it; use the manual model()-forward path instead.
+    use_generate = args.method != "oscar"
     for length in parse_int_list(args.lengths):
         r = measure(
             model, make_cache, vocab_size, args.batch_size, length,
-            args.decode_tokens, args.warmup, args.repeats, device,
+            args.decode_tokens, args.warmup, args.repeats, device, use_generate,
         )
         results[str(length)] = r
         print(
@@ -269,7 +347,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Prefill vs decode efficiency benchmark.")
     parser.add_argument("--compare", default=None, help="aggregate all *.json under this dir into a table and exit")
     parser.add_argument("--model", default="/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct")
-    parser.add_argument("--method", default="quantpc", help="quantpc | kivi | flash_attention_2 | sdpa | eager")
+    parser.add_argument("--method", default="quantpc", help="quantpc | oscar | kivi | flash_attention_2 | sdpa | eager")
     parser.add_argument("--lengths", default="4096,16384,32768", help="comma-separated prompt lengths")
     parser.add_argument("--decode-tokens", type=int, default=64, help="new tokens to generate for decode timing")
     parser.add_argument("--batch-size", type=int, default=1)
@@ -292,8 +370,14 @@ def main() -> None:
     parser.add_argument("--prune-mode", type=int, default=3, help="decode pruning mode (CUDA v1_exp8 path)")
     parser.add_argument("--log-eps", type=float, default=-10.0, help="decode pruning log-epsilon threshold")
     parser.set_defaults(use_pruning=True)
-    parser.add_argument("--group-size", type=int, default=32, help="KIVI per-group quant size (method=kivi)")
+    parser.add_argument("--group-size", type=int, default=32, help="KIVI per-group quant size (method=kivi); OScaR group size (method=oscar, use 128)")
     parser.add_argument("--residual-length", type=int, default=32, help="KIVI recent fp16 tokens (method=kivi)")
+    # OScaR-specific KV-cache config (method=oscar); mirrors bench_e2e.load_model.
+    parser.add_argument("--num-bits", type=int, default=4, help="OScaR KV quant bits (method=oscar)")
+    parser.add_argument("--quant-mode", default="k-channel", help="OScaR quant mode (method=oscar)")
+    parser.add_argument("--kv-rotation", default="none", help="OScaR kv rotation (method=oscar)")
+    parser.add_argument("--kv-norm", default="0", help="OScaR kv norm (method=oscar)")
+    parser.add_argument("--residual-evict-size", type=int, default=None, help="OScaR residual evict size (method=oscar)")
     args = parser.parse_args()
 
     if args.compare:

@@ -19,3 +19,6 @@ dist/
 
 # Generated run logs.
 *.log
+
+# Generated profiler traces
+results/efficiency/prof/
