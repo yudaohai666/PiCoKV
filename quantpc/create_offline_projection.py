@@ -667,7 +667,7 @@ def main():
     parser.add_argument("--extra_config", type=str, default=None)
     parser.add_argument("--datasets", type=str, default="codeparrot,pg19,proof-pile")
     parser.add_argument("--dataset_dir", type=str, default=str(DEFAULT_DATASET_DIR))
-    parser.add_argument("--length_config", type=str, default="128000:20,64000:20,32000:20")
+    parser.add_argument("--length_config", type=str, default="131072:20,65536:20,32768:20")
     parser.add_argument("--tmp_state_dir", type=str, default=str(DEFAULT_TMP_DIR))
     parser.add_argument("--output_path", type=str, default=None)
     parser.add_argument("--projection_device", type=str, default=None)
