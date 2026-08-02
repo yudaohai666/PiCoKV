@@ -1,69 +1,71 @@
 #!/bin/bash
-# RULER 评测：支持 QuanPC 方法与 dense 基线
-#
-# 结果目录结构（相对仓库根，脚本会 cd 到 REPO_ROOT 后再跑）：
-#   quantpc:  results/ruler/<MODEL>_quantpc_k{K}_v{V}/
+# RULER eval: QuanPC methods + dense baselines.
+# Output (relative to REPO_ROOT, cd'd below):
+#   quantpc:  results/ruler/<MODEL>_quantpc_k{K}_v{V}_exp{E}_zr{ZR}/
 #   baseline: results/ruler/<MODEL>_{flash_attention_2|sdpa}/
-#
-# 参考 benchmarks/Needle/run_niah.sh 的组织方式：把仓库根加入 PYTHONPATH，
-# 这样 runner 内的 `import src.lmeval` / `import quantpc` 可从任意 CWD 解析。
 
-# ── 路径引导 ──────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}"
 
-# 切到仓库根，使 runner 的相对输出路径 results/ruler/... 落在 QuantPC/results 下。
+# cd to repo root so runner's relative results/ruler/... lands under QuantPC/results.
 cd "${REPO_ROOT}"
 
-# hotpot QA 数据本地文件（CMU 源常年 502，改用本地副本）。
-# 由 SCRIPT_DIR 拼绝对路径，避免依赖运行时 CWD。
+# hotpot QA local file (CMU source is often 502; use local copy). Absolute path.
 export HOTPOTQA_JSON="${SCRIPT_DIR}/ruler_qa/hotpot_dev_distractor_v1.json"
 
-# ── 基础配置 ──────────────────────────────────────────────
 GPU=3
 MODEL="/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct"
 
-# RULER 参数
-MAX_SEQ_LENGTHS="32768"   # 逗号分隔，可写 "4096,8192,16384,32768,65536,131072"
+# RULER params
+MAX_SEQ_LENGTHS="32768"   # comma-separated, e.g. "4096,8192,16384,32768,65536,131072"
 MAX_LENGTH=131072
 BATCH_SIZE=1
 MAX_GEN_TOKS=128
 LIMIT=100
-# All RULER tasks - use "ruler" to run all tasks at once
-# TASKS="ruler"
-# CWE value-precision ablation: 只跑 cwe，快（仅100样本）
+# Use "ruler" for all tasks; here only cwe (fast, 100 samples).
 TASKS="ruler_cwe"
-# Or specify individual tasks:
+# All tasks:
 # TASKS="niah_single_1,niah_single_2,niah_single_3,niah_multikey_1,niah_multikey_2,niah_multikey_3,niah_multiquery,niah_multivalue,ruler_vt,ruler_cwe,ruler_fwe,ruler_qa_squad,ruler_qa_hotpot"
-# TASKS="ruler_qa_hotpot"
 
-# ── 方法列表 ──────────────────────────────────────────────
-# quantpc           = 我的量化 KV cache 方法（走下方 CONFIGS 的 K/V 组合）
-# flash_attention_2 = dense 全精度基线（flash-attn-2）
-# sdpa              = dense 全精度基线（torch SDPA）
+# Methods to run. quantpc/kivi/oscar = quantized KV; flash_attention_2/sdpa/eager = dense baselines.
 METHODS=(
   quantpc
+  # kivi
+  # oscar
   # flash_attention_2
   # sdpa
 )
 
-# quantpc 消融配置列表（仅 method=quantpc 时生效）
-# 格式："K V EXP_BITS ZEROROPE"
-#   K/V       = key/value 每 token 二进制投影分量数（存储精度），越大越精确
-#   EXP_BITS  = softmax 权重量化位宽，CUDA 仅支持 {1,2,4,8}
-#   ZEROROPE  = 量化 key 前置零的 RoPE 维数，须 0 <= ZR <= head_dim/2 (=64)
-# 全部只跑 cwe、单任务单跑 -> RNG 流位置一致，各点可直接横比。
-# 输出目录用显式 --output_path 编码全部变量，避免同 K/V 不同 exp/zr 相互覆盖。
+# KIVI params (2/4-bit KV, single run).
+KIVI_K="${KIVI_K:-2}"
+KIVI_V="${KIVI_V:-2}"
+KIVI_GROUP="${KIVI_GROUP:-32}"
+KIVI_RESIDUAL="${KIVI_RESIDUAL:-128}"
+
+# OScaR INT2 recipe. group_size MUST be 32: the int2 V-param interleaved packer
+# hardcodes 32-wide groups (4 groups); group 128 under-allocates v_params -> OOB write.
+OSCAR_NUM_BITS="${OSCAR_NUM_BITS:-2}"
+OSCAR_QUANT_MODE="${OSCAR_QUANT_MODE:-k-channel}"
+OSCAR_GROUP="${OSCAR_GROUP:-32}"
+OSCAR_KV_ROTATION="${OSCAR_KV_ROTATION:-hadamard}"
+OSCAR_KV_NORM="${OSCAR_KV_NORM:-1}"
+OSCAR_EVICT="${OSCAR_EVICT:-256}"
+OSCAR_OFFLINE_V_HAD="${OSCAR_OFFLINE_V_HAD:-1}"
+
+# quantpc ablation sweep (quantpc only). Fields: "K V EXP_BITS ZEROROPE".
+#   K/V      = per-token binary projection components (storage precision)
+#   EXP_BITS = softmax weight quant bits, CUDA supports {1,2,4,8}
+#   ZEROROPE = RoPE dims zeroed before quantizing key, 0 <= ZR <= head_dim/2 (=64)
+# Output dir encodes all vars so same K/V with different exp/zr don't overwrite.
 CONFIGS=(
-  # K   V   exp  zr    ── 锚点（当前默认配置）
+  # K   V   exp  zr    (anchor = current default)
   "320 320  4   20"
-  # ── value 精度消融（固定 exp4 zr20）
-  # ── exp-bits 消融（固定 K320 V320 zr20）
+  # exp-bits ablation (fixed K320 V320 zr20)
   "320 320  2   20"
   "320 320  6   20"
   "320 320  8   20"
-  # ── zerorope 消融（固定 K320 V320 exp4）
+  # zerorope ablation (fixed K320 V320 exp4)
   "320 320  4   0"
   "320 320  4   5"
   "320 320  4   10"
@@ -72,62 +74,50 @@ CONFIGS=(
   "320 320  4   30"
 )
 
-# ── 逐方法实验 ────────────────────────────────────────────
+# run_ruler METHOD OUT_PATH RUN_ARGS...
+run_ruler() {
+  local method="$1"; shift
+  local out="$1"; shift
+  local out_arg=()
+  [ -n "${out}" ] && out_arg=(--output_path "${out}")
+  CUDA_VISIBLE_DEVICES=${GPU} python "${SCRIPT_DIR}/run_ruler_evaluation.py" \
+    --model "${MODEL}" --method "${method}" --tasks "${TASKS}" \
+    --max_seq_lengths "${MAX_SEQ_LENGTHS}" --max_length "${MAX_LENGTH}" \
+    --batch_size "${BATCH_SIZE}" --max_gen_toks "${MAX_GEN_TOKS}" --limit "${LIMIT}" \
+    "${out_arg[@]}" --apply_chat_template "$@"
+}
+
+MODEL_NAME="$(basename "${MODEL}")"
+
 for method in "${METHODS[@]}"; do
-  if [ "${method}" = "quantpc" ]; then
-    MODEL_NAME="$(basename "${MODEL}")"
-    for cfg in "${CONFIGS[@]}"; do
-      read -r K V EXP ZR <<< "$cfg"
-
-      # 显式输出目录，编码全部消融变量，避免相互覆盖
-      OUT="results/ruler/${MODEL_NAME}_quantpc_k${K}_v${V}_exp${EXP}_zr${ZR}/"
-
-      echo "========================================"
-      echo "Running RULER: quantpc  k=${K} v=${V} exp-bits=${EXP} zerorope=${ZR}"
-      echo "  -> ${OUT}"
-      echo "========================================"
-
-      CUDA_VISIBLE_DEVICES=${GPU} \
-      python "${SCRIPT_DIR}/run_ruler_evaluation.py" \
-        --model "${MODEL}" \
-        --method quantpc \
-        --tasks "${TASKS}" \
-        --max_seq_lengths "${MAX_SEQ_LENGTHS}" \
-        --max_length "${MAX_LENGTH}" \
-        --batch_size "${BATCH_SIZE}" \
-        --max_gen_toks "${MAX_GEN_TOKS}" \
-        --limit "${LIMIT}" \
-        --k-bits "${K}" \
-        --v-bits "${V}" \
-        --projected-query-bits 8 \
-        --exp-bits "${EXP}" \
-        --eas 0.01 \
-        --zerorope "${ZR}" \
-        --cuda-v1-exp8 \
-        --output_path "${OUT}" \
-        --apply_chat_template
-
-      echo "Done: quantpc  k=${K} v=${V} exp-bits=${EXP} zerorope=${ZR}"
-      echo ""
-    done
-  else
-    echo "========================================"
-    echo "Running RULER: method=${method} (dense baseline)"
-    echo "========================================"
-
-    CUDA_VISIBLE_DEVICES=${GPU} \
-    python "${SCRIPT_DIR}/run_ruler_evaluation.py" \
-      --model "${MODEL}" \
-      --method "${method}" \
-      --tasks "${TASKS}" \
-      --max_seq_lengths "${MAX_SEQ_LENGTHS}" \
-      --max_length "${MAX_LENGTH}" \
-      --batch_size "${BATCH_SIZE}" \
-      --max_gen_toks "${MAX_GEN_TOKS}" \
-      --limit "${LIMIT}" \
-      --apply_chat_template
-
-    echo "Done: method=${method}"
-    echo ""
-  fi
+  case "${method}" in
+    quantpc)
+      for cfg in "${CONFIGS[@]}"; do
+        read -r K V EXP ZR <<< "$cfg"
+        OUT="results/ruler/${MODEL_NAME}_quantpc_k${K}_v${V}_exp${EXP}_zr${ZR}/"
+        echo "=== RULER: quantpc k=${K} v=${V} exp=${EXP} zr=${ZR} -> ${OUT} ==="
+        run_ruler quantpc "${OUT}" \
+          --k-bits "${K}" --v-bits "${V}" --exp-bits "${EXP}" --eas 0.01 --zerorope "${ZR}"
+      done
+      ;;
+    kivi)
+      echo "=== RULER: kivi k=${KIVI_K} v=${KIVI_V} group=${KIVI_GROUP} residual=${KIVI_RESIDUAL} ==="
+      run_ruler kivi "" \
+        --k-bits "${KIVI_K}" --v-bits "${KIVI_V}" \
+        --group-size "${KIVI_GROUP}" --residual-length "${KIVI_RESIDUAL}"
+      ;;
+    oscar)
+      echo "=== RULER: oscar int${OSCAR_NUM_BITS} group=${OSCAR_GROUP} rot=${OSCAR_KV_ROTATION} norm=${OSCAR_KV_NORM} evict=${OSCAR_EVICT} offlineV=${OSCAR_OFFLINE_V_HAD} ==="
+      OSCAR_ARGS=(--num-bits "${OSCAR_NUM_BITS}" --quant-mode "${OSCAR_QUANT_MODE}" --group-size "${OSCAR_GROUP}")
+      [ "${OSCAR_KV_ROTATION}" != "none" ] && OSCAR_ARGS+=(--kv-rotation "${OSCAR_KV_ROTATION}")
+      [ "${OSCAR_KV_NORM}" != "0" ]       && OSCAR_ARGS+=(--kv-norm "${OSCAR_KV_NORM}")
+      [ -n "${OSCAR_EVICT}" ]             && OSCAR_ARGS+=(--residual-evict-size "${OSCAR_EVICT}")
+      [ "${OSCAR_OFFLINE_V_HAD}" = "1" ]  && OSCAR_ARGS+=(--offline-v-hadamard)
+      run_ruler oscar "" "${OSCAR_ARGS[@]}"
+      ;;
+    *)
+      echo "=== RULER: ${method} (dense baseline) ==="
+      run_ruler "${method}" ""
+      ;;
+  esac
 done

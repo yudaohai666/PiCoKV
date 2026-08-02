@@ -26,7 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from benchmarks.common import load_quantpc_model, output_tag, seed_everything  # noqa: E402
+from benchmarks.common import load_model, output_tag, seed_everything  # noqa: E402
 
 # Config files live next to this script (config/*.json).
 CONFIG_DIR = Path(__file__).resolve().parent / "config"
@@ -55,33 +55,53 @@ class QuantPCModel:
         self,
         model_name: str,
         method: str = "quantpc",
+        # quantpc KV-cache params (--method quantpc)
         k_bits: int = 128,
         v_bits: int = 256,
-        projected_query_bits: int = 8,
+        sink_size: int = 64,
+        local_size: int = 1024,
         exp_bits: int = 4,
         eas: float = 0.01,
         zerorope: int = 30,
-        cuda_v1_exp8: bool = False,
-        refit_decoder: bool = False,
         use_pruning: bool = True,
         prune_mode: int = 3,
         log_eps: float = -10.0,
+        # KIVI params (--method kivi)
+        group_size: int = 32,
+        residual_length: int = 32,
+        # OScaR params (--method oscar) —— 默认 = INT2 官方配方
+        num_bits: int = 2,
+        quant_mode: str = "k-channel",
+        kv_rotation: str = "hadamard",
+        kv_norm: str = "1",
+        residual_evict_size: int | None = 256,
+        offline_v_hadamard: bool = True,
     ):
         self.method = method
-        self.model, self.tokenizer, self._make_cache = load_quantpc_model(
+        self.model, self.tokenizer, self._make_cache = load_model(
             model_name,
             method=method,
+            # quantpc KV-cache params (--method quantpc)
             k_bits=k_bits,
             v_bits=v_bits,
-            projected_query_bits=projected_query_bits,
+            sink_size=sink_size,
+            local_size=local_size,
             exp_bits=exp_bits,
             eas=eas,
             zerorope=zerorope,
-            cuda_v1_exp8=cuda_v1_exp8,
-            refit_decoder=refit_decoder,
             use_pruning=use_pruning,
             prune_mode=prune_mode,
             log_eps=log_eps,
+            # KIVI params (--method kivi)
+            group_size=group_size,
+            residual_length=residual_length,
+            # OScaR params (--method oscar)
+            num_bits=num_bits,
+            quant_mode=quant_mode,
+            kv_rotation=kv_rotation,
+            kv_norm=kv_norm,
+            residual_evict_size=residual_evict_size,
+            offline_v_hadamard=offline_v_hadamard,
         )
 
     def build_cache(self):
@@ -196,26 +216,34 @@ def parse_args(argv=None):
     p.add_argument(
         "--method",
         default="quantpc",
-        help="'quantpc' (quantized KV cache) or a dense baseline attn impl "
-             "('flash_attention_2' / 'sdpa' / 'eager')",
+        help="'quantpc' / 'kivi' / 'oscar' (quantized KV cache) or a dense "
+             "baseline attn impl ('flash_attention_2' / 'sdpa' / 'eager')",
     )
     p.add_argument("--save_dir", default="results/longbench", help="base output dir")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--k-bits", type=int, default=128)
-    p.add_argument("--v-bits", type=int, default=256)
-    p.add_argument("--projected-query-bits", type=int, default=8)
+    # ── quantpc KV-cache params (--method quantpc) ──
+    p.add_argument("--k-bits", type=int, default=128, help="key projection bits (also KIVI KV bits)")
+    p.add_argument("--v-bits", type=int, default=256, help="value projection bits (also KIVI KV bits)")
+    p.add_argument("--sink-size", type=int, default=64, help="initial (sink) tokens kept in full precision")
+    p.add_argument("--local-size", type=int, default=1024, help="most-recent (local) tokens kept in full precision")
     p.add_argument("--exp-bits", type=int, default=4)
     p.add_argument("--eas", type=float, default=0.01)
     p.add_argument("--zerorope", type=int, default=30)
-    p.add_argument("--cuda-v1-exp8", action="store_true",
-                   help="use CUDA backend (quantpc.quanpc); else torch reference")
-    p.add_argument("--refit-decoder", action="store_true",
-                   help="enable decode-matrix refit (CUDA prefill falls back to torch)")
     p.add_argument("--no-pruning", dest="use_pruning", action="store_false",
                    help="disable decode-time global pruning (gqa4 CUDA path); pruning is on by default")
     p.add_argument("--prune-mode", type=int, default=3, help="decode pruning mode (CUDA v1_exp8 path)")
     p.add_argument("--log-eps", type=float, default=-10.0, help="decode pruning log-epsilon threshold")
     p.set_defaults(use_pruning=True)
+    # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
+    p.add_argument("--group-size", type=int, default=32, help="KIVI per-group quant size; OScaR group size (INT2 必须=32)")
+    p.add_argument("--residual-length", type=int, default=32, help="KIVI recent fp16 tokens kept unquantized")
+    # ── OScaR params (--method oscar) —— 默认 = INT2 官方配方 ──
+    p.add_argument("--num-bits", type=int, default=2, help="OScaR KV quant bits (INT2 默认)")
+    p.add_argument("--quant-mode", default="k-channel", help="OScaR quant mode")
+    p.add_argument("--kv-rotation", default="hadamard", help="OScaR kv rotation (INT2 默认 hadamard)")
+    p.add_argument("--kv-norm", default="1", help="OScaR kv norm (INT2 默认 1)")
+    p.add_argument("--residual-evict-size", type=int, default=256, help="OScaR residual evict size (INT2 默认 256)")
+    p.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
     return p.parse_args(argv)
 
 
@@ -232,7 +260,7 @@ def main() -> None:
     max_length = model2maxlen.get(model_key, 31500)
     print(f"Model: {args.model} | Method: {args.method} | max_length: {max_length}")
 
-    tag = output_tag(args.method, args.k_bits, args.v_bits, args.refit_decoder)
+    tag = output_tag(args.method, args.k_bits, args.v_bits, args.num_bits)
     save_path = Path(args.save_dir) / model_key / tag
     save_path.mkdir(parents=True, exist_ok=True)
     print(f"Output dir: {save_path}")
@@ -240,17 +268,27 @@ def main() -> None:
     model = QuantPCModel(
         args.model,
         method=args.method,
+        # quantpc KV-cache params (--method quantpc)
         k_bits=args.k_bits,
         v_bits=args.v_bits,
-        projected_query_bits=args.projected_query_bits,
+        sink_size=args.sink_size,
+        local_size=args.local_size,
         exp_bits=args.exp_bits,
         eas=args.eas,
         zerorope=args.zerorope,
-        cuda_v1_exp8=args.cuda_v1_exp8,
-        refit_decoder=args.refit_decoder,
         use_pruning=args.use_pruning,
         prune_mode=args.prune_mode,
         log_eps=args.log_eps,
+        # KIVI params (--method kivi)
+        group_size=args.group_size,
+        residual_length=args.residual_length,
+        # OScaR params (--method oscar)
+        num_bits=args.num_bits,
+        quant_mode=args.quant_mode,
+        kv_rotation=args.kv_rotation,
+        kv_norm=args.kv_norm,
+        residual_evict_size=args.residual_evict_size,
+        offline_v_hadamard=args.offline_v_hadamard,
     )
 
     for dataset in datasets:

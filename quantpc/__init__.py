@@ -1,7 +1,9 @@
-"""QuanPC core package: quantized KV-cache attention algorithm and CUDA extensions.
+"""QuanPC integrated package.
 
-Benchmark-agnostic. Public modules:
-- ``quantpc.quanpc``: model patching (``modify``) and ``QuantKVCache``.
-- ``quantpc.quanpc_torch``: torch-only reference implementation.
-- ``quantpc.quanpc_api``: cleaned public API (learn_projection / prepare_kv_cache / decode_attention).
+Groups the production online-projection standalone path and its two JIT CUDA
+extensions under one namespace:
+
+- ``quantpc.quanpc_standalone``          : public prepare/decode API + HF Llama adapter.
+- ``quantpc.quanpc_cuda_extension``      : single-token decode CUDA kernels.
+- ``quantpc.quanpc_prefill_cuda_extension``: cache-packing / gather CUDA kernels.
 """

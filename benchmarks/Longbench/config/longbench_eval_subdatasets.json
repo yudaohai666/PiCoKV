@@ -1,5 +1,8 @@
 {
     "datasets": [
+        "gov_report",
+        "repobench-p",
+        "triviaqa",
         "lcc",
         "qasper",
         "multifieldqa_en",

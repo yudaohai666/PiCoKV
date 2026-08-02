@@ -20,15 +20,6 @@ void quanpc_dense_attention_numerator_fn(
     );
 }
 
-void quanpc_rmsnorm_fn(
-  at::Tensor input,
-  at::Tensor weight,
-  at::Tensor output,
-  double eps
-) {
-    quanpc_rmsnorm(input, weight, output, eps);
-}
-
 void quanpc_fused_output_projection_fn(
   at::Tensor dense_output,
   at::Tensor glob_code_output,
@@ -42,42 +33,6 @@ void quanpc_fused_output_projection_fn(
       glob_den,
       value_proj,
       attn_output
-    );
-}
-
-void quanpc_fused_output_projection_splitk_fn(
-  at::Tensor dense_output,
-  at::Tensor glob_code_output,
-  at::Tensor glob_den,
-  at::Tensor value_proj,
-  at::Tensor attn_output,
-  int64_t k_splits
-) {
-    quanpc_fused_output_projection_splitk(
-      dense_output,
-      glob_code_output,
-      glob_den,
-      value_proj,
-      attn_output,
-      k_splits
-    );
-}
-
-void quanpc_fused_output_projection_atomic_fn(
-  at::Tensor dense_output,
-  at::Tensor glob_code_output,
-  at::Tensor glob_den,
-  at::Tensor value_proj,
-  at::Tensor attn_output,
-  int64_t k_splits
-) {
-    quanpc_fused_output_projection_atomic(
-      dense_output,
-      glob_code_output,
-      glob_den,
-      value_proj,
-      attn_output,
-      k_splits
     );
 }
 
@@ -450,10 +405,7 @@ void quanpc_decode_tail_packed_v1_exp8_tiled_gqa4_atomic_pruned_fn(
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("quanpc_dense_attention_numerator_fn", &quanpc_dense_attention_numerator_fn, "quanpc_dense_attention_numerator_fn");
-  m.def("quanpc_rmsnorm_fn", &quanpc_rmsnorm_fn, "quanpc_rmsnorm_fn");
   m.def("quanpc_fused_output_projection_fn", &quanpc_fused_output_projection_fn, "quanpc_fused_output_projection_fn");
-  m.def("quanpc_fused_output_projection_splitk_fn", &quanpc_fused_output_projection_splitk_fn, "quanpc_fused_output_projection_splitk_fn");
-  m.def("quanpc_fused_output_projection_atomic_fn", &quanpc_fused_output_projection_atomic_fn, "quanpc_fused_output_projection_atomic_fn");
   m.def("quanpc_global_code_output_packed_value_tiled_gqa4_fn", &quanpc_global_code_output_packed_value_tiled_gqa4_fn, "quanpc_global_code_output_packed_value_tiled_gqa4_fn");
   m.def("quanpc_global_code_output_packed_value_tiled_gqa4_tensorcore_fn", &quanpc_global_code_output_packed_value_tiled_gqa4_tensorcore_fn, "quanpc_global_code_output_packed_value_tiled_gqa4_tensorcore_fn");
   m.def("quanpc_global_code_output_v1_exp8_tiled_gqa4_fn", &quanpc_global_code_output_v1_exp8_tiled_gqa4_fn, "quanpc_global_code_output_v1_exp8_tiled_gqa4_fn");

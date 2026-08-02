@@ -35,7 +35,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from benchmarks.common import load_quantpc_model, output_tag, seed_everything  # noqa: E402
+from benchmarks.common import load_model, output_tag, seed_everything  # noqa: E402
 
 
 def parse_int_list(value: str) -> list[int]:
@@ -72,59 +72,8 @@ def build_inputs(vocab_size: int, batch_size: int, prompt_len: int, device) -> t
     return torch.randint(1, vocab_size, (batch_size, prompt_len), device=device, dtype=torch.long)
 
 
-def _manual_generate(model, input_ids, max_new_tokens, make_cache) -> float:
-    """Wall time (ms) of a manual greedy prefill + (N-1) decode via ``model()``.
-
-    Equivalent to ``generate(max_new_tokens=N)`` but driven through direct
-    ``model()`` forwards (prefill then single-token steps), threading
-    ``past_key_values`` explicitly. Used for OScaR, whose custom cache
-    (``oscar.DynamicCache``) is NOT a ``transformers.Cache`` subclass, so HF
-    ``generate``'s cache bookkeeping (``_get_initial_cache_position`` /
-    ``_prepare_cache_for_generation``) rejects it. The model auto-threads its
-    own oscar cache through the ``prepare_inputs_for_generation`` path, matching
-    the decode-timing loop and bench_e2e's driving methodology.
-    """
-    device = input_ids.device
-    prompt_len = input_ids.shape[1]
-    pkv = make_cache() if make_cache is not None else None
-    gen_ids = input_ids
-    attn = torch.ones_like(input_ids)
-    _sync()
-    t0 = time.perf_counter()
-    with torch.no_grad():
-        mi = model.prepare_inputs_for_generation(
-            gen_ids, past_key_values=pkv, attention_mask=attn, use_cache=True,
-            cache_position=torch.arange(prompt_len, device=device), logits_to_keep=1)
-        out = model(**mi)
-        pkv = out.past_key_values
-        next_tok = out.logits[:, -1:, :].argmax(dim=-1)
-        gen_ids = torch.cat([gen_ids, next_tok], dim=1)
-        attn = torch.cat([attn, torch.ones_like(next_tok)], dim=1)
-        for step in range(max_new_tokens - 1):
-            pos = prompt_len + step
-            mi = model.prepare_inputs_for_generation(
-                gen_ids, past_key_values=pkv, attention_mask=attn, use_cache=True,
-                cache_position=torch.arange(pos, pos + 1, device=device), logits_to_keep=1)
-            out = model(**mi)
-            pkv = out.past_key_values
-            next_tok = out.logits[:, -1:, :].argmax(dim=-1)
-            gen_ids = torch.cat([gen_ids, next_tok], dim=1)
-            attn = torch.cat([attn, torch.ones_like(next_tok)], dim=1)
-    _sync()
-    elapsed = (time.perf_counter() - t0) * 1000.0
-    del pkv, gen_ids, attn, out, next_tok, mi
-    _free()
-    return elapsed
-
-
-def _time_generate(model, input_ids, max_new_tokens, make_cache, use_generate=True) -> float:
-    """Return wall time (ms) for one greedy generate of exactly ``max_new_tokens``.
-
-    ``use_generate=False`` (OScaR) drives the same work via ``_manual_generate``
-    because OScaR's cache is incompatible with HF ``generate``.
-    """
-    if not use_generate:
-        return _manual_generate(model, input_ids, max_new_tokens, make_cache)
+def _time_generate(model, input_ids, max_new_tokens, make_cache) -> float:
+    """Return wall time (ms) for one greedy generate of exactly ``max_new_tokens``."""
     eos = model.config.eos_token_id
     pad_token_id = eos[0] if isinstance(eos, (list, tuple)) else eos  # Llama-3.1 eos may be a list
     gen_kwargs = dict(
@@ -153,15 +102,22 @@ def _time_generate(model, input_ids, max_new_tokens, make_cache, use_generate=Tr
     return elapsed
 
 
-def _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats) -> float:
-    """Median per-token decode latency, timing ONLY the decode steps.
+def _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats, decode_warmup=2) -> float:
+    """Median per-token STEADY-STATE decode latency, timing ONLY the decode steps.
 
-    Prefill once (untimed) to populate the KV cache, then time a loop of
+    Prefill once (untimed) to populate the KV cache, run ``decode_warmup`` untimed
+    decode steps to absorb the post-prefill startup transient, then time a loop of
     single-token forwards. This isolates decode from prefill, so it stays
     reliable even when prefill >> decode (where ``total - ttft`` subtraction
     goes negative). Each step goes through ``prepare_inputs_for_generation`` so
     position_ids / cache_position / logits_to_keep match ``generate`` exactly,
     uniformly across quantpc / kivi / dense.
+
+    The first decode step after a long prefill can be 10-50x a steady step (one-off
+    workspace allocation / cuBLAS autotune / kernel init, and cudaMalloc under a
+    tight caching-allocator pool). Timing it would smear a startup transient into
+    the per-token average and mis-rank methods; ``decode_warmup`` steps move it out
+    of the timed region so the number reflects steady-state throughput.
 
     ``cache_position`` is required by the stock (quantpc/dense) prepare path;
     ``logits_to_keep=1`` avoids materializing full-sequence fp32 logits at
@@ -185,11 +141,10 @@ def _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats) -
             next_tok = out.logits[:, -1:, :].argmax(dim=-1)
             gen_ids = torch.cat([gen_ids, next_tok], dim=1)
             attn = torch.cat([attn, torch.ones_like(next_tok)], dim=1)
-            # Timed decode: `decode_tokens` single-token forwards on the cache.
-            _sync()
-            t0 = time.perf_counter()
-            for step in range(decode_tokens):
-                pos = prompt_len + step  # absolute position of the token to feed
+            pos = prompt_len  # absolute position of the next token to feed
+            # Warmup decode (NOT timed): absorb the one-time post-prefill startup
+            # transient so the timed loop reflects STEADY-STATE decode.
+            for _ in range(decode_warmup):
                 mi = model.prepare_inputs_for_generation(
                     gen_ids, past_key_values=pkv, attention_mask=attn, use_cache=True,
                     cache_position=torch.arange(pos, pos + 1, device=device), logits_to_keep=1)
@@ -198,6 +153,20 @@ def _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats) -
                 next_tok = out.logits[:, -1:, :].argmax(dim=-1)
                 gen_ids = torch.cat([gen_ids, next_tok], dim=1)
                 attn = torch.cat([attn, torch.ones_like(next_tok)], dim=1)
+                pos += 1
+            # Timed decode: `decode_tokens` single-token forwards on the cache.
+            _sync()
+            t0 = time.perf_counter()
+            for _ in range(decode_tokens):
+                mi = model.prepare_inputs_for_generation(
+                    gen_ids, past_key_values=pkv, attention_mask=attn, use_cache=True,
+                    cache_position=torch.arange(pos, pos + 1, device=device), logits_to_keep=1)
+                out = model(**mi)
+                pkv = out.past_key_values
+                next_tok = out.logits[:, -1:, :].argmax(dim=-1)
+                gen_ids = torch.cat([gen_ids, next_tok], dim=1)
+                attn = torch.cat([attn, torch.ones_like(next_tok)], dim=1)
+                pos += 1
             _sync()
         per_token.append((time.perf_counter() - t0) * 1000.0 / decode_tokens)
         del pkv, gen_ids, attn, out, next_tok, mi
@@ -205,90 +174,138 @@ def _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats) -
     return statistics.median(per_token)
 
 
-def measure(model, make_cache, vocab_size, batch_size, prompt_len, decode_tokens, warmup, repeats, device, use_generate=True) -> dict:
+def _decode_peak_gb(model, input_ids, decode_tokens, make_cache, device) -> float:
+    """Peak GPU memory during the DECODE phase only.
+
+    Prefill once (untimed) to build the KV cache, reset the peak counter, then
+    run ``decode_tokens`` single-token forwards. Mirrors ``_decode_ms_per_token``
+    but records memory instead of time, so the prefill peak is excluded.
+    """
+    prompt_len = input_ids.shape[1]
+    pkv = make_cache() if make_cache is not None else None
+    gen_ids = input_ids
+    attn = torch.ones_like(input_ids)
+    with torch.no_grad():
+        # Prefill (excluded from the decode peak).
+        mi = model.prepare_inputs_for_generation(
+            gen_ids, past_key_values=pkv, attention_mask=attn, use_cache=True,
+            cache_position=torch.arange(prompt_len, device=device), logits_to_keep=1)
+        out = model(**mi)
+        pkv = out.past_key_values
+        next_tok = out.logits[:, -1:, :].argmax(dim=-1)
+        gen_ids = torch.cat([gen_ids, next_tok], dim=1)
+        attn = torch.cat([attn, torch.ones_like(next_tok)], dim=1)
+        # Reset AFTER prefill so only decode-step allocations count.
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+        for step in range(decode_tokens):
+            pos = prompt_len + step
+            mi = model.prepare_inputs_for_generation(
+                gen_ids, past_key_values=pkv, attention_mask=attn, use_cache=True,
+                cache_position=torch.arange(pos, pos + 1, device=device), logits_to_keep=1)
+            out = model(**mi)
+            pkv = out.past_key_values
+            next_tok = out.logits[:, -1:, :].argmax(dim=-1)
+            gen_ids = torch.cat([gen_ids, next_tok], dim=1)
+            attn = torch.cat([attn, torch.ones_like(next_tok)], dim=1)
+    peak = _peak_gb()
+    del pkv, gen_ids, attn, out, next_tok, mi
+    _free()
+    return peak
+
+
+def measure(model, make_cache, vocab_size, batch_size, prompt_len, decode_tokens, warmup, repeats, device, mem_only=False) -> dict:
+    """Benchmark one prompt length.
+
+    ``mem_only=True``  -> memory-only mode: measure peak GPU memory, skip latency.
+    ``mem_only=False`` -> latency-only mode: measure prefill/decode latency, skip
+                          peak memory (avoids the extra reset+generate passes).
+    """
     input_ids = build_inputs(vocab_size, batch_size, prompt_len, device)
 
     # Warmup (kernel compile / cuBLAS autotune / allocator growth), not timed.
     for _ in range(warmup):
-        _time_generate(model, input_ids, decode_tokens, make_cache, use_generate)
+        _time_generate(model, input_ids, decode_tokens, make_cache)
 
-    # Prefill peak memory: reset, then a single prefill (+1 token).
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
-    _time_generate(model, input_ids, 1, make_cache, use_generate)
-    prefill_peak = _peak_gb()
+    prefill_peak = decode_peak = None
+    ttft_ms = decode_ms_per_token = decode_toks_per_s = None
 
-    # Prefill latency (time-to-first-token): median over repeats.
-    ttft = [_time_generate(model, input_ids, 1, make_cache, use_generate) for _ in range(repeats)]
-    ttft_ms = statistics.median(ttft)
+    if mem_only:
+        # Prefill-phase peak: reset -> single prefill (+1 token).
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+        _time_generate(model, input_ids, 1, make_cache)
+        prefill_peak = _peak_gb()
 
-    # Overall peak memory for a full generate(decode_tokens).
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
-    _time_generate(model, input_ids, decode_tokens, make_cache, use_generate)
-    total_peak = _peak_gb()
-
-    # Decode per-token latency: timed directly (prefill excluded), so it stays
-    # reliable even when prefill >> decode.
-    decode_ms_per_token = _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats)
-    decode_toks_per_s = (1000.0 / decode_ms_per_token * batch_size) if decode_ms_per_token > 0 else float("nan")
+        # Decode-phase peak: prefill (untimed) -> reset -> decode loop.
+        decode_peak = _decode_peak_gb(model, input_ids, decode_tokens, make_cache, device)
+    else:
+        # Latency-only: prefill (time-to-first-token) + decode per-token, no peak.
+        ttft = [_time_generate(model, input_ids, 1, make_cache) for _ in range(repeats)]
+        ttft_ms = statistics.median(ttft)
+        decode_ms_per_token = _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats)
+        decode_toks_per_s = (1000.0 / decode_ms_per_token * batch_size) if decode_ms_per_token > 0 else float("nan")
 
     return {
         "prompt_len": prompt_len,
-        "prefill_ms": round(ttft_ms, 3),
-        "decode_ms_per_token": round(decode_ms_per_token, 4),
-        "decode_toks_per_s": round(decode_toks_per_s, 2),
-        "prefill_peak_gb": round(prefill_peak, 3),
-        "total_peak_gb": round(total_peak, 3),
+        "prefill_ms": round(ttft_ms, 3) if ttft_ms is not None else None,
+        "decode_ms_per_token": round(decode_ms_per_token, 4) if decode_ms_per_token is not None else None,
+        "decode_toks_per_s": round(decode_toks_per_s, 2) if decode_toks_per_s is not None else None,
+        "prefill_peak_gb": round(prefill_peak, 3) if prefill_peak is not None else None,
+        "decode_peak_gb": round(decode_peak, 3) if decode_peak is not None else None,
     }
 
 
 def run(args) -> None:
     seed_everything(42)
-    model, _tokenizer, make_cache = load_quantpc_model(
+    model, _tokenizer, make_cache = load_model(
         args.model,
         method=args.method,
+        # quantpc KV-cache params (--method quantpc)
         k_bits=args.k_bits,
         v_bits=args.v_bits,
         sink_size=args.sink_size,
         local_size=args.local_size,
-        projected_query_bits=args.projected_query_bits,
         exp_bits=args.exp_bits,
         eas=args.eas,
         zerorope=args.zerorope,
-        cuda_v1_exp8=args.cuda_v1_exp8,
-        refit_decoder=args.refit_decoder,
         use_pruning=args.use_pruning,
         prune_mode=args.prune_mode,
         log_eps=args.log_eps,
+        # KIVI params (--method kivi)
         group_size=args.group_size,
         residual_length=args.residual_length,
+        # OScaR params (--method oscar)
         num_bits=args.num_bits,
         quant_mode=args.quant_mode,
         kv_rotation=args.kv_rotation,
         kv_norm=args.kv_norm,
         residual_evict_size=args.residual_evict_size,
+        offline_v_hadamard=args.offline_v_hadamard,
     )
     device = model.device
     vocab_size = model.config.vocab_size
 
     results = {}
-    # OScaR's cache (oscar.DynamicCache) is not a transformers.Cache, so HF
-    # generate() can't drive it; use the manual model()-forward path instead.
-    use_generate = args.method != "oscar"
     for length in parse_int_list(args.lengths):
         r = measure(
             model, make_cache, vocab_size, args.batch_size, length,
-            args.decode_tokens, args.warmup, args.repeats, device, use_generate,
+            args.decode_tokens, args.warmup, args.repeats, device,
+            mem_only=args.mem_only,
         )
         results[str(length)] = r
-        print(
-            f"[{args.method}] L={length}: prefill={r['prefill_ms']}ms  "
-            f"decode={r['decode_ms_per_token']}ms/tok ({r['decode_toks_per_s']} tok/s)  "
-            f"peak prefill/total={r['prefill_peak_gb']}/{r['total_peak_gb']}GB"
-        )
+        if args.mem_only:
+            print(
+                f"[{args.method}] L={length}: "
+                f"peak prefill/decode={r['prefill_peak_gb']}/{r['decode_peak_gb']}GB"
+            )
+        else:
+            print(
+                f"[{args.method}] L={length}: prefill={r['prefill_ms']}ms  "
+                f"decode={r['decode_ms_per_token']}ms/tok ({r['decode_toks_per_s']} tok/s)"
+            )
 
-    tag = output_tag(args.method, args.k_bits, args.v_bits, args.refit_decoder)
+    tag = output_tag(args.method, args.k_bits, args.v_bits, args.num_bits)
     payload = {
         "method": args.method,
         "tag": tag,
@@ -298,8 +315,7 @@ def run(args) -> None:
         "config": {
             "k_bits": args.k_bits, "v_bits": args.v_bits, "group_size": args.group_size,
             "residual_length": args.residual_length, "exp_bits": args.exp_bits,
-            "projected_query_bits": args.projected_query_bits, "eas": args.eas,
-            "zerorope": args.zerorope, "cuda_v1_exp8": args.cuda_v1_exp8,
+            "eas": args.eas, "zerorope": args.zerorope,
         },
         "results": results,
     }
@@ -328,7 +344,7 @@ def compare(directory: str) -> None:
         print(f"\n=== prompt_len = {length} ===")
         header = (
             f"{'method':<22}{'prefill_ms':>12}{'dec_ms/tok':>12}"
-            f"{'tok/s':>10}{'prefill_GB':>12}{'total_GB':>10}"
+            f"{'tok/s':>10}{'prefill_GB':>12}{'decode_GB':>10}"
         )
         print(header)
         print("-" * len(header))
@@ -336,10 +352,13 @@ def compare(directory: str) -> None:
             r = p["results"].get(str(length))
             if not r:
                 continue
+            def _c(key, width):
+                v = r.get(key)
+                return f"{('-' if v is None else v):>{width}}"
             print(
                 f"{p.get('tag', p.get('method', '?')):<22}"
-                f"{r['prefill_ms']:>12}{r['decode_ms_per_token']:>12}"
-                f"{r['decode_toks_per_s']:>10}{r['prefill_peak_gb']:>12}{r['total_peak_gb']:>10}"
+                f"{_c('prefill_ms', 12)}{_c('decode_ms_per_token', 12)}"
+                f"{_c('decode_toks_per_s', 10)}{_c('prefill_peak_gb', 12)}{_c('decode_peak_gb', 10)}"
             )
 
 
@@ -353,31 +372,33 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument("--mem-only", action="store_true",
+                        help="memory-only mode: measure peak GPU memory only, skip all latency timing; "
+                             "when off, run latency benchmark only and do NO memory-related work")
     parser.add_argument("--output", default="results/efficiency/quantpc.json")
-    # KV-cache config (shared with the NIAH runner semantics).
-    parser.add_argument("--k-bits", type=int, default=256)
-    parser.add_argument("--v-bits", type=int, default=256)
-    parser.add_argument("--sink-size", type=int, default=64)
-    parser.add_argument("--local-size", type=int, default=1024)
-    parser.add_argument("--projected-query-bits", type=int, default=8)
+    # ── quantpc KV-cache params (--method quantpc) ──
+    parser.add_argument("--k-bits", type=int, default=256, help="key projection bits (also KIVI KV bits)")
+    parser.add_argument("--v-bits", type=int, default=256, help="value projection bits (also KIVI KV bits)")
+    parser.add_argument("--sink-size", type=int, default=64, help="initial (sink) tokens kept in full precision")
+    parser.add_argument("--local-size", type=int, default=1024, help="most-recent (local) tokens kept in full precision")
     parser.add_argument("--exp-bits", type=int, default=4)
     parser.add_argument("--eas", type=float, default=0.01)
     parser.add_argument("--zerorope", type=int, default=20)
-    parser.add_argument("--cuda-v1-exp8", action="store_true")
-    parser.add_argument("--refit-decoder", action="store_true")
     parser.add_argument("--no-pruning", dest="use_pruning", action="store_false",
                         help="disable decode-time global pruning (gqa4 CUDA path); pruning is on by default")
     parser.add_argument("--prune-mode", type=int, default=3, help="decode pruning mode (CUDA v1_exp8 path)")
     parser.add_argument("--log-eps", type=float, default=-10.0, help="decode pruning log-epsilon threshold")
     parser.set_defaults(use_pruning=True)
-    parser.add_argument("--group-size", type=int, default=32, help="KIVI per-group quant size (method=kivi); OScaR group size (method=oscar, use 128)")
-    parser.add_argument("--residual-length", type=int, default=32, help="KIVI recent fp16 tokens (method=kivi)")
-    # OScaR-specific KV-cache config (method=oscar); mirrors bench_e2e.load_model.
-    parser.add_argument("--num-bits", type=int, default=4, help="OScaR KV quant bits (method=oscar)")
-    parser.add_argument("--quant-mode", default="k-channel", help="OScaR quant mode (method=oscar)")
-    parser.add_argument("--kv-rotation", default="none", help="OScaR kv rotation (method=oscar)")
-    parser.add_argument("--kv-norm", default="0", help="OScaR kv norm (method=oscar)")
-    parser.add_argument("--residual-evict-size", type=int, default=None, help="OScaR residual evict size (method=oscar)")
+    # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
+    parser.add_argument("--group-size", type=int, default=32, help="KIVI per-group quant size; OScaR group size (INT2 必须=32)")
+    parser.add_argument("--residual-length", type=int, default=32, help="KIVI recent fp16 tokens kept unquantized")
+    # ── OScaR params (--method oscar) ──
+    parser.add_argument("--num-bits", type=int, default=2, help="OScaR KV quant bits (INT2 默认)")
+    parser.add_argument("--quant-mode", default="k-channel", help="OScaR quant mode")
+    parser.add_argument("--kv-rotation", default="hadamard", help="OScaR kv rotation (INT2 默认 hadamard)")
+    parser.add_argument("--kv-norm", default="1", help="OScaR kv norm (INT2 默认 1)")
+    parser.add_argument("--residual-evict-size", type=int, default=256, help="OScaR residual evict size (INT2 默认 256)")
+    parser.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
     args = parser.parse_args()
 
     if args.compare:

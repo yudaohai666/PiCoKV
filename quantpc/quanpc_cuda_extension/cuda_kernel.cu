@@ -2,8 +2,6 @@
 
 #include <stdint.h>
 #include <math.h>
-#include <unordered_map>
-#include <mutex>
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
@@ -165,171 +163,6 @@ __global__ void quanpc_fused_output_projection_kernel(
     attn_output[dense_base + d] = quanpc_from_float<scalar_t>(numerator * inv_den);
   }
 
-}
-
-// Two-pass non-atomic split-K of the fused output projection.
-// Phase 1: block (row, k) accumulates the c in [k*W, (k+1)*W) chunk of the
-// Cv reduction into partial[row][k][d] (float32). No dense add, no inv_den.
-// The reduction over c is a plain sum, so partitioning c into disjoint chunks
-// and summing the chunk partials equals the single-pass sum in exact
-// arithmetic; the only difference is float reassociation, and partials are kept
-// in fp32 so the error class is no worse than the single-pass kernel above.
-template <typename scalar_t>
-__global__ void quanpc_output_projection_splitk_accum_kernel(
-  const float *__restrict__ glob_code_output, // [B,QH,S,Cv]
-  const scalar_t *__restrict__ value_proj,    // [B,KVH,Cv,D]
-  float *__restrict__ partial,                // [rows,K,D]
-  const int B,
-  const int QH,
-  const int KVH,
-  const int S,
-  const int Cv,
-  const int D,
-  const int K
-) {
-  const int row = blockIdx.x;
-  const int k = blockIdx.y;
-  const int thread_idx = threadIdx.x;
-  const int S_idx = row % S;
-  const int qh = (row / S) % QH;
-  const int B_idx = row / (S * QH);
-  const int group_size = QH / KVH;
-  const int KVH_idx = qh / group_size;
-
-  const long code_base = (long)row * Cv;
-  const long proj_base = ((long)(B_idx * KVH + KVH_idx) * Cv) * D;
-
-  const int W = (Cv + K - 1) / K;
-  const int c0 = k * W;
-  int c1 = c0 + W;
-  if (c1 > Cv) c1 = Cv;
-
-  for (int d = thread_idx; d < D; d += blockDim.x) {
-    float acc = 0.0f;
-    for (int c = c0; c < c1; c++) {
-      const float code_value = quanpc_code_for_projection<scalar_t>(glob_code_output[code_base + c]);
-      acc += code_value * quanpc_to_float(value_proj[proj_base + (long)c * D + d]);
-    }
-    partial[((long)row * K + k) * D + d] = acc;
-  }
-  (void)S_idx;
-}
-
-// Phase 2: block (row) reduces the K chunk partials, adds the dense numerator,
-// and applies inv_den exactly once (matching the single-pass finalize bit-for-bit
-// aside from the reassociated glob_acc). Kernel boundary vs phase 1 provides the
-// cross-block synchronization a single fused kernel cannot.
-template <typename scalar_t>
-__global__ void quanpc_output_projection_splitk_finalize_kernel(
-  const float *__restrict__ partial,          // [rows,K,D]
-  const scalar_t *__restrict__ dense_output,  // [B,QH,S,D]
-  const float *__restrict__ glob_den,         // [B,QH,S]
-  scalar_t *__restrict__ attn_output,         // [B,QH,S,D]
-  const int rows,
-  const int K,
-  const int D
-) {
-  const int row = blockIdx.x;
-  const int thread_idx = threadIdx.x;
-  const float inv_den = 1.0f / (1.0f + glob_den[row]);
-  const long base = (long)row * D;
-  const long pbase = (long)row * K * D;
-  for (int d = thread_idx; d < D; d += blockDim.x) {
-    float acc = 0.0f;
-    for (int k = 0; k < K; k++) {
-      acc += partial[pbase + (long)k * D + d];
-    }
-    const float numerator = quanpc_to_float(dense_output[base + d]) + acc;
-    attn_output[base + d] = quanpc_from_float<scalar_t>(numerator * inv_den);
-  }
-  (void)rows;
-}
-
-// Single-launch split-K of the fused output projection via a device-wide
-// "last block finalizes" pattern (threadfence + atomicInc retirement counter),
-// avoiding the second kernel launch and inter-kernel drain of the two-pass
-// variant while staying bit-identical to it (same fp32 partials, same
-// k=0..K-1 finalize order).
-//
-// Each (row,k) block first accumulates its Cv-chunk partial into
-// partial[row][k][d] exactly like the accum kernel. After a __threadfence()
-// makes those writes device-visible, thread 0 bumps counts[row]; the block that
-// arrives last (ticket == K-1) reduces the K partials, adds the dense
-// numerator and applies inv_den. atomicInc(., K-1) wraps the counter back to 0
-// on that last arrival, so a persistent `counts` buffer stays zeroed across
-// calls with no per-step memset (that is what keeps this a single launch).
-// Precondition: counts[row] == 0 for every row on entry.
-template <typename scalar_t>
-__global__ void quanpc_output_projection_fused_atomic_kernel(
-  const scalar_t *__restrict__ dense_output,  // [B,QH,S,D]
-  const float *__restrict__ glob_code_output, // [B,QH,S,Cv]
-  const float *__restrict__ glob_den,         // [B,QH,S]
-  const scalar_t *__restrict__ value_proj,    // [B,KVH,Cv,D]
-  scalar_t *__restrict__ attn_output,         // [B,QH,S,D]
-  float *__restrict__ partial,                // [rows,K,D] scratch (fp32)
-  unsigned int *__restrict__ counts,          // [rows] retirement counter, zero on entry
-  const int B,
-  const int QH,
-  const int KVH,
-  const int S,
-  const int Cv,
-  const int D,
-  const int K
-) {
-  const int row = blockIdx.x;
-  const int k = blockIdx.y;
-  const int thread_idx = threadIdx.x;
-  const int S_idx = row % S;
-  const int qh = (row / S) % QH;
-  const int B_idx = row / (S * QH);
-  const int group_size = QH / KVH;
-  const int KVH_idx = qh / group_size;
-
-  const long code_base = (long)row * Cv;
-  const long proj_base = ((long)(B_idx * KVH + KVH_idx) * Cv) * D;
-
-  const int W = (Cv + K - 1) / K;
-  const int c0 = k * W;
-  int c1 = c0 + W;
-  if (c1 > Cv) c1 = Cv;
-
-  // Phase 1: this block's Cv-chunk partial for every d.
-  for (int d = thread_idx; d < D; d += blockDim.x) {
-    float acc = 0.0f;
-    for (int c = c0; c < c1; c++) {
-      const float code_value = quanpc_code_for_projection<scalar_t>(glob_code_output[code_base + c]);
-      acc += code_value * quanpc_to_float(value_proj[proj_base + (long)c * D + d]);
-    }
-    partial[((long)row * K + k) * D + d] = acc;
-  }
-
-  // Publish this block's partials before signalling arrival.
-  __threadfence();
-
-  __shared__ bool am_last;
-  if (thread_idx == 0) {
-    // Wrapping increment: the K-th arrival reads K-1 and resets counts[row] to 0.
-    unsigned int ticket = atomicInc(&counts[row], (unsigned int)(K - 1));
-    am_last = (ticket == (unsigned int)(K - 1));
-  }
-  __syncthreads();
-  if (!am_last) return;
-
-  // Phase 2 (last block for this row only): reduce K partials + dense + inv_den.
-  // The threadfence-before-inc discipline guarantees every sibling's partial is
-  // visible now that all K increments have retired.
-  const long dense_base = ((long)(B_idx * QH + qh) * S + S_idx) * D;
-  const long den_idx = (long)(B_idx * QH + qh) * S + S_idx;
-  const float inv_den = 1.0f / (1.0f + glob_den[den_idx]);
-  const long pbase = (long)row * K * D;
-  for (int d = thread_idx; d < D; d += blockDim.x) {
-    float acc = 0.0f;
-    for (int kk = 0; kk < K; kk++) {
-      acc += partial[pbase + (long)kk * D + d];
-    }
-    const float numerator = quanpc_to_float(dense_output[dense_base + d]) + acc;
-    attn_output[dense_base + d] = quanpc_from_float<scalar_t>(numerator * inv_den);
-  }
 }
 
 template <typename scalar_t>
@@ -646,8 +479,7 @@ __global__ void quanpc_project_quantize_pack_query_kernel(
 ) {
   __shared__ float projected_cache[512];
   __shared__ int8_t quant_cache[512];
-  __shared__ float query_sh[256];   // #1: query row cached once (converted to float)
-  __shared__ float warp_max[32];    // #5: per-warp partial maxima (<=1024 threads)
+  __shared__ float reduce_cache[256];
   __shared__ float row_scale;
 
   const int row = blockIdx.x;
@@ -661,43 +493,29 @@ __global__ void quanpc_project_quantize_pack_query_kernel(
   const long q_base = ((long)(B_idx * QH + qh) * S + S_idx) * D;
   const long proj_base = ((long)(B_idx * KVH + KVH_idx) * C) * D;
 
-  // #1: cooperatively load & convert the query row once; reused across all C rows.
-  for (int d = thread_idx; d < D; d += blockDim.x) {
-    query_sh[d] = quanpc_to_float(query[q_base + d]);
-  }
-  __syncthreads();
-
   float local_max = 0.0f;
   for (int c = thread_idx; c < C; c += blockDim.x) {
     float dot = 0.0f;
     const long c_base = proj_base + (long)c * D;
     #pragma unroll 4
     for (int d = 0; d < D; d++) {
-      dot += query_sh[d] * quanpc_to_float(key_proj[c_base + d]);
+      dot += quanpc_to_float(query[q_base + d]) * quanpc_to_float(key_proj[c_base + d]);
     }
     projected_cache[c] = dot;
     local_max = fmaxf(local_max, fabsf(dot));
   }
 
-  // #5: warp-shuffle max reduction (1 __syncthreads instead of log2(blockDim) tree).
-  const int lane = thread_idx & 31;
-  const int warp_id = thread_idx >> 5;
-  const int num_warps = (blockDim.x + 31) >> 5;
-  #pragma unroll
-  for (int offset = 16; offset > 0; offset >>= 1) {
-    local_max = fmaxf(local_max, __shfl_down_sync(0xffffffffu, local_max, offset));
-  }
-  if (lane == 0) {
-    warp_max[warp_id] = local_max;
-  }
+  reduce_cache[thread_idx] = local_max;
   __syncthreads();
+  for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+    if (thread_idx < stride) {
+      reduce_cache[thread_idx] = fmaxf(reduce_cache[thread_idx], reduce_cache[thread_idx + stride]);
+    }
+    __syncthreads();
+  }
 
   if (thread_idx == 0) {
-    float m = warp_max[0];
-    for (int w = 1; w < num_warps; w++) {
-      m = fmaxf(m, warp_max[w]);
-    }
-    const float max_abs = fmaxf(m, 1.1920928955078125e-7f);
+    const float max_abs = fmaxf(reduce_cache[0], 1.1920928955078125e-7f);
     row_scale = max_abs / 127.0f;
     query_scale[row] = row_scale;
   }
@@ -3972,232 +3790,6 @@ void quanpc_fused_output_projection(
 }
 
 
-// Two-pass non-atomic split-K variant of quanpc_fused_output_projection.
-// Raises the block count from rows (=B*QH*S) to rows*k_splits so the tiny
-// Cv-reduction covers the SM array instead of starving on 32 blocks.
-void quanpc_fused_output_projection_splitk(
-  at::Tensor dense_output,
-  at::Tensor glob_code_output,
-  at::Tensor glob_den,
-  at::Tensor value_proj,
-  at::Tensor attn_output,
-  int64_t k_splits
-) {
-  at::cuda::CUDAGuard device_guard(dense_output.device());
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
-  TORCH_CHECK(dense_output.dim() == 4, "dense_output must have shape [B,QH,S,D]");
-  TORCH_CHECK(glob_code_output.dim() == 4, "glob_code_output must have shape [B,QH,S,Cv]");
-  TORCH_CHECK(glob_den.dim() == 3, "glob_den must have shape [B,QH,S]");
-  TORCH_CHECK(value_proj.dim() == 4, "value_proj must have shape [B,KVH,Cv,D]");
-  TORCH_CHECK(dense_output.is_cuda() && glob_code_output.is_cuda() && glob_den.is_cuda() && value_proj.is_cuda(), "splitk output inputs must be CUDA tensors");
-  TORCH_CHECK(dense_output.is_contiguous(), "dense_output must be contiguous");
-  TORCH_CHECK(glob_code_output.is_contiguous(), "glob_code_output must be contiguous");
-  TORCH_CHECK(glob_den.is_contiguous(), "glob_den must be contiguous");
-  TORCH_CHECK(value_proj.is_contiguous(), "value_proj must be contiguous");
-  TORCH_CHECK(attn_output.is_contiguous(), "attn_output must be contiguous");
-  TORCH_CHECK(glob_code_output.scalar_type() == at::kFloat, "glob_code_output must be float32");
-  TORCH_CHECK(glob_den.scalar_type() == at::kFloat, "glob_den must be float32");
-  TORCH_CHECK(dense_output.scalar_type() == value_proj.scalar_type(), "dense_output and value_proj dtype mismatch");
-  TORCH_CHECK(dense_output.scalar_type() == attn_output.scalar_type(), "attn_output dtype must match dense_output");
-
-  const int B = dense_output.size(0);
-  const int QH = dense_output.size(1);
-  const int S = dense_output.size(2);
-  const int D = dense_output.size(3);
-  const int KVH = value_proj.size(1);
-  const int Cv = glob_code_output.size(3);
-  TORCH_CHECK(glob_code_output.size(0) == B && glob_code_output.size(1) == QH && glob_code_output.size(2) == S, "glob_code_output shape mismatch");
-  TORCH_CHECK(glob_den.size(0) == B && glob_den.size(1) == QH && glob_den.size(2) == S, "glob_den shape mismatch");
-  TORCH_CHECK(value_proj.size(0) == B && value_proj.size(2) == Cv && value_proj.size(3) == D, "value_proj shape mismatch");
-  TORCH_CHECK(QH % KVH == 0, "QH must be divisible by KVH for GQA output projection");
-  TORCH_CHECK(Cv <= 512, "splitk output projection supports Cv <= 512");
-  TORCH_CHECK(D <= 256, "splitk output projection supports head_dim <= 256");
-  TORCH_CHECK(attn_output.sizes() == dense_output.sizes(), "attn_output shape must match dense_output");
-
-  const int rows = B * QH * S;
-  // K selection: k_splits >= 1 is a manual override (debug / benchmarking).
-  // k_splits <= 0 requests auto mode: pick K to cover ~ (numSM * wave_factor)
-  // blocks (block count == rows * K), clamped so each Cv-chunk keeps at least
-  // W_min codes (over-splitting Cv fragments the accum loop and regresses,
-  // as observed on H800 past ~512 blocks).
-  int K;
-  if (k_splits >= 1) {
-    K = (int)k_splits;
-  } else {
-    constexpr int wave_factor = 4; // target blocks = numSM * wave_factor
-    constexpr int W_min = 16;      // min codes per Cv-chunk -> K_max = Cv / W_min
-    int dev = 0;
-    C10_CUDA_CHECK(cudaGetDevice(&dev));
-    int numSM = 0;
-    C10_CUDA_CHECK(cudaDeviceGetAttribute(&numSM, cudaDevAttrMultiProcessorCount, dev));
-    if (numSM < 1) numSM = 1;
-    const int target_blocks = numSM * wave_factor;
-    int k_auto = (target_blocks + rows - 1) / rows; // ceil(target_blocks / rows)
-    const int k_max = (Cv + W_min - 1) / W_min;     // ceil(Cv / W_min)
-    if (k_auto < 1) k_auto = 1;
-    if (k_auto > k_max) k_auto = k_max;
-    K = k_auto;
-  }
-  TORCH_CHECK(K >= 1, "resolved k_splits must be >= 1");
-  auto partial = at::empty({rows, K, D}, glob_code_output.options()); // fp32 partials (C1)
-
-  dim3 accum_blocks(rows, K);
-  dim3 accum_threads(128);
-  dim3 fin_blocks(rows);
-  dim3 fin_threads(128);
-
-  if (dense_output.scalar_type() == at::kBFloat16) {
-    quanpc_output_projection_splitk_accum_kernel<__nv_bfloat16><<<accum_blocks, accum_threads, 0, stream>>>(
-      glob_code_output.data_ptr<float>(),
-      (const __nv_bfloat16*)value_proj.data_ptr<at::BFloat16>(),
-      partial.data_ptr<float>(),
-      B, QH, KVH, S, Cv, D, K
-    );
-    quanpc_output_projection_splitk_finalize_kernel<__nv_bfloat16><<<fin_blocks, fin_threads, 0, stream>>>(
-      partial.data_ptr<float>(),
-      (const __nv_bfloat16*)dense_output.data_ptr<at::BFloat16>(),
-      glob_den.data_ptr<float>(),
-      (__nv_bfloat16*)attn_output.data_ptr<at::BFloat16>(),
-      rows, K, D
-    );
-  } else if (dense_output.scalar_type() == at::kFloat) {
-    quanpc_output_projection_splitk_accum_kernel<float><<<accum_blocks, accum_threads, 0, stream>>>(
-      glob_code_output.data_ptr<float>(),
-      value_proj.data_ptr<float>(),
-      partial.data_ptr<float>(),
-      B, QH, KVH, S, Cv, D, K
-    );
-    quanpc_output_projection_splitk_finalize_kernel<float><<<fin_blocks, fin_threads, 0, stream>>>(
-      partial.data_ptr<float>(),
-      dense_output.data_ptr<float>(),
-      glob_den.data_ptr<float>(),
-      attn_output.data_ptr<float>(),
-      rows, K, D
-    );
-  } else {
-    TORCH_CHECK(false, "splitk output projection currently supports torch.bfloat16 and torch.float32");
-  }
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
-}
-
-
-// Per-device persistent retirement-counter buffer for the single-launch atomic
-// output projection. The kernel resets used entries to 0 via atomicInc wrap, so
-// after the first (zeroed) allocation the buffer stays zeroed across calls and
-// no per-step memset launch is needed. Grows monotonically with rows.
-static at::Tensor quanpc_get_retire_counts(int rows, at::Device device) {
-  static std::mutex mtx;
-  static std::unordered_map<int, at::Tensor> cache;
-  std::lock_guard<std::mutex> lock(mtx);
-  const int dev = device.index();
-  auto it = cache.find(dev);
-  if (it == cache.end() || it->second.numel() < rows) {
-    auto opts = at::TensorOptions().dtype(at::kInt).device(device);
-    at::Tensor t = at::zeros({rows}, opts);
-    cache[dev] = t;
-    return t;
-  }
-  return it->second;
-}
-
-// Single-launch atomic ("last block finalizes") variant of the split-K fused
-// output projection. Same K-selection and numerics as
-// quanpc_fused_output_projection_splitk, but folds the finalize into one kernel.
-void quanpc_fused_output_projection_atomic(
-  at::Tensor dense_output,
-  at::Tensor glob_code_output,
-  at::Tensor glob_den,
-  at::Tensor value_proj,
-  at::Tensor attn_output,
-  int64_t k_splits
-) {
-  at::cuda::CUDAGuard device_guard(dense_output.device());
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
-  TORCH_CHECK(dense_output.dim() == 4, "dense_output must have shape [B,QH,S,D]");
-  TORCH_CHECK(glob_code_output.dim() == 4, "glob_code_output must have shape [B,QH,S,Cv]");
-  TORCH_CHECK(glob_den.dim() == 3, "glob_den must have shape [B,QH,S]");
-  TORCH_CHECK(value_proj.dim() == 4, "value_proj must have shape [B,KVH,Cv,D]");
-  TORCH_CHECK(dense_output.is_cuda() && glob_code_output.is_cuda() && glob_den.is_cuda() && value_proj.is_cuda(), "atomic output inputs must be CUDA tensors");
-  TORCH_CHECK(dense_output.is_contiguous(), "dense_output must be contiguous");
-  TORCH_CHECK(glob_code_output.is_contiguous(), "glob_code_output must be contiguous");
-  TORCH_CHECK(glob_den.is_contiguous(), "glob_den must be contiguous");
-  TORCH_CHECK(value_proj.is_contiguous(), "value_proj must be contiguous");
-  TORCH_CHECK(attn_output.is_contiguous(), "attn_output must be contiguous");
-  TORCH_CHECK(glob_code_output.scalar_type() == at::kFloat, "glob_code_output must be float32");
-  TORCH_CHECK(glob_den.scalar_type() == at::kFloat, "glob_den must be float32");
-  TORCH_CHECK(dense_output.scalar_type() == value_proj.scalar_type(), "dense_output and value_proj dtype mismatch");
-  TORCH_CHECK(dense_output.scalar_type() == attn_output.scalar_type(), "attn_output dtype must match dense_output");
-
-  const int B = dense_output.size(0);
-  const int QH = dense_output.size(1);
-  const int S = dense_output.size(2);
-  const int D = dense_output.size(3);
-  const int KVH = value_proj.size(1);
-  const int Cv = glob_code_output.size(3);
-  TORCH_CHECK(glob_code_output.size(0) == B && glob_code_output.size(1) == QH && glob_code_output.size(2) == S, "glob_code_output shape mismatch");
-  TORCH_CHECK(glob_den.size(0) == B && glob_den.size(1) == QH && glob_den.size(2) == S, "glob_den shape mismatch");
-  TORCH_CHECK(value_proj.size(0) == B && value_proj.size(2) == Cv && value_proj.size(3) == D, "value_proj shape mismatch");
-  TORCH_CHECK(QH % KVH == 0, "QH must be divisible by KVH for GQA output projection");
-  TORCH_CHECK(Cv <= 512, "atomic output projection supports Cv <= 512");
-  TORCH_CHECK(D <= 256, "atomic output projection supports head_dim <= 256");
-  TORCH_CHECK(attn_output.sizes() == dense_output.sizes(), "attn_output shape must match dense_output");
-
-  const int rows = B * QH * S;
-  // Same auto-K policy as the two-pass split-K variant.
-  int K;
-  if (k_splits >= 1) {
-    K = (int)k_splits;
-  } else {
-    constexpr int wave_factor = 4;
-    constexpr int W_min = 16;
-    int dev = 0;
-    C10_CUDA_CHECK(cudaGetDevice(&dev));
-    int numSM = 0;
-    C10_CUDA_CHECK(cudaDeviceGetAttribute(&numSM, cudaDevAttrMultiProcessorCount, dev));
-    if (numSM < 1) numSM = 1;
-    const int target_blocks = numSM * wave_factor;
-    int k_auto = (target_blocks + rows - 1) / rows;
-    const int k_max = (Cv + W_min - 1) / W_min;
-    if (k_auto < 1) k_auto = 1;
-    if (k_auto > k_max) k_auto = k_max;
-    K = k_auto;
-  }
-  TORCH_CHECK(K >= 1, "resolved k_splits must be >= 1");
-
-  auto partial = at::empty({rows, K, D}, glob_code_output.options()); // fp32 partials
-  at::Tensor counts = quanpc_get_retire_counts(rows, dense_output.device());
-
-  dim3 blocks(rows, K);
-  dim3 threads(128);
-  if (dense_output.scalar_type() == at::kBFloat16) {
-    quanpc_output_projection_fused_atomic_kernel<__nv_bfloat16><<<blocks, threads, 0, stream>>>(
-      (const __nv_bfloat16*)dense_output.data_ptr<at::BFloat16>(),
-      glob_code_output.data_ptr<float>(),
-      glob_den.data_ptr<float>(),
-      (const __nv_bfloat16*)value_proj.data_ptr<at::BFloat16>(),
-      (__nv_bfloat16*)attn_output.data_ptr<at::BFloat16>(),
-      partial.data_ptr<float>(),
-      (unsigned int*)counts.data_ptr<int>(),
-      B, QH, KVH, S, Cv, D, K
-    );
-  } else if (dense_output.scalar_type() == at::kFloat) {
-    quanpc_output_projection_fused_atomic_kernel<float><<<blocks, threads, 0, stream>>>(
-      dense_output.data_ptr<float>(),
-      glob_code_output.data_ptr<float>(),
-      glob_den.data_ptr<float>(),
-      value_proj.data_ptr<float>(),
-      attn_output.data_ptr<float>(),
-      partial.data_ptr<float>(),
-      (unsigned int*)counts.data_ptr<int>(),
-      B, QH, KVH, S, Cv, D, K
-    );
-  } else {
-    TORCH_CHECK(false, "atomic output projection currently supports torch.bfloat16 and torch.float32");
-  }
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
-}
 
 
 void quanpc_project_quantize_pack_query(
@@ -5140,13 +4732,12 @@ void quanpc_decode_tail_packed_v1_exp8_tiled_gqa4_atomic_pruned(
     prune_mode,
     prune_log_eps
   );
-  quanpc_fused_output_projection_atomic(
+  quanpc_fused_output_projection(
     dense_output,
     glob_code_output,
     glob_den,
     value_proj,
-    attn_output,
-    -1
+    attn_output
   );
   (void)KBlocks;
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -5352,127 +4943,4 @@ void quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic(
     value_proj,
     attn_output
   );
-}
-
-
-// -----------------------------------------------------------------------------
-// Fused RMSNorm. Collapses HF's ~8 elementwise/reduction ops
-//   x32 = x.float(); var = (x32^2).mean(-1); y = x32 * rsqrt(var + eps);
-//   out = weight * y.to(dtype)
-// into a single kernel launch. One block reduces one row over the last (norm)
-// dimension; grid = rows = numel / N. The dtype flow matches HF exactly:
-// the normalized value is rounded to the input dtype BEFORE the weight multiply,
-// so bf16 results agree with torch to a single ULP.
-// -----------------------------------------------------------------------------
-template <typename scalar_t>
-__global__ void quanpc_rmsnorm_kernel(
-  const scalar_t *__restrict__ input,
-  const scalar_t *__restrict__ weight,
-  scalar_t *__restrict__ output,
-  const int N,
-  const float eps
-) {
-  const long row = blockIdx.x;
-  const int tid = threadIdx.x;
-  const scalar_t *__restrict__ in_row = input + row * (long)N;
-  scalar_t *__restrict__ out_row = output + row * (long)N;
-
-  // Accumulate sum of squares in fp32.
-  float local = 0.0f;
-  for (int c = tid; c < N; c += blockDim.x) {
-    const float v = quanpc_to_float<scalar_t>(in_row[c]);
-    local += v * v;
-  }
-
-  // Warp reduce.
-  #pragma unroll
-  for (int offset = 16; offset > 0; offset >>= 1) {
-    local += __shfl_down_sync(0xffffffffu, local, offset);
-  }
-
-  __shared__ float warp_sums[32];
-  const int warp = tid >> 5;
-  const int lane = tid & 31;
-  if (lane == 0) {
-    warp_sums[warp] = local;
-  }
-  __syncthreads();
-
-  __shared__ float row_rinv;
-  if (tid == 0) {
-    const int num_warps = (blockDim.x + 31) >> 5;
-    float total = 0.0f;
-    for (int w = 0; w < num_warps; ++w) {
-      total += warp_sums[w];
-    }
-    row_rinv = rsqrtf(total / (float)N + eps);
-  }
-  __syncthreads();
-
-  const float rinv = row_rinv;
-  for (int c = tid; c < N; c += blockDim.x) {
-    const float xf = quanpc_to_float<scalar_t>(in_row[c]);
-    // Round normalized value to the input dtype first (matches .to(input_dtype)),
-    // then multiply by weight in that dtype (torch upcasts to fp32 for the mul).
-    const scalar_t normed = quanpc_from_float<scalar_t>(xf * rinv);
-    const float prod = quanpc_to_float<scalar_t>(normed) * quanpc_to_float<scalar_t>(weight[c]);
-    out_row[c] = quanpc_from_float<scalar_t>(prod);
-  }
-}
-
-
-// Host entry point for fused RMSNorm over the last dimension. input is any
-// contiguous [..., N] tensor; weight is [N]; output matches input.
-void quanpc_rmsnorm(
-  at::Tensor input,
-  at::Tensor weight,
-  at::Tensor output,
-  double eps
-) {
-  at::cuda::CUDAGuard device_guard(input.device());
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
-  TORCH_CHECK(input.is_cuda() && weight.is_cuda() && output.is_cuda(), "rmsnorm inputs must be CUDA tensors");
-  TORCH_CHECK(input.is_contiguous(), "rmsnorm input must be contiguous");
-  TORCH_CHECK(weight.is_contiguous(), "rmsnorm weight must be contiguous");
-  TORCH_CHECK(output.is_contiguous(), "rmsnorm output must be contiguous");
-  TORCH_CHECK(weight.dim() == 1, "rmsnorm weight must be 1-D [N]");
-  TORCH_CHECK(input.scalar_type() == weight.scalar_type(), "rmsnorm input/weight dtype mismatch");
-  TORCH_CHECK(input.scalar_type() == output.scalar_type(), "rmsnorm input/output dtype mismatch");
-  TORCH_CHECK(input.sizes() == output.sizes(), "rmsnorm output shape must match input");
-
-  const int N = weight.size(0);
-  TORCH_CHECK(input.size(-1) == N, "rmsnorm input last dim must match weight size");
-  const long rows = input.numel() / N;
-  if (rows == 0) {
-    return;
-  }
-  TORCH_CHECK(rows <= 2147483647L, "rmsnorm row count exceeds grid limit");
-
-  int threads = 256;
-  if (N < threads) {
-    // Round up to a warp multiple, capped at 256.
-    threads = ((N + 31) / 32) * 32;
-    if (threads < 32) threads = 32;
-    if (threads > 256) threads = 256;
-  }
-
-  if (input.scalar_type() == at::kBFloat16) {
-    quanpc_rmsnorm_kernel<__nv_bfloat16><<<(unsigned)rows, threads, 0, stream>>>(
-      (const __nv_bfloat16*)input.data_ptr<at::BFloat16>(),
-      (const __nv_bfloat16*)weight.data_ptr<at::BFloat16>(),
-      (__nv_bfloat16*)output.data_ptr<at::BFloat16>(),
-      N, (float)eps
-    );
-  } else if (input.scalar_type() == at::kFloat) {
-    quanpc_rmsnorm_kernel<float><<<(unsigned)rows, threads, 0, stream>>>(
-      input.data_ptr<float>(),
-      weight.data_ptr<float>(),
-      output.data_ptr<float>(),
-      N, (float)eps
-    );
-  } else {
-    TORCH_CHECK(false, "rmsnorm currently supports torch.bfloat16 and torch.float32");
-  }
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

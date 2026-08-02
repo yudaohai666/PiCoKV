@@ -1,0 +1,6 @@
+# Install the CUDA-enabled PyTorch build matching the target machine first.
+torch
+transformers
+accelerate
+numpy
+ninja

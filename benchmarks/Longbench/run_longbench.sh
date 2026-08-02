@@ -1,72 +1,85 @@
 #!/bin/bash
-# 顺序跑 LongBench 子数据集，跑完后用 eval.py 打分。
-# 参考 benchmarks/Needle/run_niah.sh 的路径引导与参数风格。
-#
-# 结果目录结构：
-#   results/longbench/<MODEL_NAME>/<TAG>/<dataset>.jsonl
-#   results/longbench/<MODEL_NAME>/<TAG>/result.json   (eval.py 输出)
+# Run LongBench subsets sequentially, then score with eval.py.
+# Output: results/longbench/<MODEL_NAME>/<TAG>/{<dataset>.jsonl,result.json}
+# Multiple methods per run: edit METHODS below (or METHOD=oscar to force one).
 
-# ── 路径引导 ──────────────────────────────────────────────
-# 本脚本位于 <repo>/benchmarks/Longbench/，把仓库根加入 PYTHONPATH，
-# 这样 pred.py 内的 `import quantpc` 可从任意 CWD 解析。
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}"
 
-# ── 基础配置 ──────────────────────────────────────────────
-GPU=7
+GPU="${GPU:-7}"
 MODEL="/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct"
 BASE_RESULT_DIR="results/longbench"
 MODEL_NAME=$(basename "${MODEL}")
 
-# 评测方法：quantpc | flash_attention_2 | sdpa | eager
-METHOD="${METHOD:-quantpc}"
+# Methods to run. quantpc/kivi/oscar = quantized KV; flash_attention_2/sdpa/eager = dense baselines.
+METHODS=(
+  quantpc
+  # kivi
+  # oscar
+  # flash_attention_2
+  # sdpa
+)
+# Back-compat: METHOD=oscar forces a single method.
+if [ -n "${METHOD:-}" ]; then METHODS=("${METHOD}"); fi
 
-# 是否启用解码矩阵重拟合（refit_decoder）。置 1 开启。
-REFIT_DECODER="${REFIT_DECODER:-1}"
-
-# ── K/V 组合列表（按需修改）────────────────────────────────
+# quantpc K/V sweep (quantpc only).
 CONFIGS=(
-  "320 256"
+  "256 256"
 )
 
-# ── 逐组实验 ──────────────────────────────────────────────
-for cfg in "${CONFIGS[@]}"; do
-  K=$(echo $cfg | awk '{print $1}')
-  V=$(echo $cfg | awk '{print $2}')
+# KIVI params (2/4-bit KV, single run).
+KIVI_K="${KIVI_K:-2}"
+KIVI_V="${KIVI_V:-2}"
+KIVI_GROUP="${KIVI_GROUP:-32}"
+KIVI_RESIDUAL="${KIVI_RESIDUAL:-128}"
 
-  # 目录标签需与 pred.py main() 中的 tag 规则保持一致，便于断点续跑与打分。
-  if [ "${METHOD}" = "quantpc" ]; then
-    TAG="quantpc_k${K}_v${V}"
-    EXTRA=(--k-bits "${K}" --v-bits "${V}" --projected-query-bits 8 \
-           --exp-bits 4 --eas 0.01 --zerorope 20 --cuda-v1-exp8)
-    if [ "${REFIT_DECODER}" = "1" ]; then
-      TAG="${TAG}_refit"
-      EXTRA+=(--refit-decoder)
-    fi
-  else
-    TAG="${METHOD}"
-    EXTRA=()
-  fi
-  OUT_DIR="${BASE_RESULT_DIR}/${MODEL_NAME}/${TAG}"
+# OScaR INT2 recipe. group_size MUST be 32: the int2 V-param interleaved packer
+# hardcodes 32-wide groups (4 groups); group 128 under-allocates v_params -> OOB write.
+OSCAR_NUM_BITS="${OSCAR_NUM_BITS:-2}"
+OSCAR_QUANT_MODE="${OSCAR_QUANT_MODE:-k-channel}"
+OSCAR_GROUP="${OSCAR_GROUP:-32}"
+OSCAR_KV_ROTATION="${OSCAR_KV_ROTATION:-hadamard}"
+OSCAR_KV_NORM="${OSCAR_KV_NORM:-1}"
+OSCAR_EVICT="${OSCAR_EVICT:-256}"
+OSCAR_OFFLINE_V_HAD="${OSCAR_OFFLINE_V_HAD:-1}"
 
-  echo "========================================"
-  echo "Running LongBench: method=${METHOD}  k=${K}  v=${V}  refit=${REFIT_DECODER}"
-  echo "Output : ${OUT_DIR}"
-  echo "========================================"
+# run_lb METHOD TAG RUN_ARGS...
+run_lb() {
+  local method="$1"; local tag="$2"; shift 2
+  local out_dir="${BASE_RESULT_DIR}/${MODEL_NAME}/${tag}"
+  echo "=== LongBench: method=${method} -> ${out_dir} ==="
+  CUDA_VISIBLE_DEVICES=${GPU} python "${SCRIPT_DIR}/pred.py" \
+    --model "${MODEL}" --method "${method}" --save_dir "${BASE_RESULT_DIR}" "$@"
+  python "${SCRIPT_DIR}/eval.py" --path "${out_dir}/" --eval_avg
+}
 
-  CUDA_VISIBLE_DEVICES=${GPU} \
-  python "${SCRIPT_DIR}/pred.py" \
-    --model "${MODEL}" \
-    --method "${METHOD}" \
-    --save_dir "${BASE_RESULT_DIR}" \
-    "${EXTRA[@]}"
-
-  echo "Scoring: ${OUT_DIR}"
-  python "${SCRIPT_DIR}/eval.py" --path "${OUT_DIR}/" --eval_avg
-
-  echo "Done: method=${METHOD}  k=${K}  v=${V}"
-  echo ""
+for METHOD in "${METHODS[@]}"; do
+  case "${METHOD}" in
+    quantpc)
+      for cfg in "${CONFIGS[@]}"; do
+        K=$(echo "$cfg" | awk '{print $1}'); V=$(echo "$cfg" | awk '{print $2}')
+        run_lb quantpc "quantpc_k${K}_v${V}" \
+          --k-bits "${K}" --v-bits "${V}" --exp-bits 4 --eas 0.01 --zerorope 20
+      done
+      ;;
+    kivi)
+      run_lb kivi "kivi_k${KIVI_K}_v${KIVI_V}" \
+        --k-bits "${KIVI_K}" --v-bits "${KIVI_V}" \
+        --group-size "${KIVI_GROUP}" --residual-length "${KIVI_RESIDUAL}"
+      ;;
+    oscar)
+      OSCAR_ARGS=(--num-bits "${OSCAR_NUM_BITS}" --quant-mode "${OSCAR_QUANT_MODE}" --group-size "${OSCAR_GROUP}")
+      [ "${OSCAR_KV_ROTATION}" != "none" ] && OSCAR_ARGS+=(--kv-rotation "${OSCAR_KV_ROTATION}")
+      [ "${OSCAR_KV_NORM}" != "0" ]       && OSCAR_ARGS+=(--kv-norm "${OSCAR_KV_NORM}")
+      [ -n "${OSCAR_EVICT}" ]             && OSCAR_ARGS+=(--residual-evict-size "${OSCAR_EVICT}")
+      [ "${OSCAR_OFFLINE_V_HAD}" = "1" ]  && OSCAR_ARGS+=(--offline-v-hadamard)
+      run_lb oscar "oscar_int${OSCAR_NUM_BITS}" "${OSCAR_ARGS[@]}"
+      ;;
+    *)
+      run_lb "${METHOD}" "${METHOD}"
+      ;;
+  esac
 done
 
 echo "All done."

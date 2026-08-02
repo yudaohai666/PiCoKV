@@ -1,8 +1,9 @@
 # QuanPC KV Cache Experiments
 
-This workspace contains QuanPC-style quantized KV-cache attention code for
-long-context decoding. The cleaned Python-facing API is intentionally small;
-experiments and legacy model-patching code remain available for reproduction.
+This workspace contains QuanPC quantized KV-cache attention code for
+long-context decoding. The active implementation is the **online-projection
+standalone** path under `quantpc/`; the previous pre-learned-projection code is
+preserved under `quantpc_legacy/` for reference only.
 
 ## Environment Setup
 
@@ -21,206 +22,134 @@ CUDA is required for the fast decode/prefill kernels; the CUDA extensions under
 `quantpc/quanpc_cuda_extension/` and `quantpc/quanpc_prefill_cuda_extension/`
 build on first use.
 
-## Public API
+## Core package: `quantpc.quanpc_standalone`
 
-Use `quantpc/quanpc_api.py` for new code. It exposes three operations:
+Projections are learned **online** from the current prefill K/V (block-32
+CholeskyQR / Householder subspace quantization with a ridge-regularized
+decoder). There is no separate `learn_projection` step and no fixed-projection,
+refit, torch-decode, block-16, or async-prepare path. Decode requires bf16 CUDA
+and GQA=4 (`QH/KVH == 4`, `D == 128`), code bits in
+`{128,192,256,320,384,448,512}`, and `exp_bits` in `{1,2,4,8}`.
 
-- `learn_projection(full_states, bits, ...)`: learn one K or V binary projection.
-- `prepare_kv_cache(full_key, full_value, key_projection, value_projection, ...)`:
-  quantize with the learned projections, select EAS tokens, build dense retained
-  K/V, and pack global 1-bit K/V codes.
-- `decode_attention(query, cache, ...)`: run one single-token decode attention
-  step over dense retained K/V plus packed QuanPC global K/V.
+See `quantpc/README.md` for the full package reference.
 
-The lower-level `quantpc/quanpc.py`, `quantpc/quanpc_cuda_extension/`, and
-`quantpc/quanpc_prefill_cuda_extension/` modules are implementation details and
-experiment utilities.
-
-## Using `quantpc.quanpc_api`
-
-`quantpc/quanpc_api.py` is the recommended entry point for new integrations.  The
-expected tensor layout follows Llama-style GQA:
-
-- `full_key`, `full_value`: `[B, KVH, L, D]`, usually bf16 CUDA tensors from
-  prefill.
-- `query`: `[B, QH, 1, D]`, a single-token decode query.
-- Fast CUDA decode is optimized for `QH / KVH == 4`, `D == 128`, bf16, and
-  code dimensions in `{128, 192, 256, 320, 384, 448, 512}`.
-- `exp_bits` can be `1`, `2`, `4`, or `8`; current benchmarks usually use
-  `exp_bits=4`.
-
-Minimal end-to-end example:
+### Minimal end-to-end example
 
 ```python
 import torch
-from quantpc.quanpc_api import learn_projection, prepare_kv_cache, decode_attention
+from quantpc.quanpc_standalone import (
+    StandaloneConfig,
+    prepare_kv_cache,
+    decode_attention,
+)
 
-device = "cuda"
-dtype = torch.bfloat16
-
+device, dtype = "cuda", torch.bfloat16
 B, KVH, QH, L, D = 1, 8, 32, 100000, 128
-full_key = torch.randn(B, KVH, L, D, device=device, dtype=dtype).contiguous()
+full_key = torch.randn(B, KVH, L, D, device=device, dtype=dtype)
 full_value = torch.randn_like(full_key)
 
-# 1. Learn projections. This can be done offline or during prefill.
-key_proj = learn_projection(
-    full_key,
-    bits=256,
-    sink_size=64,
-    local_size=1024,
-    zerorope=20,
-    apply_zerorope=True,
-)
-value_proj = learn_projection(
-    full_value,
-    bits=256,
-    sink_size=64,
-    local_size=1024,
-)
+# Projections are learned online inside prepare_kv_cache; no projection args.
+config = StandaloneConfig()  # k/v bits 256, sink 64, local 1024, eas 0.01, zerorope 20
+cache = prepare_kv_cache(full_key, full_value, **config.prepare_kwargs())
 
-# 2. Quantize and pack the prefill KV cache. This also builds the retained
-# dense cache: sink + EAS tokens + local window.
-cache = prepare_kv_cache(
-    full_key,
-    full_value,
-    key_proj,
-    value_proj,
-    sink_size=64,
-    local_size=1024,
-    eas=0.01,
-    zerorope=20,
-    exp_bits=4,
-)
-
-# 3. Run one decode attention step.
-query = torch.randn(B, QH, 1, D, device=device, dtype=dtype).contiguous()
-out = decode_attention(
-    query,
-    cache,
-    use_pruning=True,
-    prune_mode=3,
-    log_eps=-10.0,
-)
+query = torch.randn(B, QH, 1, D, device=device, dtype=dtype)
+out = decode_attention(query, cache, **config.decode_kwargs())
 print(out.shape)  # [B, QH, 1, D]
 ```
-
-To include the current decode token's K/V in the dense retained cache, pass
-`decode_key` and `decode_value`:
+Append the current decode token's K/V to the dense retained cache so later
+steps can attend to it:
 
 ```python
-decode_key = torch.randn(B, KVH, 1, D, device=device, dtype=dtype).contiguous()
+decode_key = torch.randn(B, KVH, 1, D, device=device, dtype=dtype)
 decode_value = torch.randn_like(decode_key)
-
 out = decode_attention(
     query,
     cache,
     decode_key=decode_key,
     decode_value=decode_value,
     update_cache=True,
+    **config.decode_kwargs(),
 )
 ```
 
-`update_cache=True` appends the new K/V to `cache.dense_key` and
-`cache.dense_value`, so later decode calls can attend to it.  The current API
-does not yet quantize newly generated tokens into the packed global cache or
-maintain a sliding local window; long streaming generation still needs that
-policy layer on top.
+The compressed global cache stays static during decode; generated tokens are
+appended to `cache.dense_key` / `cache.dense_value` but not re-quantized into
+the packed global cache.
 
-Useful cache metadata:
+### Hugging Face Llama
 
 ```python
-print(cache.dense_len, cache.global_len)
-print(cache.key_bits, cache.value_bits)
-print(cache.dense_key.shape, cache.packed_key.shape, cache.packed_value.shape)
+from quantpc.quanpc_standalone import StandaloneConfig
+from quantpc.quanpc_standalone.transformers import (
+    StandaloneLlamaCache,
+    modify_llama_for_standalone,
+)
+
+modify_llama_for_standalone(model, mlp_chunk_size=8192)
+cache = StandaloneLlamaCache(StandaloneConfig())
+out = model.generate(
+    **inputs,
+    past_key_values=cache,
+    do_sample=False,
+    max_new_tokens=30,
+)
 ```
+
+Prompt attention stays exact SDPA; single-token generation routes through the
+CUDA decode path.
 
 ## Layout
 
-The core algorithm now lives in the `quantpc/` package (benchmark-agnostic);
-benchmark runners and corpora stay at the repo root (bench side).
+Active core (`quantpc/`):
 
-Core package (`quantpc/`):
+- `quantpc/quanpc_standalone/`: online-projection prepare/decode API + HF Llama adapter.
+- `quantpc/quanpc_cuda_extension/`: single-token decode CUDA kernels.
+- `quantpc/quanpc_prefill_cuda_extension/`: cache-packing / gather CUDA kernels.
+- `quantpc/README.md`, `quantpc/test_quanpc_standalone_online.py`,
+  `quantpc/run_standalone_niah.py` (+ `needle.py`, `PaulGrahamEssays/`).
 
-- `quantpc/quanpc_api.py`: cleaned public API with the three entry points above.
-- `quantpc/quanpc.py`: legacy/internal model patching, torch fallback, and
-  compatibility cache classes used by existing NIAH runners.
-- `quantpc/quanpc_torch.py`: torch-only reference implementation for algorithm checks.
-- `quantpc/kernel.py`: binary-projection CUDA extension utilities.
-- `quantpc/quanpc_cuda_extension/`: decode CUDA extension, correctness tests, and
-  historical benchmark/profiling scripts.
-- `quantpc/quanpc_prefill_cuda_extension/`: prefill-side CUDA extension for projection
-  learning, projection quantization/packing, EAS selection, and dense gather.
-- `quantpc/extension/`: original/reference CUDA extension files.
-- `quantpc/test_quanpc_api.py`: public API smoke test.
+Legacy (`quantpc_legacy/`): the previous `quanpc.py` / `quanpc_torch.py` /
+`quanpc_api.py` / `kernel.py` / `extension/` and their experiment scripts. Kept
+for reference; not imported by the active benchmarks.
 
-Bench side (`benchmarks/Needle/`, the NIAH benchmark):
-
-- `benchmarks/Needle/run_bin_v4.py`: NIAH experiment runner. Backend is chosen
-  by `--cuda-v1-exp8`: with the flag it uses the CUDA backend (`quantpc.quanpc`),
-  without it the torch-only reference backend (`quantpc.quanpc_torch`).
-- `benchmarks/Needle/search_quanpc_torch_params.py`: torch-only NIAH parameter search.
-- `benchmarks/Needle/needle.py`, `benchmarks/Needle/PaulGrahamEssays/`: NIAH prompt/evaluation utilities and corpus.
-- `benchmarks/Needle/run_niah.sh`: NIAH sweep entry point (sets `PYTHONPATH` to the repo root so runners can `import quantpc`).
-- `results/`, `logs/`, `backups/`, `archive/`: experiment outputs and snapshots.
-
-New benchmarks go in a sibling directory under `benchmarks/` and reuse the
-`quantpc` package without touching it.
+Benchmarks (`benchmarks/`):
+`benchmarks/common.py::load_quantpc_model(method="quantpc")` patches the model
+via `modify_llama_for_standalone` and injects a fresh `StandaloneLlamaCache`
+per call. The Efficiency / Needle / Longbench / Ruler runners all go through it.
 
 ## Common Checks
 
-Syntax check:
+Configure the environment (repo root on `PYTHONPATH`, single GPU):
 
 ```bash
-python -m py_compile \
-  quantpc/quanpc.py quantpc/quanpc_api.py quantpc/quanpc_torch.py \
-  benchmarks/Needle/run_bin_v4.py \
-  quantpc/quanpc_cuda_extension/quanpc_cuda.py \
-  quantpc/quanpc_prefill_cuda_extension/quanpc_prefill_cuda.py
+source .venv/bin/activate
+export PYTHONPATH="$PWD:$PYTHONPATH"
+export CUDA_VISIBLE_DEVICES=0
 ```
 
-Public API smoke test:
+Standalone regression test:
 
 ```bash
-CUDA_VISIBLE_DEVICES=4  \
-python quantpc/test_quanpc_api.py
+python quantpc/test_quanpc_standalone_online.py
 ```
 
-Prefill CUDA correctness:
+Standalone NIAH (self-contained corpus + needle):
 
 ```bash
-CUDA_VISIBLE_DEVICES=4  \
-python quantpc/quanpc_prefill_cuda_extension/test_projection_learning.py --dtypes bfloat16
-
-CUDA_VISIBLE_DEVICES=4  \
-python quantpc/quanpc_prefill_cuda_extension/test_prefill_correctness.py --dtypes bfloat16
+cd quantpc && python run_standalone_niah.py \
+  --lengths 64000,110000 --direction-sample-size 8192
 ```
 
-Decode CUDA correctness:
+Efficiency benchmark (quantpc vs dense/KIVI baselines):
 
 ```bash
-CUDA_VISIBLE_DEVICES=4  \
-python quantpc/quanpc_cuda_extension/test_full_decode_correctness.py \
-  --batch-sizes 1 --gqa 4 --exp-bits 4 --dense-len 128 --global-len 512 \
-  --atol 0.12 --rtol 0.12
+python benchmarks/Efficiency/run_efficiency.py \
+  --method quantpc --cuda-v1-exp8 --k-bits 256 --v-bits 256
 ```
 
-NIAH CUDA runner example (run from the repo root so `import quantpc` resolves):
-
-```bash
-CUDA_VISIBLE_DEVICES=4 PYTHONPATH=. \
-python benchmarks/Needle/run_bin_v4.py \
-  --lengths 64000 --depths 50 --output results/niah/results_cuda.json \
-  --k-bits 256 --v-bits 256 --projected-query-bits 8 \
-  --exp-bits 4 --eas 0.01 --zerorope 20 --cuda-v1-exp8
-```
-
-Or drive the full sweep via the entry-point script (it sets `PYTHONPATH` itself):
-
-```bash
-bash benchmarks/Needle/run_niah.sh
-```
-
-
+> The torch reference backend, `refit_decoder`, and tunable
+> `projected_query_bits` were removed with the standalone refactor.
+> `benchmarks/common.py` now requires `--cuda-v1-exp8` for `--method quantpc`.
 
 ## Baseline Alignment Notes
 

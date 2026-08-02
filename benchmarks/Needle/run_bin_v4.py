@@ -16,7 +16,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from needle import LLMNeedleHaystackTester, ModelProvider  # noqa: E402
-from benchmarks.common import load_quantpc_model, seed_everything  # noqa: E402
+from benchmarks.common import load_model, seed_everything  # noqa: E402
 
 
 class Transformer(ModelProvider):
@@ -24,42 +24,55 @@ class Transformer(ModelProvider):
         self,
         model_name: str = "/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct",
         method: str = "quantpc",
+        # quantpc KV-cache params (--method quantpc)
         k_bits: int = 128,
         v_bits: int = 256,
         sink_size: int = 64,
         local_size: int = 1024,
-        projected_query_bits: int = 8,
         exp_bits: int = 4,
         eas: float = 0.01,
         zerorope: int = 30,
-        cuda_v1_exp8: bool = False,
-        refit_decoder: bool = False,
         use_pruning: bool = True,
         prune_mode: int = 3,
         log_eps: float = -10.0,
+        # KIVI params (--method kivi)
         group_size: int = 32,
         residual_length: int = 32,
+        # OScaR params (--method oscar)
+        # OScaR params (--method oscar) —— 默认 = INT2 官方配方
+        num_bits: int = 2,
+        quant_mode: str = "k-channel",
+        kv_rotation: str = "hadamard",
+        kv_norm: str = "1",
+        residual_evict_size: int | None = 256,
+        offline_v_hadamard: bool = True,
     ):
         self.method = method
         # Shared loader handles method dispatch + modify() + KV-cache factory.
-        self.model, self.tokenizer, self._make_cache = load_quantpc_model(
+        self.model, self.tokenizer, self._make_cache = load_model(
             model_name,
             method=method,
+            # quantpc KV-cache params (--method quantpc)
             k_bits=k_bits,
             v_bits=v_bits,
             sink_size=sink_size,
             local_size=local_size,
-            projected_query_bits=projected_query_bits,
             exp_bits=exp_bits,
             eas=eas,
             zerorope=zerorope,
-            cuda_v1_exp8=cuda_v1_exp8,
-            refit_decoder=refit_decoder,
             use_pruning=use_pruning,
             prune_mode=prune_mode,
             log_eps=log_eps,
+            # KIVI params (--method kivi)
             group_size=group_size,
             residual_length=residual_length,
+            # OScaR params (--method oscar)
+            num_bits=num_bits,
+            quant_mode=quant_mode,
+            kv_rotation=kv_rotation,
+            kv_norm=kv_norm,
+            residual_evict_size=residual_evict_size,
+            offline_v_hadamard=offline_v_hadamard,
         )
 
     def evaluate_model(self, prompt, needle=None) -> str:
@@ -134,21 +147,28 @@ def run_experiment(
     depths: list[int],
     output_path: str,
     method: str,
+    # quantpc KV-cache params (--method quantpc)
     k_bits: int,
     v_bits: int,
     sink_size: int,
     local_size: int,
-    projected_query_bits: int,
     exp_bits: int,
     eas: float,
     zerorope: int,
-    cuda_v1_exp8: bool,
-    refit_decoder: bool = False,
     use_pruning: bool = True,
     prune_mode: int = 3,
     log_eps: float = -10.0,
+    # KIVI params (--method kivi)
     group_size: int = 32,
     residual_length: int = 32,
+    # OScaR params (--method oscar)
+    # OScaR params (--method oscar) —— 默认 = INT2 官方配方
+    num_bits: int = 2,
+    quant_mode: str = "k-channel",
+    kv_rotation: str = "hadamard",
+    kv_norm: str = "1",
+    residual_evict_size: int | None = 256,
+    offline_v_hadamard: bool = True,
 ) -> dict[tuple[int, int], str]:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -156,21 +176,27 @@ def run_experiment(
     model = Transformer(
         model_name,
         method=method,
+        # quantpc KV-cache params (--method quantpc)
         k_bits=k_bits,
         v_bits=v_bits,
         sink_size=sink_size,
         local_size=local_size,
-        projected_query_bits=projected_query_bits,
         exp_bits=exp_bits,
         eas=eas,
         zerorope=zerorope,
-        cuda_v1_exp8=cuda_v1_exp8,
-        refit_decoder=refit_decoder,
         use_pruning=use_pruning,
         prune_mode=prune_mode,
         log_eps=log_eps,
+        # KIVI params (--method kivi)
         group_size=group_size,
         residual_length=residual_length,
+        # OScaR params (--method oscar)
+        num_bits=num_bits,
+        quant_mode=quant_mode,
+        kv_rotation=kv_rotation,
+        kv_norm=kv_norm,
+        residual_evict_size=residual_evict_size,
+        offline_v_hadamard=offline_v_hadamard,
     )
     tester = LLMNeedleHaystackTester(model)
     results = {}
@@ -207,33 +233,27 @@ def main() -> None:
         "--method",
         default="quantpc",
         help=(
-            "evaluation method: 'quantpc' (quantized KV cache), 'kivi' (KIVI "
-            "quantized KV cache), or a dense baseline attn implementation "
-            "'flash_attention_2' / 'sdpa' / 'eager'"
+            "evaluation method: 'quantpc' / 'kivi' / 'oscar' (quantized KV cache), "
+            "or a dense baseline attn implementation 'flash_attention_2' / 'sdpa' / 'eager'"
         ),
     )
     parser.add_argument("--lengths", default="64000,80000,100000", help="comma-separated context lengths")
     parser.add_argument("--depths", default="50", help="comma-separated needle depths")
     parser.add_argument("--output", default="results/niah/results_shared_kv.json")
-    parser.add_argument("--k-bits", type=int, default=128)
-    parser.add_argument("--v-bits", type=int, default=256)
+    # ── quantpc KV-cache params (--method quantpc) ──
+    parser.add_argument("--k-bits", type=int, default=128, help="key projection bits (also KIVI KV bits)")
+    parser.add_argument("--v-bits", type=int, default=256, help="value projection bits (also KIVI KV bits)")
     parser.add_argument(
         "--sink-size",
         type=int,
         default=64,
-        help="number of initial (sink) tokens kept in full precision (quantpc only)",
+        help="number of initial (sink) tokens kept in full precision",
     )
     parser.add_argument(
         "--local-size",
         type=int,
         default=1024,
-        help="number of most-recent (local) tokens kept in full precision (quantpc only)",
-    )
-    parser.add_argument(
-        "--projected-query-bits",
-        type=int,
-        default=8,
-        help="signed quantization bits for projected query; quantization is always enabled",
+        help="number of most-recent (local) tokens kept in full precision",
     )
     parser.add_argument(
         "--exp-bits",
@@ -244,20 +264,6 @@ def main() -> None:
     parser.add_argument("--eas", type=float, default=0.01)
     parser.add_argument("--zerorope", type=int, default=30)
     parser.add_argument(
-        "--cuda-v1-exp8",
-        action="store_true",
-        help=(
-            "select the CUDA backend (quantpc.quanpc) with experimental "
-            "v_bpd=1 + uint8-exp global attention; without this flag the "
-            "torch-only reference backend (quantpc.quanpc_torch) is used"
-        ),
-    )
-    parser.add_argument(
-        "--refit-decoder",
-        action="store_true",
-        help="启用解码矩阵重拟合；开启后 CUDA prefill 回退 torch",
-    )
-    parser.add_argument(
         "--no-pruning",
         dest="use_pruning",
         action="store_false",
@@ -266,17 +272,30 @@ def main() -> None:
     parser.add_argument("--prune-mode", type=int, default=3, help="解码剪枝模式（CUDA v1_exp8 路径）")
     parser.add_argument("--log-eps", type=float, default=-10.0, help="解码剪枝 log-epsilon 阈值")
     parser.set_defaults(use_pruning=True)
+    # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
     parser.add_argument(
         "--group-size",
         type=int,
         default=32,
-        help="KIVI per-group quantization size (method='kivi' only)",
+        help="KIVI per-group quantization size; OScaR group size (INT2 必须=32)",
     )
     parser.add_argument(
         "--residual-length",
         type=int,
         default=32,
-        help="KIVI number of recent fp16 tokens kept unquantized (method='kivi' only)",
+        help="KIVI number of recent fp16 tokens kept unquantized",
+    )
+    # ── OScaR params (--method oscar) —— 默认 = INT2 官方配方 ──
+    parser.add_argument("--num-bits", type=int, default=2, help="OScaR KV quant bits (INT2 默认)")
+    parser.add_argument("--quant-mode", default="k-channel", help="OScaR quant mode")
+    parser.add_argument("--kv-rotation", default="hadamard", help="OScaR kv rotation (INT2 默认 hadamard)")
+    parser.add_argument("--kv-norm", default="1", help="OScaR kv norm (INT2 默认 1)")
+    parser.add_argument("--residual-evict-size", type=int, default=256, help="OScaR residual evict size (INT2 默认 256)")
+    parser.add_argument(
+        "--offline-v-hadamard",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="OScaR: absorb an offline per-head Hadamard rotation into v_proj/o_proj (INT2 默认开启; --no-offline-v-hadamard 关闭)",
     )
     args = parser.parse_args()
 
@@ -287,21 +306,27 @@ def main() -> None:
         depths=parse_int_list(args.depths),
         output_path=args.output,
         method=args.method,
+        # quantpc KV-cache params (--method quantpc)
         k_bits=args.k_bits,
         v_bits=args.v_bits,
         sink_size=args.sink_size,
         local_size=args.local_size,
-        projected_query_bits=args.projected_query_bits,
         exp_bits=args.exp_bits,
         eas=args.eas,
         zerorope=args.zerorope,
-        cuda_v1_exp8=args.cuda_v1_exp8,
-        refit_decoder=args.refit_decoder,
         use_pruning=args.use_pruning,
         prune_mode=args.prune_mode,
         log_eps=args.log_eps,
+        # KIVI params (--method kivi)
         group_size=args.group_size,
         residual_length=args.residual_length,
+        # OScaR params (--method oscar)
+        num_bits=args.num_bits,
+        quant_mode=args.quant_mode,
+        kv_rotation=args.kv_rotation,
+        kv_norm=args.kv_norm,
+        residual_evict_size=args.residual_evict_size,
+        offline_v_hadamard=args.offline_v_hadamard,
     )
 
 

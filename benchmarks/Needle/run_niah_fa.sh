@@ -1,79 +1,93 @@
 #!/bin/bash
-# NIAH（大海捞针）dense 基线评测：flash_attention_2 / sdpa。
-#
-# 与 run_niah.sh（quantpc 消融）对应，用同一个 runner run_bin_v4.py，
-# 仅通过 --method 切换到 dense 全精度基线（不打 modify、用模型默认 KV cache）。
-#
-# 结果目录结构：
-#   results/niah/<MODEL>_<flash_attention_2|sdpa>/results_<method>.json
-# 图片输出到：
-#   results/niah/vis/
+# NIAH (needle-in-a-haystack): quantpc / kivi / oscar / dense baselines, then visualize.
+# Switch method via env: METHOD=kivi bash run_niah.sh
+# Output: results/niah/<TAG>/results.json ; images in results/niah/vis/
 
-# ── 路径引导 ──────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}"
 
-# ── 基础配置 ──────────────────────────────────────────────
-GPU=4
+GPU="${GPU:-1}"
 MODEL="/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct"
 BASE_RESULT_DIR="results/niah"
 VIS_DIR="${BASE_RESULT_DIR}/vis"
 MODEL_NAME=$(basename "${MODEL}")
 
-# context lengths / needle depths（与 run_niah.sh 保持一致，便于横比）
-LENGTHS="81920,90112,98304,106496,114688,122880,131072"
+# Context lengths / needle depths (comma-separated).
+# LENGTHS="81920,90112,98304,106496,114688,122880,131072"
+LENGTHS="8192,16384,24576,32768,40960,49152,57344,65536,73728,81920,90112,98304,106496,114688,122880,131072"
 DEPTHS="0,11,22,33,44,56,67,78,89,100"
 
-# 期望答案（与 show_image_paper.py 默认值保持一致）
+# Expected answer (must match show_image_paper.py default).
 EXPECTED_ANSWER="eat a sandwich and sit in Dolores Park on a sunny day."
 
-# ── dense 基线方法列表 ─────────────────────────────────────
-# flash_attention_2 = flash-attn-2 全精度基线
-# sdpa              = torch SDPA 全精度基线
-METHODS=(
-  flash_attention_2
-  # sdpa
+# Method: quantpc | kivi | oscar | flash_attention_2 | sdpa | eager
+METHOD="${METHOD:-flash_attention_2}"
+
+# quantpc K/V sweep + full-precision sink/local windows.
+CONFIGS=(
+  # "256 256"
+  "320 256"
+  # "320 320"
 )
+SINK="${SINK:-64}"
+LOCAL="${LOCAL:-128}"
 
-# ── 逐方法实验 ────────────────────────────────────────────
-for method in "${METHODS[@]}"; do
-  SUBDIR="${BASE_RESULT_DIR}/${MODEL_NAME}_${method}"
-  mkdir -p "${SUBDIR}"
+# KIVI params (2/4-bit KV only).
+KIVI_K="${KIVI_K:-2}"
+KIVI_V="${KIVI_V:-2}"
+KIVI_GROUP="${KIVI_GROUP:-32}"
+KIVI_RESIDUAL="${KIVI_RESIDUAL:-128}"
 
-  echo "========================================"
-  echo "Running NIAH: method=${method} (dense baseline)"
-  echo "Output : ${SUBDIR}/results_${method}.json"
-  echo "========================================"
+# OScaR INT2 recipe. group_size MUST be 32: the int2 V-param interleaved packer
+# hardcodes 32-wide groups (4 groups); group 128 under-allocates v_params -> OOB write.
+OSCAR_NUM_BITS="${OSCAR_NUM_BITS:-2}"
+OSCAR_QUANT_MODE="${OSCAR_QUANT_MODE:-k-channel}"
+OSCAR_GROUP="${OSCAR_GROUP:-32}"
+OSCAR_KV_ROTATION="${OSCAR_KV_ROTATION:-hadamard}"
+OSCAR_KV_NORM="${OSCAR_KV_NORM:-1}"
+OSCAR_EVICT="${OSCAR_EVICT:-256}"
+OSCAR_OFFLINE_V_HAD="${OSCAR_OFFLINE_V_HAD:-1}"
 
-  CUDA_VISIBLE_DEVICES=${GPU} \
-  python "${SCRIPT_DIR}/run_bin_v4.py" \
-    --model "${MODEL}" \
-    --method "${method}" \
-    --lengths "${LENGTHS}" \
-    --depths "${DEPTHS}" \
-    --output "${SUBDIR}/results_${method}.json"
-
-  echo "Done: method=${method}"
-  echo ""
-done
-
-# ── 批量可视化 ─────────────────────────────────────────────
-echo "========================================"
-echo "Generating visualizations..."
-echo "========================================"
-
-for method in "${METHODS[@]}"; do
-  SUBDIR="${BASE_RESULT_DIR}/${MODEL_NAME}_${method}"
-
+# run_niah SUBDIR RUN_ARGS...  - run one config and plot.
+run_niah() {
+  local subdir="$1"; shift
+  mkdir -p "${subdir}"
+  echo "=== NIAH: method=${METHOD} -> ${subdir}/results.json ==="
+  CUDA_VISIBLE_DEVICES=${GPU} python "${SCRIPT_DIR}/run_bin_v4.py" \
+    --model "${MODEL}" --method "${METHOD}" \
+    --lengths "${LENGTHS}" --depths "${DEPTHS}" \
+    --output "${subdir}/results.json" "$@"
   python "${SCRIPT_DIR}/show_image_paper.py" \
-    --model "${MODEL}" \
-    --eval_path "${SUBDIR}" \
-    --save_dir "${VIS_DIR}" \
-    --expected_answer "${EXPECTED_ANSWER}"
+    --model "${MODEL}" --eval_path "${subdir}" \
+    --save_dir "${VIS_DIR}" --expected_answer "${EXPECTED_ANSWER}"
+}
 
-  echo "Saved image for method=${method}"
-done
+case "${METHOD}" in
+  quantpc)
+    for cfg in "${CONFIGS[@]}"; do
+      K=$(echo "$cfg" | awk '{print $1}'); V=$(echo "$cfg" | awk '{print $2}')
+      run_niah "${BASE_RESULT_DIR}/${MODEL_NAME}_k${K}_v${V}" \
+        --k-bits "${K}" --v-bits "${V}" --sink-size "${SINK}" --local-size "${LOCAL}" \
+        --exp-bits 4 --eas 0.01 --zerorope 20
+    done
+    ;;
+  kivi)
+    run_niah "${BASE_RESULT_DIR}/${MODEL_NAME}_kivi_k${KIVI_K}_v${KIVI_V}" \
+      --k-bits "${KIVI_K}" --v-bits "${KIVI_V}" \
+      --group-size "${KIVI_GROUP}" --residual-length "${KIVI_RESIDUAL}"
+    ;;
+  oscar)
+    OSCAR_ARGS=(--num-bits "${OSCAR_NUM_BITS}" --quant-mode "${OSCAR_QUANT_MODE}" --group-size "${OSCAR_GROUP}")
+    [ "${OSCAR_KV_ROTATION}" != "none" ] && OSCAR_ARGS+=(--kv-rotation "${OSCAR_KV_ROTATION}")
+    [ "${OSCAR_KV_NORM}" != "0" ]       && OSCAR_ARGS+=(--kv-norm "${OSCAR_KV_NORM}")
+    [ -n "${OSCAR_EVICT}" ]             && OSCAR_ARGS+=(--residual-evict-size "${OSCAR_EVICT}")
+    [ "${OSCAR_OFFLINE_V_HAD}" = "1" ]  && OSCAR_ARGS+=(--offline-v-hadamard)
+    run_niah "${BASE_RESULT_DIR}/${MODEL_NAME}_oscar_int${OSCAR_NUM_BITS}" "${OSCAR_ARGS[@]}"
+    ;;
+  *)
+    run_niah "${BASE_RESULT_DIR}/${MODEL_NAME}_${METHOD}"
+    ;;
+esac
 
-echo ""
 echo "All done. Images saved to: ${VIS_DIR}/${MODEL_NAME}/"

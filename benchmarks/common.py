@@ -11,7 +11,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
 # Dense-baseline attn implementations selectable via --method. Anything not in
-# this set and not "quantpc"/"kivi" is rejected by load_quantpc_model.
+# this set and not "quantpc"/"kivi"/"oscar" is rejected by load_model.
 BASELINE_ATTN = {"flash_attention_2", "sdpa", "eager"}
 
 # The KIVI reference implementation lives under src/KIVI with its own
@@ -42,16 +42,15 @@ def seed_everything(seed: int = 42) -> None:
     torch.backends.cudnn.deterministic = True
 
 
-def output_tag(method: str, k_bits: int, v_bits: int, refit_decoder: bool = False) -> str:
+def output_tag(method: str, k_bits: int, v_bits: int, num_bits: int = 2) -> str:
     """Directory/file tag keyed by method + KV bits, shared across runners."""
     if method == "kivi":
         return f"kivi_k{k_bits}_v{v_bits}"
+    if method == "oscar":
+        return f"oscar_int{num_bits}"
     if method != "quantpc":
         return method
-    tag = f"quantpc_k{k_bits}_v{v_bits}"
-    if refit_decoder:
-        tag += "_refit"
-    return tag
+    return f"quantpc_k{k_bits}_v{v_bits}"
 
 
 def _load_kivi_model(
@@ -107,6 +106,7 @@ def _load_oscar_model(
     kv_rotation: str,
     kv_norm: str,
     residual_evict_size: Optional[int],
+    offline_v_hadamard: bool = False,
     device: str = "cuda",
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
     """Load the OScaR quantized-KV model from the copied src/OScaR-KV-Quant tree.
@@ -153,11 +153,40 @@ def _load_oscar_model(
     )
     model.eval()
 
+    # OScaR's INT2 default recipe absorbs a per-head Hadamard rotation into the
+    # v_proj/o_proj weights offline (QuaRot-style). This is an exact orthogonal
+    # transform (Hadamard is orthogonal, so o_proj @ (V @ H) @ H^T == original),
+    # so outputs are unchanged in full precision but V becomes far more 2-bit
+    # quantization-friendly. Must run AFTER weights are loaded.
+    if offline_v_hadamard:
+        from example import apply_offline_v_hadamard
+        had_dim = apply_offline_v_hadamard(model)
+        print(f"[oscar] applied offline V Hadamard to v_proj/o_proj (had_dim={had_dim})")
+
     # The oscar attention backend calls `past_key_value.update_pack(...)`, which
     # only exists on oscar.DynamicCache. HF generate() would otherwise build a
     # stock transformers.DynamicCache (no update_pack), so we hand the runner a
     # factory to inject a fresh oscar cache per call (like quantpc's make_cache).
-    from oscar import DynamicCache as OscarDynamicCache
+    from oscar import Cache as OscarCache, DynamicCache as OscarDynamicCache
+
+    # HF generate()'s `_get_initial_cache_position` does `isinstance(cache, Cache)`
+    # and, when False, falls back to `cache[0][0].shape[2]` -- which throws on a
+    # freshly-built (0-layer) oscar cache. oscar.DynamicCache is NOT a
+    # transformers.Cache subclass, so we globally rebind the `Cache`/`DynamicCache`
+    # names to oscar's own classes to make that isinstance succeed (then HF takes
+    # the `get_seq_length()` path, which returns 0 for an empty cache). NOTE: the
+    # rebind must target `transformers.generation.utils` -- that module did
+    # `from ..cache_utils import Cache, DynamicCache` at import time, so patching
+    # only `transformers.cache_utils.*` would be too late for its bound names.
+    # Scoped to the oscar load path (one method == one process in the runners), so
+    # quantpc/kivi/dense baselines are unaffected.
+    import transformers.cache_utils as _tf_cache_utils
+    import transformers.generation.utils as _tf_gen_utils
+
+    _tf_cache_utils.Cache = OscarCache
+    _tf_cache_utils.DynamicCache = OscarDynamicCache
+    _tf_gen_utils.Cache = OscarCache
+    _tf_gen_utils.DynamicCache = OscarDynamicCache
 
     def make_cache():
         return OscarDynamicCache()
@@ -165,7 +194,99 @@ def _load_oscar_model(
     return model, tokenizer, make_cache
 
 
-def load_quantpc_model(
+def _auto_device_map():
+    """Return "auto" when accelerate is installed (multi-GPU sharding), else None."""
+    try:
+        import accelerate  # noqa: F401
+        return "auto"
+    except ImportError:
+        return None
+
+
+def _load_quantpc_model(
+    model_name: str,
+    *,
+    k_bits: int,
+    v_bits: int,
+    sink_size: int,
+    local_size: int,
+    exp_bits: int,
+    eas: float,
+    zerorope: int,
+    use_pruning: bool,
+    prune_mode: int,
+    log_eps: float,
+) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
+    """Load a HF model patched with the quanpc_standalone online-projection path.
+
+    The project ships a single production standalone path (quanpc_standalone): a
+    CUDA-only online-projection decode with fixed 8-bit projected queries. The old
+    torch reference backend, refit decoder, and tunable projected_query_bits were
+    removed. ``make_cache`` returns a fresh ``StandaloneLlamaCache`` per call (the
+    model must have been patched via ``modify_llama_for_standalone``).
+    """
+    from quantpc.quanpc_standalone import StandaloneConfig
+    from quantpc.quanpc_standalone.transformers import (
+        StandaloneLlamaCache,
+        modify_llama_for_standalone,
+    )
+
+    standalone_config = StandaloneConfig(
+        key_bits=k_bits,
+        value_bits=v_bits,
+        sink_size=sink_size,
+        local_size=local_size,
+        eas=eas,
+        zerorope=zerorope,
+        exp_bits=exp_bits,
+        use_pruning=use_pruning,
+        prune_mode=prune_mode,
+        log_eps=log_eps,
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    device_map = _auto_device_map()
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        device_map=device_map,
+        torch_dtype="bfloat16",
+    )
+    if device_map is None and torch.cuda.is_available():
+        model = model.to("cuda")
+    modify_llama_for_standalone(model)
+    model.eval()
+
+    def make_cache():
+        return StandaloneLlamaCache(standalone_config)
+
+    return model, tokenizer, make_cache
+
+
+def _load_baseline_model(
+    model_name: str,
+    *,
+    attn_implementation: str,
+) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
+    """Load a dense full-precision baseline (flash_attention_2 / sdpa / eager).
+
+    No quantized KV cache: ``make_cache`` is ``None`` so the runner lets the model
+    use its default (DynamicCache) KV cache.
+    """
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    device_map = _auto_device_map()
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        device_map=device_map,
+        torch_dtype="bfloat16",
+        attn_implementation=attn_implementation,
+    )
+    if device_map is None and torch.cuda.is_available():
+        model = model.to("cuda")
+    model.eval()
+    return model, tokenizer, None
+
+
+def load_model(
     model_name: str,
     method: str = "quantpc",
     *,
@@ -173,12 +294,9 @@ def load_quantpc_model(
     v_bits: int = 256,
     sink_size: int = 64,
     local_size: int = 1024,
-    projected_query_bits: int = 8,
     exp_bits: int = 4,
     eas: float = 0.01,
     zerorope: int = 30,
-    cuda_v1_exp8: bool = False,
-    refit_decoder: bool = False,
     use_pruning: bool = True,
     prune_mode: int = 3,
     log_eps: float = -10.0,
@@ -189,21 +307,20 @@ def load_quantpc_model(
     kv_rotation: str = "none",
     kv_norm: str = "0",
     residual_evict_size: Optional[int] = None,
+    offline_v_hadamard: bool = False,
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
     """Load a HF model+tokenizer and return ``(model, tokenizer, make_cache)``.
 
-    Method dispatch (mirrors the original three runners):
-      * ``quantpc``           -> apply ``modify(model)``; ``make_cache`` builds a
-                                 fresh ``QuantKVCache`` per call. Backend is the
-                                 CUDA impl (``quantpc.quanpc``) when
-                                 ``cuda_v1_exp8`` else the torch reference
-                                 (``quantpc.quanpc_torch``).
-      * ``kivi``              -> load the KIVI quantized-KV model; ``k_bits`` /
-                                 ``v_bits`` are the KV quantization bits (2 or 4),
-                                 with ``group_size`` / ``residual_length``.
+    Method dispatch (each backend has its own ``_load_*`` helper):
+      * ``quantpc``           -> ``_load_quantpc_model`` (quanpc_standalone
+                                 online-projection path, CUDA-only, GQA=4, bf16;
+                                 fresh ``StandaloneLlamaCache`` per call).
+      * ``kivi``              -> ``_load_kivi_model``; ``k_bits`` / ``v_bits`` are
+                                 the KV quantization bits (2 or 4), with
+                                 ``group_size`` / ``residual_length``.
                                  ``make_cache`` is ``None`` (KIVI keeps its own
                                  internal quantized cache).
-      * ``oscar``             -> load OScaR's custom modeling (src/OScaR-KV-Quant);
+      * ``oscar``             -> ``_load_oscar_model`` (src/OScaR-KV-Quant);
                                  ``num_bits`` / ``quant_mode`` / ``group_size`` set
                                  the KV quantization. ``make_cache`` is ``None``
                                  (OScaR builds its quantized cache internally).
@@ -228,67 +345,26 @@ def load_quantpc_model(
             kv_rotation=kv_rotation,
             kv_norm=kv_norm,
             residual_evict_size=residual_evict_size,
+            offline_v_hadamard=offline_v_hadamard,
         )
-
-    from_pretrained_kwargs = {"torch_dtype": "bfloat16"}
-    QuantKVCache = None
-    modify = None
 
     if method == "quantpc":
-        if cuda_v1_exp8:
-            from quantpc.quanpc import QuantKVCache, modify
-        else:
-            from quantpc.quanpc_torch import QuantKVCache, modify
-    elif method in BASELINE_ATTN:
-        from_pretrained_kwargs["attn_implementation"] = method
-    else:
+        return _load_quantpc_model(
+            model_name,
+            k_bits=k_bits,
+            v_bits=v_bits,
+            sink_size=sink_size,
+            local_size=local_size,
+            exp_bits=exp_bits,
+            eas=eas,
+            zerorope=zerorope,
+            use_pruning=use_pruning,
+            prune_mode=prune_mode,
+            log_eps=log_eps,
+        )
+
+    if method not in BASELINE_ATTN:
         raise ValueError(
-            f"Unknown method '{method}'. Supported: 'quantpc', 'kivi', {sorted(BASELINE_ATTN)}."
+            f"Unknown method '{method}'. Supported: 'quantpc', 'kivi', 'oscar', {sorted(BASELINE_ATTN)}."
         )
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-    try:
-        import accelerate  # noqa: F401
-        device_map = "auto"
-    except ImportError:
-        device_map = None
-
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        device_map=device_map,
-        **from_pretrained_kwargs,
-    )
-    if device_map is None and torch.cuda.is_available():
-        model = model.to("cuda")
-
-    if modify is not None:
-        modify(model)
-    model.eval()
-
-    make_cache: CacheFactory = None
-    if QuantKVCache is not None:
-        # Decode-time pruning is a CUDA-kernel feature (quantpc.quanpc); the
-        # torch reference backend does not accept the pruning knobs.
-        pruning_kwargs = (
-            dict(use_pruning=use_pruning, prune_mode=prune_mode, log_eps=log_eps)
-            if cuda_v1_exp8
-            else {}
-        )
-
-        def make_cache():
-            return QuantKVCache(
-                k_bits=k_bits,
-                v_bits=v_bits,
-                sink_size=sink_size,
-                local_size=local_size,
-                projected_query_bits=projected_query_bits,
-                exp_bits=exp_bits,
-                eas=eas,
-                zerorope=zerorope,
-                use_cuda_v1_exp8=cuda_v1_exp8,
-                refit_decoder=refit_decoder,
-                **pruning_kwargs,
-            )
-
-    return model, tokenizer, make_cache
+    return _load_baseline_model(model_name, attn_implementation=method)

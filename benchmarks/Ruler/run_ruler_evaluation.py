@@ -7,8 +7,7 @@ Mirrors benchmarks/Needle/run_bin_v4.py in HOW the QuanPC method is applied:
   * modify(model) monkey-patches the attention
   * a fresh QuantKVCache is injected as past_key_values for every generation
 
-Backend selection is driven by the --cuda-v1-exp8 flag (CUDA vs torch reference),
-exactly like the Needle runner.
+The QuanPC method uses the CUDA-only quanpc_standalone backend.
 
 Usage:
     python benchmarks/Ruler/run_ruler_evaluation.py \
@@ -17,7 +16,6 @@ Usage:
         --max_seq_lengths 131072 \
         --max_length 131072 \
         --k-bits 256 --v-bits 320 \
-        --cuda-v1-exp8 \
         --apply_chat_template
 """
 
@@ -38,7 +36,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.lmeval import MyModel  # noqa: E402
 from benchmarks.common import (  # noqa: E402
-    load_quantpc_model,
+    load_model,
     output_tag,
     seed_everything,
 )
@@ -131,31 +129,27 @@ def parse_arguments():
         help="Path or name of the HF model to evaluate",
     )
 
-    # Method dispatch
-    #   quantpc            -> my quantized KV-cache method (modify + QuantKVCache)
+    # Method dispatch (handled by benchmarks.common.load_model):
+    #   quantpc            -> quantized KV-cache method (modify + StandaloneLlamaCache)
+    #   kivi               -> KIVI quantized KV cache
+    #   oscar              -> OScaR quantized KV cache
     #   flash_attention_2  -> dense full-precision baseline (flash-attn-2)
-    #   sdpa               -> dense full-precision baseline (torch SDPA)
-    #   (dispatch handled by benchmarks.common.load_quantpc_model)
+    #   sdpa / eager       -> dense full-precision baseline
     parser.add_argument(
         "--method",
         type=str,
         default="quantpc",
         help=(
-            "evaluation method: 'quantpc' (quantized KV cache), or a dense "
-            "baseline attn implementation 'flash_attention_2' / 'sdpa'"
+            "evaluation method: 'quantpc' / 'kivi' / 'oscar' (quantized KV cache), "
+            "or a dense baseline attn impl 'flash_attention_2' / 'sdpa' / 'eager'"
         ),
     )
 
-    # QuanPC KV-cache parameters (only used when --method quantpc;
-    # mirrors benchmarks/Needle/run_bin_v4.py)
-    parser.add_argument("--k-bits", type=int, default=256)
-    parser.add_argument("--v-bits", type=int, default=320)
-    parser.add_argument(
-        "--projected-query-bits",
-        type=int,
-        default=8,
-        help="signed quantization bits for projected query",
-    )
+    # ── quantpc KV-cache params (--method quantpc) ──
+    parser.add_argument("--k-bits", type=int, default=256, help="key projection bits (also KIVI KV bits)")
+    parser.add_argument("--v-bits", type=int, default=320, help="value projection bits (also KIVI KV bits)")
+    parser.add_argument("--sink-size", type=int, default=64, help="initial (sink) tokens kept in full precision")
+    parser.add_argument("--local-size", type=int, default=1024, help="most-recent (local) tokens kept in full precision")
     parser.add_argument(
         "--exp-bits",
         type=int,
@@ -165,20 +159,6 @@ def parse_arguments():
     parser.add_argument("--eas", type=float, default=0.01)
     parser.add_argument("--zerorope", type=int, default=20)
     parser.add_argument(
-        "--cuda-v1-exp8",
-        action="store_true",
-        help=(
-            "select the CUDA backend (quantpc.quanpc) with experimental "
-            "v_bpd=1 + uint8-exp global attention; without this flag the "
-            "torch-only reference backend (quantpc.quanpc_torch) is used"
-        ),
-    )
-    parser.add_argument(
-        "--refit-decoder",
-        action="store_true",
-        help="enable decode-matrix refit (CUDA prefill falls back to torch)",
-    )
-    parser.add_argument(
         "--no-pruning",
         dest="use_pruning",
         action="store_false",
@@ -187,6 +167,18 @@ def parse_arguments():
     parser.add_argument("--prune-mode", type=int, default=3, help="decode pruning mode (CUDA v1_exp8 path)")
     parser.add_argument("--log-eps", type=float, default=-10.0, help="decode pruning log-epsilon threshold")
     parser.set_defaults(use_pruning=True)
+
+    # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
+    parser.add_argument("--group-size", type=int, default=32, help="KIVI per-group quant size; OScaR group size (INT2 必须=32)")
+    parser.add_argument("--residual-length", type=int, default=32, help="KIVI recent fp16 tokens kept unquantized")
+
+    # ── OScaR params (--method oscar) ──
+    parser.add_argument("--num-bits", type=int, default=2, help="OScaR KV quant bits (INT2 默认)")
+    parser.add_argument("--quant-mode", default="k-channel", help="OScaR quant mode")
+    parser.add_argument("--kv-rotation", default="hadamard", help="OScaR kv rotation (INT2 默认 hadamard)")
+    parser.add_argument("--kv-norm", default="1", help="OScaR kv norm (INT2 默认 1)")
+    parser.add_argument("--residual-evict-size", type=int, default=256, help="OScaR residual evict size (INT2 默认 256)")
+    parser.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
 
     # Task configuration
     parser.add_argument(
@@ -233,7 +225,7 @@ def get_output_path(args):
     if args.output_path:
         return args.output_path
     model_key = Path(args.model).name
-    tag = output_tag(args.method, args.k_bits, args.v_bits, args.refit_decoder)
+    tag = output_tag(args.method, args.k_bits, args.v_bits, args.num_bits)
     return f"results/ruler/{model_key}_{tag}/"
 
 
@@ -308,7 +300,7 @@ def run_evaluation(ruler_model, args, output_path):
 def save_results(results, args, output_path):
     """Save evaluation results to files."""
     model_key = Path(args.model).name
-    tag = output_tag(args.method, args.k_bits, args.v_bits, args.refit_decoder)
+    tag = output_tag(args.method, args.k_bits, args.v_bits, args.num_bits)
 
     results_lite = {
         "results": results.get("results", {}),
@@ -369,30 +361,38 @@ def main():
     logger.info(f"Model: {args.model}")
     logger.info(f"Method: {args.method}")
     if args.method == "quantpc":
-        backend = "CUDA (quantpc.quanpc)" if args.cuda_v1_exp8 else "torch (quantpc.quanpc_torch)"
-        logger.info(f"Backend: {backend}")
+        logger.info("Backend: CUDA (quantpc.quanpc_standalone)")
         logger.info(f"KV cache: k_bits={args.k_bits}, v_bits={args.v_bits}, "
-                    f"projected_query_bits={args.projected_query_bits}, "
                     f"exp_bits={args.exp_bits}, eas={args.eas}, zerorope={args.zerorope}")
     logger.info(f"Tasks: {args.tasks}")
     if args.limit:
         logger.info(f"Sample limit: {args.limit}")
 
     try:
-        model, tokenizer, kv_cache_factory = load_quantpc_model(
+        model, tokenizer, kv_cache_factory = load_model(
             args.model,
             method=args.method,
+            # quantpc KV-cache params (--method quantpc)
             k_bits=args.k_bits,
             v_bits=args.v_bits,
-            projected_query_bits=args.projected_query_bits,
+            sink_size=args.sink_size,
+            local_size=args.local_size,
             exp_bits=args.exp_bits,
             eas=args.eas,
             zerorope=args.zerorope,
-            cuda_v1_exp8=args.cuda_v1_exp8,
-            refit_decoder=args.refit_decoder,
             use_pruning=args.use_pruning,
             prune_mode=args.prune_mode,
             log_eps=args.log_eps,
+            # KIVI params (--method kivi)
+            group_size=args.group_size,
+            residual_length=args.residual_length,
+            # OScaR params (--method oscar)
+            num_bits=args.num_bits,
+            quant_mode=args.quant_mode,
+            kv_rotation=args.kv_rotation,
+            kv_norm=args.kv_norm,
+            residual_evict_size=args.residual_evict_size,
+            offline_v_hadamard=args.offline_v_hadamard,
         )
         # RULER's lm_eval harness pads batches; ensure a pad token exists.
         if tokenizer.pad_token is None:

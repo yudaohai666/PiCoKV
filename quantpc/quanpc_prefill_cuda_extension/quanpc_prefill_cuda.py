@@ -116,6 +116,16 @@ def learn_projection_cuda(full_states, init_vectors, glob_start: int, glob_len: 
     return projection
 
 
+def pack_key_transposed_cuda(codes, verbose: bool = False):
+    ext = load_quanpc_prefill_extension(verbose)
+    return ext.quanpc_prefill_pack_key_transposed_fn(codes.contiguous())
+
+
+def pack_value_token_cuda(codes, verbose: bool = False):
+    ext = load_quanpc_prefill_extension(verbose)
+    return ext.quanpc_prefill_pack_value_token_fn(codes.contiguous())
+
+
 def quantize_pack_cuda(full_states, projection, glob_start: int, glob_len: int, zerorope: int = 0, apply_zerorope: bool = False, pack_key_layout: bool = True, verbose: bool = False):
     ext = load_quanpc_prefill_extension(verbose)
     return ext.quanpc_prefill_quantize_pack_fn(
@@ -138,6 +148,36 @@ def quantize_unpacked_cuda(full_states, projection, glob_start: int, glob_len: i
         int(glob_len),
         int(zerorope),
         bool(apply_zerorope),
+    )
+
+
+def blockk_fast_cuda(
+    full_states,
+    init_vectors,
+    glob_start: int,
+    glob_len: int,
+    zerorope: int = 0,
+    apply_zerorope: bool = False,
+    group_bits: int = 16,
+    power_iters: int = 1,
+    solve_mode: int = 0,
+    verbose: bool = False,
+):
+    """Fast fused CUDA block-k prototype.
+
+    Returns ``codes, encoder, decoder, err``.  ``solve_mode=0`` uses full group Gram solve; ``solve_mode=1`` uses the faster diagonal refit ``U.T @ residual / L``.
+    """
+    ext = load_quanpc_prefill_extension(verbose)
+    return ext.quanpc_prefill_blockk_fast_fn(
+        full_states.contiguous(),
+        init_vectors.contiguous(),
+        int(glob_start),
+        int(glob_len),
+        int(zerorope),
+        bool(apply_zerorope),
+        int(group_bits),
+        int(power_iters),
+        int(solve_mode),
     )
 
 

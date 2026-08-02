@@ -1537,6 +1537,805 @@ __global__ void pack_value_from_token_packed_tile_kernel(
 }
 
 
+
+template <typename scalar_t, int GroupBits, int LearnTileTokens>
+__global__ void blockk_ata_partial_d128_kernel(
+    const scalar_t *__restrict__ residual,
+    const scalar_t *__restrict__ vector,
+    float *__restrict__ partial,
+    int rows,
+    int glob_len,
+    int code_dim,
+    int group_start,
+    int active_bits,
+    int num_tiles) {
+  __shared__ float shared_acc[GroupBits * kLearnDim];
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  const int row = blockIdx.y;
+  const int tile = blockIdx.x;
+  if (row >= rows || tile >= num_tiles) {
+    return;
+  }
+  for (int idx = threadIdx.x; idx < active_bits * kLearnDim; idx += blockDim.x) {
+    shared_acc[idx] = 0.0f;
+  }
+  __syncthreads();
+
+  float local_acc[GroupBits][4];
+  #pragma unroll
+  for (int g = 0; g < GroupBits; ++g) {
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      local_acc[g][i] = 0.0f;
+    }
+  }
+
+  const int tile_start = tile * LearnTileTokens;
+  const int tile_end = min(tile_start + LearnTileTokens, glob_len);
+  for (int token = tile_start + warp; token < tile_end; token += kLearnWarps) {
+    const int64_t residual_base = (static_cast<int64_t>(row) * glob_len + token) * kLearnDim;
+    float vals[4];
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      const int d = lane + i * 32;
+      vals[i] = load_scalar(residual, residual_base + d);
+    }
+
+    float dots[GroupBits];
+    #pragma unroll
+    for (int g = 0; g < GroupBits; ++g) {
+      float dot = 0.0f;
+      if (g < active_bits) {
+        const int64_t vec_base = (static_cast<int64_t>(row) * code_dim + group_start + g) * kLearnDim;
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+          const int d = lane + i * 32;
+          dot += vals[i] * load_scalar(vector, vec_base + d);
+        }
+      }
+      dot = warp_sum(dot);
+      dots[g] = __shfl_sync(0xffffffffu, dot, 0);
+    }
+
+    #pragma unroll
+    for (int g = 0; g < GroupBits; ++g) {
+      if (g < active_bits) {
+        const float coeff = dots[g];
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+          local_acc[g][i] += vals[i] * coeff;
+        }
+      }
+    }
+  }
+
+  #pragma unroll
+  for (int g = 0; g < GroupBits; ++g) {
+    if (g < active_bits) {
+      #pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        const int d = lane + i * 32;
+        atomicAdd(&shared_acc[g * kLearnDim + d], local_acc[g][i]);
+      }
+    }
+  }
+  __syncthreads();
+
+  for (int idx = threadIdx.x; idx < active_bits * kLearnDim; idx += blockDim.x) {
+    partial[((static_cast<int64_t>(row) * num_tiles + tile) * GroupBits * kLearnDim) + idx] = shared_acc[idx];
+  }
+}
+
+template <typename scalar_t, int GroupBits>
+__global__ void blockk_reduce_norm_store_d128_kernel(
+    const float *__restrict__ partial,
+    scalar_t *__restrict__ encoder,
+    int rows,
+    int num_tiles,
+    int code_dim,
+    int group_start,
+    int active_bits) {
+  __shared__ float vec[kLearnDim];
+  __shared__ float red[kLearnDim];
+  const int row = blockIdx.y;
+  const int g = blockIdx.x;
+  const int d = threadIdx.x;
+  if (row >= rows || g >= active_bits || d >= kLearnDim) {
+    return;
+  }
+  float sum = 0.0f;
+  for (int tile = 0; tile < num_tiles; ++tile) {
+    const int64_t idx = ((static_cast<int64_t>(row) * num_tiles + tile) * GroupBits + g) * kLearnDim + d;
+    sum += partial[idx];
+  }
+  vec[d] = sum;
+  red[d] = sum * sum;
+  __syncthreads();
+
+  for (int stride = kLearnDim >> 1; stride > 0; stride >>= 1) {
+    if (d < stride) {
+      red[d] += red[d + stride];
+    }
+    __syncthreads();
+  }
+  const float inv_norm = rsqrtf(fmaxf(red[0], 1.0e-20f));
+  encoder[(static_cast<int64_t>(row) * code_dim + group_start + g) * kLearnDim + d] = store_scalar<scalar_t>(vec[d] * inv_norm);
+}
+
+
+
+template <typename scalar_t, int GroupBits>
+__global__ void blockk_init_orth_store_d128_kernel(
+    const scalar_t *__restrict__ init_vectors,
+    scalar_t *__restrict__ encoder,
+    int rows,
+    int code_dim,
+    int group_start,
+    int active_bits) {
+  __shared__ float vec[GroupBits * kLearnDim];
+  __shared__ float red[kLearnDim];
+  const int row = blockIdx.x;
+  if (row >= rows) {
+    return;
+  }
+
+  for (int idx = threadIdx.x; idx < active_bits * kLearnDim; idx += blockDim.x) {
+    const int g = idx / kLearnDim;
+    const int d = idx - g * kLearnDim;
+    vec[idx] = load_scalar(init_vectors, (static_cast<int64_t>(row) * code_dim + group_start + g) * kLearnDim + d);
+  }
+  __syncthreads();
+
+  for (int g = 0; g < active_bits; ++g) {
+    for (int prev = 0; prev < g; ++prev) {
+      float local = 0.0f;
+      for (int d = threadIdx.x; d < kLearnDim; d += blockDim.x) {
+        local += vec[g * kLearnDim + d] * vec[prev * kLearnDim + d];
+      }
+      local = warp_sum(local);
+      const int lane = threadIdx.x & 31;
+      const int warp = threadIdx.x >> 5;
+      __shared__ float warp_sums[8];
+      if (lane == 0) {
+        warp_sums[warp] = local;
+      }
+      __syncthreads();
+      float dot = 0.0f;
+      if (warp == 0) {
+        dot = (lane < (blockDim.x >> 5)) ? warp_sums[lane] : 0.0f;
+        dot = warp_sum(dot);
+        if (lane == 0) {
+          red[0] = dot;
+        }
+      }
+      __syncthreads();
+      dot = red[0];
+      for (int d = threadIdx.x; d < kLearnDim; d += blockDim.x) {
+        vec[g * kLearnDim + d] -= dot * vec[prev * kLearnDim + d];
+      }
+      __syncthreads();
+    }
+
+    float local_norm = 0.0f;
+    for (int d = threadIdx.x; d < kLearnDim; d += blockDim.x) {
+      const float v = vec[g * kLearnDim + d];
+      local_norm += v * v;
+    }
+    local_norm = warp_sum(local_norm);
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    __shared__ float norm_warp_sums[8];
+    if (lane == 0) {
+      norm_warp_sums[warp] = local_norm;
+    }
+    __syncthreads();
+    float norm2 = 0.0f;
+    if (warp == 0) {
+      norm2 = (lane < (blockDim.x >> 5)) ? norm_warp_sums[lane] : 0.0f;
+      norm2 = warp_sum(norm2);
+      if (lane == 0) {
+        red[0] = norm2;
+      }
+    }
+    __syncthreads();
+    norm2 = red[0];
+    const float inv_norm = rsqrtf(fmaxf(norm2, 1.0e-20f));
+    for (int d = threadIdx.x; d < kLearnDim; d += blockDim.x) {
+      vec[g * kLearnDim + d] *= inv_norm;
+    }
+    __syncthreads();
+  }
+
+  for (int idx = threadIdx.x; idx < active_bits * kLearnDim; idx += blockDim.x) {
+    const int g = idx / kLearnDim;
+    const int d = idx - g * kLearnDim;
+    encoder[(static_cast<int64_t>(row) * code_dim + group_start + g) * kLearnDim + d] = store_scalar<scalar_t>(vec[idx]);
+  }
+}
+
+template <typename scalar_t, int GroupBits>
+__global__ void blockk_reduce_orth_store_d128_kernel(
+    const float *__restrict__ partial,
+    scalar_t *__restrict__ encoder,
+    int rows,
+    int num_tiles,
+    int code_dim,
+    int group_start,
+    int active_bits) {
+  __shared__ float vec[GroupBits * kLearnDim];
+  __shared__ float red[kLearnDim];
+  const int row = blockIdx.x;
+  if (row >= rows) {
+    return;
+  }
+
+  for (int idx = threadIdx.x; idx < active_bits * kLearnDim; idx += blockDim.x) {
+    const int g = idx / kLearnDim;
+    const int d = idx - g * kLearnDim;
+    float sum = 0.0f;
+    for (int tile = 0; tile < num_tiles; ++tile) {
+      sum += partial[((static_cast<int64_t>(row) * num_tiles + tile) * GroupBits + g) * kLearnDim + d];
+    }
+    vec[idx] = sum;
+  }
+  __syncthreads();
+
+  for (int g = 0; g < active_bits; ++g) {
+    for (int prev = 0; prev < g; ++prev) {
+      float local = 0.0f;
+      for (int d = threadIdx.x; d < kLearnDim; d += blockDim.x) {
+        local += vec[g * kLearnDim + d] * vec[prev * kLearnDim + d];
+      }
+      local = warp_sum(local);
+      const int lane = threadIdx.x & 31;
+      const int warp = threadIdx.x >> 5;
+      __shared__ float warp_sums[8];
+      if (lane == 0) {
+        warp_sums[warp] = local;
+      }
+      __syncthreads();
+      float dot = 0.0f;
+      if (warp == 0) {
+        dot = (lane < (blockDim.x >> 5)) ? warp_sums[lane] : 0.0f;
+        dot = warp_sum(dot);
+        if (lane == 0) {
+          red[0] = dot;
+        }
+      }
+      __syncthreads();
+      dot = red[0];
+      for (int d = threadIdx.x; d < kLearnDim; d += blockDim.x) {
+        vec[g * kLearnDim + d] -= dot * vec[prev * kLearnDim + d];
+      }
+      __syncthreads();
+    }
+
+    float local_norm = 0.0f;
+    for (int d = threadIdx.x; d < kLearnDim; d += blockDim.x) {
+      const float v = vec[g * kLearnDim + d];
+      local_norm += v * v;
+    }
+    local_norm = warp_sum(local_norm);
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    __shared__ float norm_warp_sums[8];
+    if (lane == 0) {
+      norm_warp_sums[warp] = local_norm;
+    }
+    __syncthreads();
+    float norm2 = 0.0f;
+    if (warp == 0) {
+      norm2 = (lane < (blockDim.x >> 5)) ? norm_warp_sums[lane] : 0.0f;
+      norm2 = warp_sum(norm2);
+      if (lane == 0) {
+        red[0] = norm2;
+      }
+    }
+    __syncthreads();
+    norm2 = red[0];
+    const float inv_norm = rsqrtf(fmaxf(norm2, 1.0e-20f));
+    for (int d = threadIdx.x; d < kLearnDim; d += blockDim.x) {
+      vec[g * kLearnDim + d] *= inv_norm;
+    }
+    __syncthreads();
+  }
+
+  for (int idx = threadIdx.x; idx < active_bits * kLearnDim; idx += blockDim.x) {
+    const int g = idx / kLearnDim;
+    const int d = idx - g * kLearnDim;
+    encoder[(static_cast<int64_t>(row) * code_dim + group_start + g) * kLearnDim + d] = store_scalar<scalar_t>(vec[idx]);
+  }
+}
+
+template <typename scalar_t, int GroupBits, int LearnTileTokens>
+__global__ void blockk_codes_rhs_partial_d128_kernel(
+    const scalar_t *__restrict__ residual,
+    const scalar_t *__restrict__ encoder,
+    int8_t *__restrict__ codes,
+    float *__restrict__ partial,
+    float *__restrict__ gram_partial,
+    int rows,
+    int glob_len,
+    int code_dim,
+    int group_start,
+    int active_bits,
+    int num_tiles,
+    float inv_len,
+    bool compute_gram) {
+  __shared__ float shared_acc[GroupBits * kLearnDim];
+  __shared__ float shared_gram[GroupBits * GroupBits];
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  const int row = blockIdx.y;
+  const int tile = blockIdx.x;
+  if (row >= rows || tile >= num_tiles) {
+    return;
+  }
+  for (int idx = threadIdx.x; idx < active_bits * kLearnDim; idx += blockDim.x) {
+    shared_acc[idx] = 0.0f;
+  }
+  if (compute_gram) {
+    for (int idx = threadIdx.x; idx < active_bits * active_bits; idx += blockDim.x) {
+      shared_gram[idx] = 0.0f;
+    }
+  }
+  __syncthreads();
+
+  float local_acc[GroupBits][4];
+  #pragma unroll
+  for (int g = 0; g < GroupBits; ++g) {
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      local_acc[g][i] = 0.0f;
+    }
+  }
+
+  const int tile_start = tile * LearnTileTokens;
+  const int tile_end = min(tile_start + LearnTileTokens, glob_len);
+  for (int token = tile_start + warp; token < tile_end; token += kLearnWarps) {
+    const int64_t residual_base = (static_cast<int64_t>(row) * glob_len + token) * kLearnDim;
+    float vals[4];
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      const int d = lane + i * 32;
+      vals[i] = load_scalar(residual, residual_base + d);
+    }
+
+    int signs[GroupBits];
+    #pragma unroll
+    for (int g = 0; g < GroupBits; ++g) {
+      float dot = 0.0f;
+      if (g < active_bits) {
+        const int64_t enc_base = (static_cast<int64_t>(row) * code_dim + group_start + g) * kLearnDim;
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+          const int d = lane + i * 32;
+          dot += vals[i] * load_scalar(encoder, enc_base + d);
+        }
+      }
+      dot = warp_sum(dot);
+      const float score = __shfl_sync(0xffffffffu, dot, 0);
+      signs[g] = (score >= 0.0f) ? 1 : -1;
+      if (lane == 0 && g < active_bits) {
+        codes[(static_cast<int64_t>(row) * glob_len + token) * code_dim + group_start + g] = static_cast<int8_t>(signs[g]);
+      }
+    }
+
+    if (compute_gram && lane == 0) {
+      #pragma unroll
+      for (int gi = 0; gi < GroupBits; ++gi) {
+        if (gi < active_bits) {
+          const float si = static_cast<float>(signs[gi]) * inv_len;
+          #pragma unroll
+          for (int gj = gi; gj < GroupBits; ++gj) {
+            if (gj < active_bits) {
+              atomicAdd(&shared_gram[gi * GroupBits + gj], si * static_cast<float>(signs[gj]));
+            }
+          }
+        }
+      }
+    }
+
+    #pragma unroll
+    for (int g = 0; g < GroupBits; ++g) {
+      if (g < active_bits) {
+        const float coeff = static_cast<float>(signs[g]) * inv_len;
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+          local_acc[g][i] += vals[i] * coeff;
+        }
+      }
+    }
+  }
+
+  #pragma unroll
+  for (int g = 0; g < GroupBits; ++g) {
+    if (g < active_bits) {
+      #pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        const int d = lane + i * 32;
+        atomicAdd(&shared_acc[g * kLearnDim + d], local_acc[g][i]);
+      }
+    }
+  }
+  __syncthreads();
+
+  for (int idx = threadIdx.x; idx < active_bits * kLearnDim; idx += blockDim.x) {
+    partial[((static_cast<int64_t>(row) * num_tiles + tile) * GroupBits * kLearnDim) + idx] = shared_acc[idx];
+  }
+  if (compute_gram) {
+    const int tri_count = active_bits * (active_bits + 1) / 2;
+    for (int tri = threadIdx.x; tri < tri_count; tri += blockDim.x) {
+      int remaining = tri;
+      int gi = 0;
+      while (gi < active_bits) {
+        const int row_count = active_bits - gi;
+        if (remaining < row_count) {
+          break;
+        }
+        remaining -= row_count;
+        ++gi;
+      }
+      const int gj = gi + remaining;
+      const int idx = gi * GroupBits + gj;
+      gram_partial[((static_cast<int64_t>(row) * num_tiles + tile) * GroupBits * GroupBits) + idx] = shared_gram[idx];
+    }
+  }
+}
+
+template <typename scalar_t, int GroupBits>
+__global__ void blockk_reduce_decoder_store_d128_kernel(
+    const float *__restrict__ partial,
+    scalar_t *__restrict__ decoder,
+    int rows,
+    int num_tiles,
+    int code_dim,
+    int group_start,
+    int active_bits) {
+  const int row = blockIdx.y;
+  const int g = blockIdx.x;
+  const int d = threadIdx.x;
+  if (row >= rows || g >= active_bits || d >= kLearnDim) {
+    return;
+  }
+  float sum = 0.0f;
+  for (int tile = 0; tile < num_tiles; ++tile) {
+    const int64_t idx = ((static_cast<int64_t>(row) * num_tiles + tile) * GroupBits + g) * kLearnDim + d;
+    sum += partial[idx];
+  }
+  decoder[(static_cast<int64_t>(row) * code_dim + group_start + g) * kLearnDim + d] = store_scalar<scalar_t>(sum);
+}
+
+
+template <int GroupBits>
+__global__ void blockk_reduce_rhs_float_d128_kernel(
+    const float *__restrict__ partial,
+    float *__restrict__ rhs,
+    int rows,
+    int num_tiles,
+    int active_bits) {
+  const int row = blockIdx.y;
+  const int g = blockIdx.x;
+  const int d = threadIdx.x;
+  if (row >= rows || g >= active_bits || d >= kLearnDim) {
+    return;
+  }
+  float sum = 0.0f;
+  for (int tile = 0; tile < num_tiles; ++tile) {
+    const int64_t idx = ((static_cast<int64_t>(row) * num_tiles + tile) * GroupBits + g) * kLearnDim + d;
+    sum += partial[idx];
+  }
+  rhs[(static_cast<int64_t>(row) * GroupBits + g) * kLearnDim + d] = sum;
+}
+
+template <int GroupBits>
+__global__ void blockk_reduce_gram_d128_kernel(
+    const float *__restrict__ gram_partial,
+    float *__restrict__ gram,
+    int rows,
+    int num_tiles,
+    int active_bits) {
+  const int row = blockIdx.y;
+  const int tri = blockIdx.x;
+  const int tri_count = active_bits * (active_bits + 1) / 2;
+  if (row >= rows || tri >= tri_count) {
+    return;
+  }
+  int remaining = tri;
+  int gi = 0;
+  while (gi < active_bits) {
+    const int row_count = active_bits - gi;
+    if (remaining < row_count) {
+      break;
+    }
+    remaining -= row_count;
+    ++gi;
+  }
+  const int gj = gi + remaining;
+  const int pair = gi * GroupBits + gj;
+  float sum = 0.0f;
+  for (int tile = threadIdx.x; tile < num_tiles; tile += blockDim.x) {
+    const int64_t idx = ((static_cast<int64_t>(row) * num_tiles + tile) * GroupBits * GroupBits) + pair;
+    sum += gram_partial[idx];
+  }
+  sum = warp_sum(sum);
+  __shared__ float warp_sums[8];
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  if (lane == 0) {
+    warp_sums[warp] = sum;
+  }
+  __syncthreads();
+  if (warp == 0) {
+    float total = (lane < (blockDim.x >> 5)) ? warp_sums[lane] : 0.0f;
+    total = warp_sum(total);
+    if (lane == 0) {
+      const int64_t base = static_cast<int64_t>(row) * GroupBits * GroupBits;
+      gram[base + pair] = total;
+      if (gi != gj) {
+        gram[base + gj * GroupBits + gi] = total;
+      }
+    }
+  }
+}
+
+template <typename scalar_t, int GroupBits>
+__global__ void blockk_solve_decoder_d128_kernel(
+    const float *__restrict__ gram,
+    const float *__restrict__ rhs,
+    scalar_t *__restrict__ decoder,
+    int rows,
+    int code_dim,
+    int group_start,
+    int active_bits) {
+  __shared__ float A[GroupBits * GroupBits];
+  __shared__ float B[GroupBits * kLearnDim];
+  const int row = blockIdx.x;
+  if (row >= rows) {
+    return;
+  }
+  for (int idx = threadIdx.x; idx < GroupBits * GroupBits; idx += blockDim.x) {
+    const int gi = idx / GroupBits;
+    const int gj = idx - gi * GroupBits;
+    float value = 0.0f;
+    if (gi < active_bits && gj < active_bits) {
+      value = gram[static_cast<int64_t>(row) * GroupBits * GroupBits + idx];
+    } else if (gi == gj) {
+      value = 1.0f;
+    }
+    A[idx] = value;
+  }
+  for (int idx = threadIdx.x; idx < GroupBits * kLearnDim; idx += blockDim.x) {
+    const int g = idx / kLearnDim;
+    const int d = idx - g * kLearnDim;
+    B[idx] = (g < active_bits) ? rhs[(static_cast<int64_t>(row) * GroupBits + g) * kLearnDim + d] : 0.0f;
+  }
+  __syncthreads();
+
+  for (int pivot_idx = 0; pivot_idx < active_bits; ++pivot_idx) {
+    float pivot = A[pivot_idx * GroupBits + pivot_idx];
+    if (fabsf(pivot) < 1.0e-6f) {
+      pivot = (pivot < 0.0f) ? -1.0e-6f : 1.0e-6f;
+    }
+    const float inv_pivot = 1.0f / pivot;
+    for (int c = threadIdx.x; c < active_bits; c += blockDim.x) {
+      A[pivot_idx * GroupBits + c] *= inv_pivot;
+    }
+    for (int d = threadIdx.x; d < kLearnDim; d += blockDim.x) {
+      B[pivot_idx * kLearnDim + d] *= inv_pivot;
+    }
+    __syncthreads();
+
+    for (int r = 0; r < active_bits; ++r) {
+      if (r == pivot_idx) {
+        continue;
+      }
+      const float factor = A[r * GroupBits + pivot_idx];
+      for (int c = threadIdx.x; c < active_bits; c += blockDim.x) {
+        A[r * GroupBits + c] -= factor * A[pivot_idx * GroupBits + c];
+      }
+      for (int d = threadIdx.x; d < kLearnDim; d += blockDim.x) {
+        B[r * kLearnDim + d] -= factor * B[pivot_idx * kLearnDim + d];
+      }
+      __syncthreads();
+    }
+  }
+
+  for (int idx = threadIdx.x; idx < active_bits * kLearnDim; idx += blockDim.x) {
+    const int g = idx / kLearnDim;
+    const int d = idx - g * kLearnDim;
+    decoder[(static_cast<int64_t>(row) * code_dim + group_start + g) * kLearnDim + d] = store_scalar<scalar_t>(B[g * kLearnDim + d]);
+  }
+}
+
+template <typename scalar_t, int GroupBits>
+__global__ void blockk_update_residual_d128_kernel(
+    scalar_t *__restrict__ residual,
+    const int8_t *__restrict__ codes,
+    const scalar_t *__restrict__ decoder,
+    float *__restrict__ err,
+    int rows,
+    int glob_len,
+    int code_dim,
+    int group_start,
+    int active_bits,
+    bool final_group) {
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  const int token = blockIdx.x * kWarpsPerBlock + warp;
+  const int row = blockIdx.y;
+  if (row >= rows || token >= glob_len) {
+    return;
+  }
+  const int64_t residual_base = (static_cast<int64_t>(row) * glob_len + token) * kLearnDim;
+  float norm2 = 0.0f;
+  #pragma unroll
+  for (int i = 0; i < 4; ++i) {
+    const int d = lane + i * 32;
+    float val = load_scalar(residual, residual_base + d);
+    float update = 0.0f;
+    #pragma unroll
+    for (int g = 0; g < GroupBits; ++g) {
+      if (g < active_bits) {
+        const float sign = static_cast<float>(codes[(static_cast<int64_t>(row) * glob_len + token) * code_dim + group_start + g]);
+        update += sign * load_scalar(decoder, (static_cast<int64_t>(row) * code_dim + group_start + g) * kLearnDim + d);
+      }
+    }
+    val -= update;
+    residual[residual_base + d] = store_scalar<scalar_t>(val);
+    if (final_group) {
+      norm2 += val * val;
+    }
+  }
+  if (final_group) {
+    norm2 = warp_sum(norm2);
+    if (lane == 0) {
+      err[static_cast<int64_t>(row) * glob_len + token] = sqrtf(fmaxf(norm2, 0.0f));
+    }
+  }
+}
+
+template <typename scalar_t, int GroupBits, int LearnTileTokens>
+void launch_blockk_fast_typed(
+    const scalar_t *full_ptr,
+    const scalar_t *init_ptr,
+    int8_t *codes_ptr,
+    scalar_t *encoder_ptr,
+    scalar_t *decoder_ptr,
+    scalar_t *residual_ptr,
+    float *partial_ptr,
+    float *gram_partial_ptr,
+    float *rhs_ptr,
+    float *gram_ptr,
+    float *err_ptr,
+    int rows,
+    int total_len,
+    int glob_start,
+    int glob_len,
+    int code_dim,
+    int zerorope,
+    bool apply_zerorope,
+    int power_iters,
+    int solve_mode,
+    int num_tiles,
+    cudaStream_t stream) {
+  const int64_t residual_total = static_cast<int64_t>(rows) * glob_len * kLearnDim;
+  const int init_blocks = static_cast<int>(std::min<int64_t>(ceil_div_i64(residual_total, kThreads), 65535));
+  init_residual_kernel<scalar_t><<<init_blocks, kThreads, 0, stream>>>(
+      full_ptr,
+      residual_ptr,
+      rows,
+      total_len,
+      glob_start,
+      glob_len,
+      kLearnDim,
+      zerorope,
+      apply_zerorope);
+
+  dim3 partial_grid(static_cast<unsigned int>(num_tiles), rows);
+  dim3 vector_block(kLearnWarps * 32);
+  dim3 group_reduce_grid(GroupBits, rows);
+  dim3 gram_reduce_grid(GroupBits * (GroupBits + 1) / 2, rows);
+  dim3 dim_block(kLearnDim);
+  const int update_tiles = static_cast<int>(ceil_div_i64(glob_len, kWarpsPerBlock));
+  dim3 update_grid(static_cast<unsigned int>(update_tiles), rows);
+  const float inv_len = 1.0f / static_cast<float>(glob_len);
+  power_iters = max(0, min(power_iters, 2));
+
+  for (int group_start = 0; group_start < code_dim; group_start += GroupBits) {
+    const int active_bits = min(GroupBits, code_dim - group_start);
+    if (power_iters == 0) {
+      blockk_init_orth_store_d128_kernel<scalar_t, GroupBits><<<rows, 256, 0, stream>>>(
+          init_ptr,
+          encoder_ptr,
+          rows,
+          code_dim,
+          group_start,
+          active_bits);
+    } else {
+      for (int iter = 0; iter < power_iters; ++iter) {
+        const scalar_t *vector_ptr = (iter == 0) ? init_ptr : encoder_ptr;
+        blockk_ata_partial_d128_kernel<scalar_t, GroupBits, LearnTileTokens><<<partial_grid, vector_block, 0, stream>>>(
+            residual_ptr,
+            vector_ptr,
+            partial_ptr,
+            rows,
+            glob_len,
+            code_dim,
+            group_start,
+            active_bits,
+            num_tiles);
+        blockk_reduce_orth_store_d128_kernel<scalar_t, GroupBits><<<rows, 256, 0, stream>>>(
+            partial_ptr,
+            encoder_ptr,
+            rows,
+            num_tiles,
+            code_dim,
+            group_start,
+            active_bits);
+      }
+    }
+
+    blockk_codes_rhs_partial_d128_kernel<scalar_t, GroupBits, LearnTileTokens><<<partial_grid, vector_block, 0, stream>>>(
+        residual_ptr,
+        encoder_ptr,
+        codes_ptr,
+        partial_ptr,
+        gram_partial_ptr,
+        rows,
+        glob_len,
+        code_dim,
+        group_start,
+        active_bits,
+        num_tiles,
+        inv_len,
+        solve_mode == 0);
+    if (solve_mode == 0) {
+      blockk_reduce_rhs_float_d128_kernel<GroupBits><<<group_reduce_grid, dim_block, 0, stream>>>(
+          partial_ptr,
+          rhs_ptr,
+          rows,
+          num_tiles,
+          active_bits);
+      blockk_reduce_gram_d128_kernel<GroupBits><<<gram_reduce_grid, 128, 0, stream>>>(
+          gram_partial_ptr,
+          gram_ptr,
+          rows,
+          num_tiles,
+          active_bits);
+      blockk_solve_decoder_d128_kernel<scalar_t, GroupBits><<<rows, 256, 0, stream>>>(
+          gram_ptr,
+          rhs_ptr,
+          decoder_ptr,
+          rows,
+          code_dim,
+          group_start,
+          active_bits);
+    } else {
+      blockk_reduce_decoder_store_d128_kernel<scalar_t, GroupBits><<<group_reduce_grid, dim_block, 0, stream>>>(
+          partial_ptr,
+          decoder_ptr,
+          rows,
+          num_tiles,
+          code_dim,
+          group_start,
+          active_bits);
+    }
+    blockk_update_residual_d128_kernel<scalar_t, GroupBits><<<update_grid, kWarpsPerBlock * 32, 0, stream>>>(
+        residual_ptr,
+        codes_ptr,
+        decoder_ptr,
+        err_ptr,
+        rows,
+        glob_len,
+        code_dim,
+        group_start,
+        active_bits,
+        group_start + active_bits >= code_dim);
+  }
+}
+
 template <typename scalar_t, int LearnTileTokens>
 void launch_learn_projection_typed(
     const scalar_t *full_ptr,
@@ -1921,6 +2720,143 @@ std::vector<at::Tensor> quanpc_prefill_quantize_pack(
   return {packed, projection, err};
 }
 
+
+std::vector<at::Tensor> quanpc_prefill_blockk_fast(
+    at::Tensor full_states,
+    at::Tensor init_vectors,
+    int64_t glob_start,
+    int64_t glob_len,
+    int64_t zerorope,
+    bool apply_zerorope,
+    int64_t group_bits,
+    int64_t power_iters,
+    int64_t solve_mode) {
+  TORCH_CHECK(full_states.is_cuda(), "full_states must be CUDA");
+  TORCH_CHECK(init_vectors.is_cuda(), "init_vectors must be CUDA");
+  TORCH_CHECK(full_states.is_contiguous(), "full_states must be contiguous");
+  TORCH_CHECK(init_vectors.is_contiguous(), "init_vectors must be contiguous");
+  TORCH_CHECK(full_states.dim() == 4, "full_states must be [B,H,L,D]");
+  TORCH_CHECK(init_vectors.dim() == 4, "init_vectors must be [B,H,C,D]");
+  TORCH_CHECK(full_states.scalar_type() == init_vectors.scalar_type(), "full_states/init_vectors dtype mismatch");
+  TORCH_CHECK(full_states.scalar_type() == at::kBFloat16 || full_states.scalar_type() == at::kFloat,
+              "block-k fast currently supports bf16 and fp32");
+
+  const int B = full_states.size(0);
+  const int H = full_states.size(1);
+  const int total_len = full_states.size(2);
+  const int D = full_states.size(3);
+  const int C = init_vectors.size(2);
+  TORCH_CHECK(init_vectors.size(0) == B && init_vectors.size(1) == H && init_vectors.size(3) == D,
+              "init_vectors shape must match full_states B/H/D");
+  TORCH_CHECK(D == kLearnDim, "block-k fast currently supports head_dim == 128");
+  TORCH_CHECK(C > 0 && C % 64 == 0, "code_dim must be positive and divisible by 64");
+  TORCH_CHECK(group_bits == 16 || group_bits == 32, "group_bits must be 16 or 32");
+  TORCH_CHECK(solve_mode == 0 || solve_mode == 1, "solve_mode must be 0/full or 1/diagonal");
+  TORCH_CHECK(C % group_bits == 0, "code_dim must be divisible by group_bits");
+  TORCH_CHECK(glob_start >= 0 && glob_len > 0 && glob_start + glob_len <= total_len,
+              "invalid global slice");
+  TORCH_CHECK(zerorope >= 0 && zerorope <= D / 2, "invalid zerorope");
+
+  at::cuda::CUDAGuard device_guard(full_states.device());
+  auto stream = at::cuda::getCurrentCUDAStream(full_states.device().index());
+  const int rows = B * H;
+  const int learn_tile_tokens = (glob_len >= 65536) ? kLearnTileTokensLarge : kLearnTileTokensSmall;
+  const int num_tiles = static_cast<int>(ceil_div_i64(glob_len, learn_tile_tokens));
+
+  auto code_options = full_states.options().dtype(at::kChar);
+  auto float_options = full_states.options().dtype(at::kFloat);
+  auto codes = at::empty({B, H, glob_len, C}, code_options);
+  auto encoder = at::empty_like(init_vectors);
+  auto decoder = at::empty_like(init_vectors);
+  auto residual = at::empty({B, H, glob_len, D}, full_states.options());
+  auto partial = at::empty({rows, num_tiles, static_cast<int>(group_bits), D}, float_options);
+  auto gram_partial = at::empty({rows, num_tiles, static_cast<int>(group_bits), static_cast<int>(group_bits)}, float_options);
+  auto rhs = at::empty({rows, static_cast<int>(group_bits), D}, float_options);
+  auto gram = at::empty({rows, static_cast<int>(group_bits), static_cast<int>(group_bits)}, float_options);
+  auto err = at::empty({B, H, glob_len}, float_options);
+
+  if (full_states.scalar_type() == at::kBFloat16) {
+    const auto *full_ptr = reinterpret_cast<const __nv_bfloat16 *>(full_states.data_ptr<at::BFloat16>());
+    const auto *init_ptr = reinterpret_cast<const __nv_bfloat16 *>(init_vectors.data_ptr<at::BFloat16>());
+    auto *encoder_ptr = reinterpret_cast<__nv_bfloat16 *>(encoder.data_ptr<at::BFloat16>());
+    auto *decoder_ptr = reinterpret_cast<__nv_bfloat16 *>(decoder.data_ptr<at::BFloat16>());
+    auto *residual_ptr = reinterpret_cast<__nv_bfloat16 *>(residual.data_ptr<at::BFloat16>());
+    if (group_bits == 16) {
+      if (learn_tile_tokens == kLearnTileTokensLarge) {
+        launch_blockk_fast_typed<__nv_bfloat16, 16, kLearnTileTokensLarge>(
+            full_ptr, init_ptr, codes.data_ptr<int8_t>(), encoder_ptr, decoder_ptr, residual_ptr,
+            partial.data_ptr<float>(), gram_partial.data_ptr<float>(), rhs.data_ptr<float>(), gram.data_ptr<float>(),
+            err.data_ptr<float>(), rows, total_len,
+            static_cast<int>(glob_start), static_cast<int>(glob_len), C, static_cast<int>(zerorope),
+            apply_zerorope, static_cast<int>(power_iters), static_cast<int>(solve_mode), num_tiles, stream);
+      } else {
+        launch_blockk_fast_typed<__nv_bfloat16, 16, kLearnTileTokensSmall>(
+            full_ptr, init_ptr, codes.data_ptr<int8_t>(), encoder_ptr, decoder_ptr, residual_ptr,
+            partial.data_ptr<float>(), gram_partial.data_ptr<float>(), rhs.data_ptr<float>(), gram.data_ptr<float>(),
+            err.data_ptr<float>(), rows, total_len,
+            static_cast<int>(glob_start), static_cast<int>(glob_len), C, static_cast<int>(zerorope),
+            apply_zerorope, static_cast<int>(power_iters), static_cast<int>(solve_mode), num_tiles, stream);
+      }
+    } else {
+      if (learn_tile_tokens == kLearnTileTokensLarge) {
+        launch_blockk_fast_typed<__nv_bfloat16, 32, kLearnTileTokensLarge>(
+            full_ptr, init_ptr, codes.data_ptr<int8_t>(), encoder_ptr, decoder_ptr, residual_ptr,
+            partial.data_ptr<float>(), gram_partial.data_ptr<float>(), rhs.data_ptr<float>(), gram.data_ptr<float>(),
+            err.data_ptr<float>(), rows, total_len,
+            static_cast<int>(glob_start), static_cast<int>(glob_len), C, static_cast<int>(zerorope),
+            apply_zerorope, static_cast<int>(power_iters), static_cast<int>(solve_mode), num_tiles, stream);
+      } else {
+        launch_blockk_fast_typed<__nv_bfloat16, 32, kLearnTileTokensSmall>(
+            full_ptr, init_ptr, codes.data_ptr<int8_t>(), encoder_ptr, decoder_ptr, residual_ptr,
+            partial.data_ptr<float>(), gram_partial.data_ptr<float>(), rhs.data_ptr<float>(), gram.data_ptr<float>(),
+            err.data_ptr<float>(), rows, total_len,
+            static_cast<int>(glob_start), static_cast<int>(glob_len), C, static_cast<int>(zerorope),
+            apply_zerorope, static_cast<int>(power_iters), static_cast<int>(solve_mode), num_tiles, stream);
+      }
+    }
+  } else {
+    if (group_bits == 16) {
+      if (learn_tile_tokens == kLearnTileTokensLarge) {
+        launch_blockk_fast_typed<float, 16, kLearnTileTokensLarge>(
+            full_states.data_ptr<float>(), init_vectors.data_ptr<float>(), codes.data_ptr<int8_t>(),
+            encoder.data_ptr<float>(), decoder.data_ptr<float>(), residual.data_ptr<float>(),
+            partial.data_ptr<float>(), gram_partial.data_ptr<float>(), rhs.data_ptr<float>(), gram.data_ptr<float>(),
+            err.data_ptr<float>(), rows, total_len,
+            static_cast<int>(glob_start), static_cast<int>(glob_len), C, static_cast<int>(zerorope),
+            apply_zerorope, static_cast<int>(power_iters), static_cast<int>(solve_mode), num_tiles, stream);
+      } else {
+        launch_blockk_fast_typed<float, 16, kLearnTileTokensSmall>(
+            full_states.data_ptr<float>(), init_vectors.data_ptr<float>(), codes.data_ptr<int8_t>(),
+            encoder.data_ptr<float>(), decoder.data_ptr<float>(), residual.data_ptr<float>(),
+            partial.data_ptr<float>(), gram_partial.data_ptr<float>(), rhs.data_ptr<float>(), gram.data_ptr<float>(),
+            err.data_ptr<float>(), rows, total_len,
+            static_cast<int>(glob_start), static_cast<int>(glob_len), C, static_cast<int>(zerorope),
+            apply_zerorope, static_cast<int>(power_iters), static_cast<int>(solve_mode), num_tiles, stream);
+      }
+    } else {
+      if (learn_tile_tokens == kLearnTileTokensLarge) {
+        launch_blockk_fast_typed<float, 32, kLearnTileTokensLarge>(
+            full_states.data_ptr<float>(), init_vectors.data_ptr<float>(), codes.data_ptr<int8_t>(),
+            encoder.data_ptr<float>(), decoder.data_ptr<float>(), residual.data_ptr<float>(),
+            partial.data_ptr<float>(), gram_partial.data_ptr<float>(), rhs.data_ptr<float>(), gram.data_ptr<float>(),
+            err.data_ptr<float>(), rows, total_len,
+            static_cast<int>(glob_start), static_cast<int>(glob_len), C, static_cast<int>(zerorope),
+            apply_zerorope, static_cast<int>(power_iters), static_cast<int>(solve_mode), num_tiles, stream);
+      } else {
+        launch_blockk_fast_typed<float, 32, kLearnTileTokensSmall>(
+            full_states.data_ptr<float>(), init_vectors.data_ptr<float>(), codes.data_ptr<int8_t>(),
+            encoder.data_ptr<float>(), decoder.data_ptr<float>(), residual.data_ptr<float>(),
+            partial.data_ptr<float>(), gram_partial.data_ptr<float>(), rhs.data_ptr<float>(), gram.data_ptr<float>(),
+            err.data_ptr<float>(), rows, total_len,
+            static_cast<int>(glob_start), static_cast<int>(glob_len), C, static_cast<int>(zerorope),
+            apply_zerorope, static_cast<int>(power_iters), static_cast<int>(solve_mode), num_tiles, stream);
+      }
+    }
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {codes, encoder, decoder, err};
+}
+
 std::vector<at::Tensor> quanpc_prefill_select_eas(
     at::Tensor key_err,
     at::Tensor value_err,
@@ -2029,6 +2965,117 @@ std::vector<at::Tensor> quanpc_prefill_select_eas(
       selected_mask.view({B, H, L}),
       kept_indices.view({B, H, kept_len}),
   };
+}
+
+
+__global__ void pack_key_transposed_i8_kernel(
+    const int8_t *codes,
+    int64_t *packed_key,
+    int rows,
+    int L,
+    int C,
+    int blocks_per_code) {
+  const int64_t total = static_cast<int64_t>(rows) * blocks_per_code * L;
+  for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       idx < total;
+       idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+    const int l = idx % L;
+    const int block_id = (idx / L) % blocks_per_code;
+    const int row = idx / (static_cast<int64_t>(L) * blocks_per_code);
+    const int64_t code_base = (static_cast<int64_t>(row) * L + l) * C + block_id * 64;
+    uint64_t word = 0;
+#pragma unroll
+    for (int bit = 0; bit < 64; ++bit) {
+      if (codes[code_base + bit] < 0) {
+        word |= (uint64_t{1} << bit);
+      }
+    }
+    packed_key[idx] = static_cast<int64_t>(word);
+  }
+}
+
+__global__ void pack_value_token_i8_kernel(
+    const int8_t *codes,
+    int64_t *packed_value,
+    int rows,
+    int L,
+    int C,
+    int blocks_per_code) {
+  const int64_t total = static_cast<int64_t>(rows) * L * blocks_per_code;
+  for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       idx < total;
+       idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+    const int block_id = idx % blocks_per_code;
+    const int l = (idx / blocks_per_code) % L;
+    const int row = idx / (static_cast<int64_t>(blocks_per_code) * L);
+    const int64_t code_base = (static_cast<int64_t>(row) * L + l) * C + block_id * 64;
+    uint64_t word = 0;
+#pragma unroll
+    for (int bit = 0; bit < 64; ++bit) {
+      if (codes[code_base + bit] > 0) {
+        word |= (uint64_t{1} << bit);
+      }
+    }
+    packed_value[idx] = static_cast<int64_t>(word);
+  }
+}
+
+at::Tensor quanpc_prefill_pack_key_transposed(at::Tensor codes) {
+  TORCH_CHECK(codes.is_cuda(), "key codes must be CUDA");
+  TORCH_CHECK(codes.is_contiguous(), "key codes must be contiguous");
+  TORCH_CHECK(codes.scalar_type() == at::kChar, "key codes must be int8");
+  TORCH_CHECK(codes.dim() == 4, "key codes must be [B,H,L,C]");
+  const int B = codes.size(0);
+  const int H = codes.size(1);
+  const int L = codes.size(2);
+  const int C = codes.size(3);
+  TORCH_CHECK(C % 64 == 0, "key code dim must be divisible by 64");
+  const int rows = B * H;
+  const int blocks_per_code = C / 64;
+  at::cuda::CUDAGuard device_guard(codes.device());
+  auto out = at::empty({B, H, blocks_per_code, L}, codes.options().dtype(at::kLong));
+  const int64_t total = static_cast<int64_t>(rows) * blocks_per_code * L;
+  const int threads = 256;
+  const int blocks = static_cast<int>(std::min<int64_t>(ceil_div_i64(total, threads), 65535));
+  auto stream = at::cuda::getCurrentCUDAStream(codes.device().index());
+  pack_key_transposed_i8_kernel<<<blocks, threads, 0, stream>>>(
+      codes.data_ptr<int8_t>(),
+      out.data_ptr<int64_t>(),
+      rows,
+      L,
+      C,
+      blocks_per_code);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
+
+at::Tensor quanpc_prefill_pack_value_token(at::Tensor codes) {
+  TORCH_CHECK(codes.is_cuda(), "value codes must be CUDA");
+  TORCH_CHECK(codes.is_contiguous(), "value codes must be contiguous");
+  TORCH_CHECK(codes.scalar_type() == at::kChar, "value codes must be int8");
+  TORCH_CHECK(codes.dim() == 4, "value codes must be [B,H,L,C]");
+  const int B = codes.size(0);
+  const int H = codes.size(1);
+  const int L = codes.size(2);
+  const int C = codes.size(3);
+  TORCH_CHECK(C % 64 == 0, "value code dim must be divisible by 64");
+  const int rows = B * H;
+  const int blocks_per_code = C / 64;
+  at::cuda::CUDAGuard device_guard(codes.device());
+  auto out = at::empty({B, H, L, blocks_per_code}, codes.options().dtype(at::kLong));
+  const int64_t total = static_cast<int64_t>(rows) * L * blocks_per_code;
+  const int threads = 256;
+  const int blocks = static_cast<int>(std::min<int64_t>(ceil_div_i64(total, threads), 65535));
+  auto stream = at::cuda::getCurrentCUDAStream(codes.device().index());
+  pack_value_token_i8_kernel<<<blocks, threads, 0, stream>>>(
+      codes.data_ptr<int8_t>(),
+      out.data_ptr<int64_t>(),
+      rows,
+      L,
+      C,
+      blocks_per_code);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
 }
 
 std::vector<at::Tensor> quanpc_prefill_gather_pack(
