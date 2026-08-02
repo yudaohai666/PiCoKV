@@ -547,7 +547,17 @@ def _subsample_rows(tokens, max_rows):
     """Evenly subsample concatenated calibration rows to bound peak memory."""
     if max_rows is None or tokens.shape[0] <= int(max_rows):
         return tokens
-    indices = torch.linspace(0, tokens.shape[0] - 1, steps=int(max_rows)).round().long()
+    max_rows = int(max_rows)
+    if max_rows <= 0:
+        raise ValueError(f"max_rows must be positive; got {max_rows}")
+    n_rows = int(tokens.shape[0])
+    if max_rows == 1:
+        return tokens.index_select(
+            0,
+            torch.zeros(1, device=tokens.device, dtype=torch.int64),
+        )
+    positions = torch.arange(max_rows, device=tokens.device, dtype=torch.int64)
+    indices = (positions * (n_rows - 1) + (max_rows - 1) // 2) // (max_rows - 1)
     return tokens.index_select(0, indices)
 
 

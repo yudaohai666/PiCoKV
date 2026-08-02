@@ -163,6 +163,7 @@ def prepare_kv_cache(
     seed: int = 0,
     key_encoders: Optional[torch.Tensor] = None,
     value_encoders: Optional[torch.Tensor] = None,
+    value_stream: Optional[torch.cuda.Stream] = None,
 ) -> PreparedKVCache:
     """Learn online K/V projections and build a packed CUDA cache.
 
@@ -174,6 +175,10 @@ def prepare_kv_cache(
     ``key_encoders``/``value_encoders`` select the offline path for that side:
     the stored ``[KVH, bits, D]`` directions replace direction learning while
     the decoder is still solved from this context's states.
+
+    ``value_stream`` lets callers reuse the side stream across layers.  This
+    keeps allocator free lists associated with one stream instead of creating a
+    fresh stream for every layer.
     """
     _validate_prepare_inputs(full_key, full_value, eas, direction_sample_size)
     _require_prefill_cuda()
@@ -198,7 +203,8 @@ def prepare_kv_cache(
     # This internal K/V overlap is part of the measured fast path.  It is not
     # the removed async-prepare/prefill overlap API.
     current_stream = torch.cuda.current_stream(full_key.device)
-    value_stream = torch.cuda.Stream(device=full_key.device)
+    if value_stream is None:
+        value_stream = torch.cuda.Stream(device=full_key.device)
     value_stream.wait_stream(current_stream)
     with torch.cuda.stream(value_stream):
         value_block = quantize_block32_online(

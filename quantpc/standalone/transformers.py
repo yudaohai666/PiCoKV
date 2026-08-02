@@ -78,6 +78,7 @@ class StandaloneLlamaCache(Cache):
         self.seq_lengths: dict[int, int] = {}
         self.decode_calls = 0
         self._prepare_events: dict[int, tuple[torch.cuda.Event, torch.cuda.Event]] = {}
+        self._prepare_value_streams: dict[torch.device, torch.cuda.Stream] = {}
 
     def get_seq_length(self, layer_idx: int = 0) -> int:
         """Return logical prompt-plus-generated length for one layer."""
@@ -101,6 +102,14 @@ class StandaloneLlamaCache(Cache):
             "StandaloneLlamaCache.update requires modify_llama_for_standalone(model)"
         )
 
+    def _prepare_value_stream(self, device: torch.device) -> torch.cuda.Stream:
+        """Return the persistent side stream used by all layer prepares."""
+        stream = self._prepare_value_streams.get(device)
+        if stream is None:
+            stream = torch.cuda.Stream(device=device)
+            self._prepare_value_streams[device] = stream
+        return stream
+
     def prepare(
         self,
         layer_idx: int,
@@ -118,10 +127,12 @@ class StandaloneLlamaCache(Cache):
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record(stream)
+        prepare_kwargs = self._prepare_kwargs()
+        prepare_kwargs["value_stream"] = self._prepare_value_stream(key_states.device)
         self.layers[layer_idx] = prepare_kv_cache(
             key_states,
             value_states,
-            **self._prepare_kwargs(),
+            **prepare_kwargs,
         )
         end.record(stream)
         self._prepare_events[layer_idx] = (start, end)
