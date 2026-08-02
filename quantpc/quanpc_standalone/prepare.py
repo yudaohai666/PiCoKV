@@ -182,6 +182,8 @@ def prepare_kv_cache(
     zerorope: int = 20,
     exp_bits: int = 4,
     seed: int = 0,
+    key_encoders: Optional[torch.Tensor] = None,
+    value_encoders: Optional[torch.Tensor] = None,
 ) -> PreparedKVCache:
     """Learn online K/V projections and build a packed CUDA cache.
 
@@ -189,6 +191,11 @@ def prepare_kv_cache(
     learning overlap on two CUDA streams; the caller stream joins both before
     packing, EAS selection, and retained-cache gathering.  The function does
     not synchronize the host.
+
+    ``key_encoders``/``value_encoders`` select the offline-projection path for
+    that side: the stored ``[KVH, bits, D]`` (or ``[B, KVH, bits, D]``)
+    directions replace online direction learning while the decoder is still
+    solved from this context's states.
     """
     _validate_prepare_inputs(full_key, full_value, eas, direction_sample_size)
     _require_prefill_cuda()
@@ -221,12 +228,14 @@ def prepare_kv_cache(
             value_bits,
             direction_sample_size=direction_sample_size,
             seed=int(seed) + 1009,
+            encoders=value_encoders,
         )
     key_block = quantize_block32_online(
         key_global,
         key_bits,
         direction_sample_size=direction_sample_size,
         seed=int(seed),
+        encoders=key_encoders,
     )
     current_stream.wait_stream(value_stream)
 

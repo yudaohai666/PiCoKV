@@ -16,7 +16,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from needle import LLMNeedleHaystackTester, ModelProvider  # noqa: E402
-from benchmarks.common import load_model, seed_everything  # noqa: E402
+from benchmarks.common import load_model, resolve_offline_proj_path, seed_everything  # noqa: E402
 
 
 class Transformer(ModelProvider):
@@ -46,6 +46,9 @@ class Transformer(ModelProvider):
         kv_norm: str = "1",
         residual_evict_size: int | None = 256,
         offline_v_hadamard: bool = True,
+        # quantpc offline block-32 encoders (--method quantpc)
+        offline_proj_path: str | None = None,
+        offline_proj_mode: str = "both",
     ):
         self.method = method
         # Shared loader handles method dispatch + modify() + KV-cache factory.
@@ -63,6 +66,8 @@ class Transformer(ModelProvider):
             use_pruning=use_pruning,
             prune_mode=prune_mode,
             log_eps=log_eps,
+            offline_proj_path=offline_proj_path,
+            offline_proj_mode=offline_proj_mode,
             # KIVI params (--method kivi)
             group_size=group_size,
             residual_length=residual_length,
@@ -169,6 +174,8 @@ def run_experiment(
     kv_norm: str = "1",
     residual_evict_size: int | None = 256,
     offline_v_hadamard: bool = True,
+    offline_proj_path: str | None = None,
+    offline_proj_mode: str = "both",
 ) -> dict[tuple[int, int], str]:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -187,6 +194,8 @@ def run_experiment(
         use_pruning=use_pruning,
         prune_mode=prune_mode,
         log_eps=log_eps,
+        offline_proj_path=offline_proj_path,
+        offline_proj_mode=offline_proj_mode,
         # KIVI params (--method kivi)
         group_size=group_size,
         residual_length=residual_length,
@@ -297,9 +306,29 @@ def main() -> None:
         default=True,
         help="OScaR: absorb an offline per-head Hadamard rotation into v_proj/o_proj (INT2 默认开启; --no-offline-v-hadamard 关闭)",
     )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="quantpc: use offline block-32 encoders (default path offline_projection/{model}_k{K}_v{V}_block32.pt)",
+    )
+    parser.add_argument(
+        "--offline-proj-path",
+        default=None,
+        help="quantpc: explicit offline encoder .pt (overrides the --offline default path)",
+    )
+    parser.add_argument(
+        "--offline-proj-mode",
+        default="both",
+        choices=["both", "key", "value"],
+        help="quantpc: which side reuses stored offline encoders (default both)",
+    )
     args = parser.parse_args()
 
     seed_everything(42)
+    offline_proj_path = resolve_offline_proj_path(
+        args.method, args.offline, args.offline_proj_path,
+        model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,
+    )
     run_experiment(
         model_name=args.model,
         lengths=parse_int_list(args.lengths),
@@ -327,6 +356,8 @@ def main() -> None:
         kv_norm=args.kv_norm,
         residual_evict_size=args.residual_evict_size,
         offline_v_hadamard=args.offline_v_hadamard,
+        offline_proj_path=offline_proj_path,
+        offline_proj_mode=args.offline_proj_mode,
     )
 
 

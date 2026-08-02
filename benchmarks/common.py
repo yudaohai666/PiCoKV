@@ -30,6 +30,40 @@ OSCAR_SRC = Path(__file__).resolve().parents[1] / "src" / "OScaR-KV-Quant"
 # None for dense baselines (the model uses its default cache).
 CacheFactory = Optional[Callable[[], object]]
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def resolve_offline_proj_path(
+    method: str,
+    offline: bool,
+    offline_proj_path: Optional[str],
+    *,
+    model_name: str,
+    k_bits: int,
+    v_bits: int,
+) -> Optional[str]:
+    """Return the effective offline block-32 encoder .pt path, or None for online.
+
+    Offline is requested when ``--offline`` is set or an explicit path is given
+    (quantpc only). With no explicit path, the default is derived from the model
+    tag and bits: ``offline_projection/projections/{model_tag}_k{k}_v{v}_block32.pt``. Raises
+    a clear error when the resolved file is missing.
+    """
+    if method != "quantpc":
+        return None
+    if not offline and offline_proj_path is None:
+        return None
+    model_tag = Path(model_name.rstrip("/")).name
+    path = offline_proj_path or str(
+        _REPO_ROOT / "offline_projection" / "projections" / f"{model_tag}_k{k_bits}_v{v_bits}_block32.pt"
+    )
+    if not Path(path).exists():
+        raise FileNotFoundError(
+            f"offline projection not found: {path}. Generate it with "
+            f"offline_projection/create_offline_projection.py, or pass --offline-proj-path."
+        )
+    return path
+
 
 def seed_everything(seed: int = 42) -> None:
     """Seed python / numpy / torch (+ cudnn determinism) for reproducibility."""
@@ -42,15 +76,30 @@ def seed_everything(seed: int = 42) -> None:
     torch.backends.cudnn.deterministic = True
 
 
-def output_tag(method: str, k_bits: int, v_bits: int, num_bits: int = 2) -> str:
-    """Directory/file tag keyed by method + KV bits, shared across runners."""
+def output_tag(
+    method: str,
+    k_bits: int,
+    v_bits: int,
+    num_bits: int = 2,
+    *,
+    offline: bool = False,
+    offline_mode: str = "both",
+) -> str:
+    """Directory/file tag keyed by method + KV bits, shared across runners.
+
+    For quantpc, ``offline`` appends ``_offline`` (plus the side when not
+    ``both``) so online and offline runs at the same bits do not overwrite.
+    """
     if method == "kivi":
         return f"kivi_k{k_bits}_v{v_bits}"
     if method == "oscar":
         return f"oscar_int{num_bits}"
     if method != "quantpc":
         return method
-    return f"quantpc_k{k_bits}_v{v_bits}"
+    tag = f"quantpc_k{k_bits}_v{v_bits}"
+    if offline:
+        tag += "_offline" if offline_mode == "both" else f"_offline_{offline_mode}"
+    return tag
 
 
 def _load_kivi_model(
@@ -216,6 +265,8 @@ def _load_quantpc_model(
     use_pruning: bool,
     prune_mode: int,
     log_eps: float,
+    offline_proj_path: Optional[str] = None,
+    offline_proj_mode: str = "both",
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
     """Load a HF model patched with the quanpc_standalone online-projection path.
 
@@ -224,10 +275,16 @@ def _load_quantpc_model(
     torch reference backend, refit decoder, and tunable projected_query_bits were
     removed. ``make_cache`` returns a fresh ``StandaloneLlamaCache`` per call (the
     model must have been patched via ``modify_llama_for_standalone``).
+
+    When ``offline_proj_path`` is given, the stored block-32 encoders are loaded
+    once and threaded into every cache so prefill skips the online Householder QR
+    (the decoder is still solved per context). ``offline_proj_mode`` selects which
+    side reuses stored encoders: ``both`` (default), ``key``, or ``value``.
     """
     from quantpc.quanpc_standalone import StandaloneConfig
     from quantpc.quanpc_standalone.transformers import (
         StandaloneLlamaCache,
+        load_offline_projections,
         modify_llama_for_standalone,
     )
 
@@ -244,6 +301,16 @@ def _load_quantpc_model(
         log_eps=log_eps,
     )
 
+    key_encoders = value_encoders = None
+    if offline_proj_path is not None:
+        if offline_proj_mode not in ("both", "key", "value"):
+            raise ValueError(f"offline_proj_mode must be 'both', 'key' or 'value'; got {offline_proj_mode!r}")
+        _projs = load_offline_projections(offline_proj_path)
+        if offline_proj_mode in ("both", "key"):
+            key_encoders = _projs["key"]
+        if offline_proj_mode in ("both", "value"):
+            value_encoders = _projs["value"]
+
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     device_map = _auto_device_map()
     model = AutoModelForCausalLM.from_pretrained(
@@ -257,7 +324,11 @@ def _load_quantpc_model(
     model.eval()
 
     def make_cache():
-        return StandaloneLlamaCache(standalone_config)
+        return StandaloneLlamaCache(
+            standalone_config,
+            key_encoders=key_encoders,
+            value_encoders=value_encoders,
+        )
 
     return model, tokenizer, make_cache
 
@@ -308,6 +379,8 @@ def load_model(
     kv_norm: str = "0",
     residual_evict_size: Optional[int] = None,
     offline_v_hadamard: bool = False,
+    offline_proj_path: Optional[str] = None,
+    offline_proj_mode: str = "both",
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
     """Load a HF model+tokenizer and return ``(model, tokenizer, make_cache)``.
 
@@ -361,6 +434,8 @@ def load_model(
             use_pruning=use_pruning,
             prune_mode=prune_mode,
             log_eps=log_eps,
+            offline_proj_path=offline_proj_path,
+            offline_proj_mode=offline_proj_mode,
         )
 
     if method not in BASELINE_ATTN:

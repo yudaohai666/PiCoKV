@@ -20,8 +20,58 @@ from transformers.models.llama.modeling_llama import (
 
 from .cache import PreparedKVCache
 from .config import StandaloneConfig
+from .constants import ONLINE_GROUP_BITS
 from .decode import decode_attention
 from .prepare import prepare_kv_cache
+
+
+OFFLINE_ENCODER_FORMAT = "quanpc_standalone_block32_encoder_v1"
+
+
+def load_offline_projections(path: str) -> dict:
+    """Load stored block-32 encoders as ``{"key": ..., "value": ..., "meta": ...}``.
+
+    ``key``/``value`` are ``[num_layers, num_kv_heads, bits, head_dim]`` stacks of
+    orthonormal scoring directions produced offline.  The format tag guards
+    against loading incompatible (e.g. greedy-era) files that share the shape.
+    """
+    data = torch.load(path, map_location="cpu")
+    if not isinstance(data, dict) or "key" not in data or "value" not in data:
+        raise ValueError("offline projection file must be a dict containing 'key' and 'value'")
+    meta = data.get("meta") or {}
+    fmt = meta.get("format")
+    if fmt != OFFLINE_ENCODER_FORMAT:
+        raise ValueError(
+            f"{path} has format {fmt!r}, but the standalone method requires "
+            f"{OFFLINE_ENCODER_FORMAT!r}."
+        )
+    for kind in ("key", "value"):
+        tensor = data[kind]
+        if tensor.dim() != 4:
+            raise ValueError(
+                f"offline '{kind}' must be [layers, heads, bits, dim]; got {tuple(tensor.shape)}"
+            )
+        if tensor.shape[-2] % ONLINE_GROUP_BITS:
+            raise ValueError(
+                f"offline '{kind}' bits {tensor.shape[-2]} is not a multiple of {ONLINE_GROUP_BITS}"
+            )
+    return data
+
+
+def _layer_encoders(stack, layer_idx: int, heads: int):
+    """Slice ``[layers, heads, bits, dim]`` down to one layer, or return None."""
+    if stack is None:
+        return None
+    if layer_idx >= stack.shape[0]:
+        raise ValueError(
+            f"offline projection has {stack.shape[0]} layers; layer {layer_idx} requested"
+        )
+    layer = stack[layer_idx]
+    if layer.shape[0] != heads:
+        raise ValueError(
+            f"offline projection layer {layer_idx} has {layer.shape[0]} heads; model has {heads}"
+        )
+    return layer
 
 
 def _chunked_llama_mlp_forward(
@@ -71,10 +121,24 @@ class StandaloneLlamaCache(Cache):
     retained portion of the layer cache.
     """
 
-    def __init__(self, config: StandaloneConfig | None = None) -> None:
-        """Create an empty per-layer cache with the supplied production config."""
+    def __init__(
+        self,
+        config: StandaloneConfig | None = None,
+        *,
+        key_encoders: Optional[torch.Tensor] = None,
+        value_encoders: Optional[torch.Tensor] = None,
+    ) -> None:
+        """Create an empty per-layer cache with the supplied production config.
+
+        Optional ``key_encoders``/``value_encoders`` are offline-projection stacks
+        ``[num_layers, num_kv_heads, bits, head_dim]``; when given, prefill skips
+        the online Householder QR. ``None`` keeps the pure-online path.
+        """
         self.config = config or StandaloneConfig()
         self.layers: dict[int, PreparedKVCache] = {}
+        self.key_encoders = key_encoders
+        self.value_encoders = value_encoders
+        self._pending_encoders: Optional[tuple] = None
         # Layers whose prompt is shorter than sink+local have no global segment
         # to compress; they keep full-precision K/V here and serve decode with
         # plain SDPA instead of the packed CUDA path.
@@ -96,6 +160,13 @@ class StandaloneLlamaCache(Cache):
         raise RuntimeError(
             "StandaloneLlamaCache.update requires modify_llama_for_standalone(model)"
         )
+
+    def _prepare_kwargs(self) -> dict:
+        """Return kwargs for one ``prepare_kv_cache`` call, plus offline encoders."""
+        kwargs = self.config.prepare_kwargs()
+        if self._pending_encoders is not None:
+            kwargs["key_encoders"], kwargs["value_encoders"] = self._pending_encoders
+        return kwargs
 
     def prepare(
         self,
@@ -123,15 +194,23 @@ class StandaloneLlamaCache(Cache):
             self.seq_lengths[layer_idx] = total_len
             return
 
+        heads = int(key_states.shape[1])
+        self._pending_encoders = (
+            _layer_encoders(self.key_encoders, layer_idx, heads),
+            _layer_encoders(self.value_encoders, layer_idx, heads),
+        )
         stream = torch.cuda.current_stream(key_states.device)
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record(stream)
-        self.layers[layer_idx] = prepare_kv_cache(
-            key_states,
-            value_states,
-            **self.config.prepare_kwargs(),
-        )
+        try:
+            self.layers[layer_idx] = prepare_kv_cache(
+                key_states,
+                value_states,
+                **self._prepare_kwargs(),
+            )
+        finally:
+            self._pending_encoders = None
         end.record(stream)
         self._prepare_events[layer_idx] = (start, end)
         self.seq_lengths[layer_idx] = int(key_states.shape[-2])
@@ -272,4 +351,9 @@ def modify_llama_for_standalone(model, *, mlp_chunk_size: int = 8192) -> None:
         module.forward = partial(modified_forward, module)
 
 
-__all__ = ["StandaloneLlamaCache", "modify_llama_for_standalone"]
+__all__ = [
+    "OFFLINE_ENCODER_FORMAT",
+    "StandaloneLlamaCache",
+    "load_offline_projections",
+    "modify_llama_for_standalone",
+]

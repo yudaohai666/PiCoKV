@@ -26,7 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from benchmarks.common import load_model, output_tag, seed_everything  # noqa: E402
+from benchmarks.common import load_model, output_tag, resolve_offline_proj_path, seed_everything  # noqa: E402
 
 # Config files live next to this script (config/*.json).
 CONFIG_DIR = Path(__file__).resolve().parent / "config"
@@ -76,6 +76,9 @@ class QuantPCModel:
         kv_norm: str = "1",
         residual_evict_size: int | None = 256,
         offline_v_hadamard: bool = True,
+        # quantpc offline block-32 encoders (--method quantpc)
+        offline_proj_path: str | None = None,
+        offline_proj_mode: str = "both",
     ):
         self.method = method
         self.model, self.tokenizer, self._make_cache = load_model(
@@ -92,6 +95,8 @@ class QuantPCModel:
             use_pruning=use_pruning,
             prune_mode=prune_mode,
             log_eps=log_eps,
+            offline_proj_path=offline_proj_path,
+            offline_proj_mode=offline_proj_mode,
             # KIVI params (--method kivi)
             group_size=group_size,
             residual_length=residual_length,
@@ -244,6 +249,9 @@ def parse_args(argv=None):
     p.add_argument("--kv-norm", default="1", help="OScaR kv norm (INT2 默认 1)")
     p.add_argument("--residual-evict-size", type=int, default=256, help="OScaR residual evict size (INT2 默认 256)")
     p.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
+    p.add_argument("--offline", action="store_true", help="quantpc: use offline block-32 encoders (default path offline_projection/{model}_k{K}_v{V}_block32.pt)")
+    p.add_argument("--offline-proj-path", default=None, help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
+    p.add_argument("--offline-proj-mode", default="both", choices=["both", "key", "value"], help="quantpc: which side reuses stored offline encoders (default both)")
     return p.parse_args(argv)
 
 
@@ -260,11 +268,17 @@ def main() -> None:
     max_length = model2maxlen.get(model_key, 31500)
     print(f"Model: {args.model} | Method: {args.method} | max_length: {max_length}")
 
-    tag = output_tag(args.method, args.k_bits, args.v_bits, args.num_bits)
+    tag = output_tag(args.method, args.k_bits, args.v_bits, args.num_bits,
+                     offline=(args.offline or args.offline_proj_path is not None),
+                     offline_mode=args.offline_proj_mode)
     save_path = Path(args.save_dir) / model_key / tag
     save_path.mkdir(parents=True, exist_ok=True)
     print(f"Output dir: {save_path}")
 
+    offline_proj_path = resolve_offline_proj_path(
+        args.method, args.offline, args.offline_proj_path,
+        model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,
+    )
     model = QuantPCModel(
         args.model,
         method=args.method,
@@ -289,6 +303,8 @@ def main() -> None:
         kv_norm=args.kv_norm,
         residual_evict_size=args.residual_evict_size,
         offline_v_hadamard=args.offline_v_hadamard,
+        offline_proj_path=offline_proj_path,
+        offline_proj_mode=args.offline_proj_mode,
     )
 
     for dataset in datasets:

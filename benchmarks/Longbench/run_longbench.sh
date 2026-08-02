@@ -28,6 +28,23 @@ CONFIGS=(
   "256 256"
 )
 
+# quantpc offline block-32 encoders: USE_OFFLINE=1 skips the online QR at prefill
+# (default path offline_projection/{model}_k{K}_v{V}_block32.pt). OFFLINE_PROJ_PATH
+# overrides the path; OFFLINE_PROJ_MODE = both|key|value (default both).
+USE_OFFLINE="${USE_OFFLINE:-0}"
+OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
+OFFLINE_PROJ_MODE="${OFFLINE_PROJ_MODE:-both}"
+OFFLINE_ARGS=()
+if [ "${USE_OFFLINE}" = "1" ] || [ -n "${OFFLINE_PROJ_PATH}" ]; then
+  OFFLINE_ARGS=(--offline --offline-proj-mode "${OFFLINE_PROJ_MODE}")
+  [ -n "${OFFLINE_PROJ_PATH}" ] && OFFLINE_ARGS+=(--offline-proj-path "${OFFLINE_PROJ_PATH}")
+fi
+# Output-tag suffix so offline runs don't overwrite online ones (matches output_tag).
+OFFLINE_TAG=""
+if [ ${#OFFLINE_ARGS[@]} -gt 0 ]; then
+  OFFLINE_TAG="_offline"; [ "${OFFLINE_PROJ_MODE}" != "both" ] && OFFLINE_TAG="_offline_${OFFLINE_PROJ_MODE}"
+fi
+
 # KIVI params (2/4-bit KV, single run).
 KIVI_K="${KIVI_K:-2}"
 KIVI_V="${KIVI_V:-2}"
@@ -59,8 +76,8 @@ for METHOD in "${METHODS[@]}"; do
     quantpc)
       for cfg in "${CONFIGS[@]}"; do
         K=$(echo "$cfg" | awk '{print $1}'); V=$(echo "$cfg" | awk '{print $2}')
-        run_lb quantpc "quantpc_k${K}_v${V}" \
-          --k-bits "${K}" --v-bits "${V}" --exp-bits 4 --eas 0.01 --zerorope 20
+        run_lb quantpc "quantpc_k${K}_v${V}${OFFLINE_TAG}" \
+          --k-bits "${K}" --v-bits "${V}" --exp-bits 4 --eas 0.01 --zerorope 20 "${OFFLINE_ARGS[@]}"
       done
       ;;
     kivi)

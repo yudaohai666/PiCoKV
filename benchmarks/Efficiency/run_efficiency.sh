@@ -19,6 +19,23 @@ BATCH_SIZE=1
 WARMUP=1
 REPEATS=3
 
+# quantpc offline block-32 encoders: USE_OFFLINE=1 skips the online QR at prefill
+# (default path offline_projection/{model}_k{K}_v{V}_block32.pt). OFFLINE_PROJ_PATH
+# overrides the path; OFFLINE_PROJ_MODE = both|key|value (default both).
+USE_OFFLINE="${USE_OFFLINE:-1}"
+OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
+OFFLINE_PROJ_MODE="${OFFLINE_PROJ_MODE:-both}"
+OFFLINE_ARGS=()
+if [ "${USE_OFFLINE}" = "1" ] || [ -n "${OFFLINE_PROJ_PATH}" ]; then
+  OFFLINE_ARGS=(--offline --offline-proj-mode "${OFFLINE_PROJ_MODE}")
+  [ -n "${OFFLINE_PROJ_PATH}" ] && OFFLINE_ARGS+=(--offline-proj-path "${OFFLINE_PROJ_PATH}")
+fi
+# Output-tag suffix so offline runs don't overwrite online ones (matches output_tag).
+OFFLINE_TAG=""
+if [ ${#OFFLINE_ARGS[@]} -gt 0 ]; then
+  OFFLINE_TAG="_offline"; [ "${OFFLINE_PROJ_MODE}" != "both" ] && OFFLINE_TAG="_offline_${OFFLINE_PROJ_MODE}"
+fi
+
 # run_one METHOD TAG RUN_ARGS...
 run_one() {
   local method="$1"; shift
@@ -33,16 +50,18 @@ run_one() {
 
 # dense baseline
 # run_one flash_attention_2 flash_attention_2
+run_one sdpa sdpa
+
 
 # quantpc (CUDA backend quantpc.quanpc)
-# run_one quantpc quantpc_k256_v256 --k-bits 256 --v-bits 256
+run_one quantpc "quantpc_k256_v256${OFFLINE_TAG}" --k-bits 256 --v-bits 256 "${OFFLINE_ARGS[@]}"
 
 # oscar INT2 recipe. Requires oscar_cuda built (bash src/OScaR-KV-Quant/build_oscar_cuda.sh).
 # group_size MUST be 32: the int2 V-param interleaved packer hardcodes 32-wide groups
 # (4 groups); group 128 under-allocates v_params -> OOB write.
-run_one oscar oscar_int2 \
-  --num-bits 2 --quant-mode k-channel --group-size 32 \
-  --kv-rotation hadamard --kv-norm 1 --residual-evict-size 256 --offline-v-hadamard
+# run_one oscar oscar_int2 \
+#   --num-bits 2 --quant-mode k-channel --group-size 32 \
+#   --kv-rotation hadamard --kv-norm 1 --residual-evict-size 256 --offline-v-hadamard
 
 # kivi (2-bit K/V)
 # run_one kivi kivi_k2_v2 --k-bits 2 --v-bits 2 --group-size 32 --residual-length 128

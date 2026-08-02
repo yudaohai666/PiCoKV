@@ -33,7 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from benchmarks.common import load_model, seed_everything  # noqa: E402
+from benchmarks.common import load_model, resolve_offline_proj_path, seed_everything  # noqa: E402
 
 
 def _sync() -> None:
@@ -96,6 +96,7 @@ def main() -> None:
     p.add_argument("--stage", default="decode", choices=["decode", "prefill", "both"],
                    help="which stage to profile: decode (default) | prefill | both")
     p.add_argument("--length", type=int, default=32768, help="prompt length to prefill before decoding")
+    p.add_argument("--batch", type=int, default=1, help="batch size for prefill/decode (default 1)")
     p.add_argument("--warmup", type=int, default=2, help="untimed decode steps before profiling (matches run_efficiency)")
     p.add_argument("--prefill-warmup", type=int, default=1,
                    help="untimed prefill passes before the profiled prefill (absorbs first-call cuBLAS autotune/kernel init)")
@@ -116,6 +117,12 @@ def main() -> None:
                    help="disable decode-time global pruning (gqa4 CUDA path); pruning is on by default")
     p.add_argument("--prune-mode", type=int, default=3)
     p.add_argument("--log-eps", type=float, default=-10.0)
+    p.add_argument("--offline", action="store_true",
+                   help="quantpc: use offline block-32 encoders (skip online QR at prefill); path defaults to offline_projection/{model}_k{K}_v{V}_block32.pt")
+    p.add_argument("--offline-proj-path", default=None,
+                   help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
+    p.add_argument("--offline-proj-mode", default="both", choices=["both", "key", "value"],
+                   help="quantpc: which side reuses stored offline encoders (default both)")
     p.set_defaults(use_pruning=True)
     # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
     p.add_argument("--group-size", type=int, default=32, help="KIVI per-group quant size; OScaR group size (INT2 必须=32)")
@@ -132,6 +139,10 @@ def main() -> None:
     args = p.parse_args()
 
     seed_everything(42)
+    offline_proj_path = resolve_offline_proj_path(
+        args.method, args.offline, args.offline_proj_path,
+        model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,
+    )
     model, _tok, make_cache = load_model(
         args.model,
         method=args.method,
@@ -156,10 +167,12 @@ def main() -> None:
         kv_norm=args.kv_norm,
         residual_evict_size=args.residual_evict_size,
         offline_v_hadamard=args.offline_v_hadamard,
+        offline_proj_path=offline_proj_path,
+        offline_proj_mode=args.offline_proj_mode,
     )
     device = model.device
     vocab = model.config.vocab_size
-    input_ids = torch.randint(1, vocab, (1, args.length), device=device, dtype=torch.long)
+    input_ids = torch.randint(1, vocab, (args.batch, args.length), device=device, dtype=torch.long)
 
     activities = [ProfilerActivity.CPU]
     if torch.cuda.is_available():
@@ -184,7 +197,7 @@ def main() -> None:
                 with record_function("PREFILL"):
                     pkv, gen_ids, attn, pos = _prefill(model, input_ids, make_cache, device)
             _sync()
-            _report(prof, args, "prefill", f"length={args.length}")
+            _report(prof, args, "prefill", f"batch={args.batch}, length={args.length}")
 
         # ── decode stage ──────────────────────────────────────────────────
         if do_decode:
@@ -204,7 +217,7 @@ def main() -> None:
                         pkv, gen_ids, attn = _decode_step(model, gen_ids, attn, pkv, pos, device)
                         pos += 1
             _sync()
-            _report(prof, args, "decode", f"length={args.length}, active={args.active} steps")
+            _report(prof, args, "decode", f"batch={args.batch}, length={args.length}, active={args.active} steps")
 
 
 if __name__ == "__main__":

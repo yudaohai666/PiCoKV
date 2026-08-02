@@ -38,6 +38,7 @@ from src.lmeval import MyModel  # noqa: E402
 from benchmarks.common import (  # noqa: E402
     load_model,
     output_tag,
+    resolve_offline_proj_path,
     seed_everything,
 )
 
@@ -179,6 +180,9 @@ def parse_arguments():
     parser.add_argument("--kv-norm", default="1", help="OScaR kv norm (INT2 默认 1)")
     parser.add_argument("--residual-evict-size", type=int, default=256, help="OScaR residual evict size (INT2 默认 256)")
     parser.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
+    parser.add_argument("--offline", action="store_true", help="quantpc: use offline block-32 encoders (default path offline_projection/{model}_k{K}_v{V}_block32.pt)")
+    parser.add_argument("--offline-proj-path", default=None, help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
+    parser.add_argument("--offline-proj-mode", default="both", choices=["both", "key", "value"], help="quantpc: which side reuses stored offline encoders (default both)")
 
     # Task configuration
     parser.add_argument(
@@ -225,7 +229,9 @@ def get_output_path(args):
     if args.output_path:
         return args.output_path
     model_key = Path(args.model).name
-    tag = output_tag(args.method, args.k_bits, args.v_bits, args.num_bits)
+    tag = output_tag(args.method, args.k_bits, args.v_bits, args.num_bits,
+                     offline=(args.offline or args.offline_proj_path is not None),
+                     offline_mode=args.offline_proj_mode)
     return f"results/ruler/{model_key}_{tag}/"
 
 
@@ -300,7 +306,9 @@ def run_evaluation(ruler_model, args, output_path):
 def save_results(results, args, output_path):
     """Save evaluation results to files."""
     model_key = Path(args.model).name
-    tag = output_tag(args.method, args.k_bits, args.v_bits, args.num_bits)
+    tag = output_tag(args.method, args.k_bits, args.v_bits, args.num_bits,
+                     offline=(args.offline or args.offline_proj_path is not None),
+                     offline_mode=args.offline_proj_mode)
 
     results_lite = {
         "results": results.get("results", {}),
@@ -369,6 +377,10 @@ def main():
         logger.info(f"Sample limit: {args.limit}")
 
     try:
+        offline_proj_path = resolve_offline_proj_path(
+            args.method, args.offline, args.offline_proj_path,
+            model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,
+        )
         model, tokenizer, kv_cache_factory = load_model(
             args.model,
             method=args.method,
@@ -383,6 +395,8 @@ def main():
             use_pruning=args.use_pruning,
             prune_mode=args.prune_mode,
             log_eps=args.log_eps,
+            offline_proj_path=offline_proj_path,
+            offline_proj_mode=args.offline_proj_mode,
             # KIVI params (--method kivi)
             group_size=args.group_size,
             residual_length=args.residual_length,

@@ -16,11 +16,12 @@ from .constants import (
 
 @dataclass(frozen=True, slots=True)
 class OnlineQuantizedTensor:
-    """Binary codes, decoder projection, and per-token residual error."""
+    """Binary codes, decoder projection, per-token residual error, and encoders."""
 
     codes: torch.Tensor
     decoder: torch.Tensor
     err: torch.Tensor
+    encoders: torch.Tensor
 
 
 def _householder_qr(x: torch.Tensor) -> torch.Tensor:
@@ -90,18 +91,51 @@ def _sample_residual(
     return residual.index_select(1, indices).contiguous(), indices
 
 
+def _prepare_fixed_encoders(
+    encoders: torch.Tensor,
+    batch: int,
+    heads: int,
+    bits: int,
+    dim: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Normalize a stored ``[H,bits,D]``/``[B,H,bits,D]`` encoder to row-major."""
+    if encoders.dim() == 3:
+        encoders = encoders.unsqueeze(0).expand(batch, heads, bits, dim)
+    if encoders.dim() != 4:
+        raise ValueError(
+            f"encoders must be [H,bits,D] or [B,H,bits,D]; got {tuple(encoders.shape)}"
+        )
+    if tuple(encoders.shape[1:]) != (heads, bits, dim):
+        raise ValueError(
+            f"encoders shape {tuple(encoders.shape)} does not match "
+            f"target [B={batch},H={heads},bits={bits},D={dim}]"
+        )
+    return (
+        encoders.to(device=device, dtype=dtype)
+        .reshape(batch * heads, bits // ONLINE_GROUP_BITS, ONLINE_GROUP_BITS, dim)
+        .contiguous()
+    )
+
+
 def quantize_block32_online(
     target: torch.Tensor,
     bits: int,
     *,
     direction_sample_size: Optional[int] = 8192,
     seed: int = 0,
+    encoders: Optional[torch.Tensor] = None,
 ) -> OnlineQuantizedTensor:
     """Learn block-32 directions and immediately quantize ``[B,H,L,D]`` states.
 
     This is the single validated production path: batched CholeskyQR
     initialization, one covariance power iteration with Householder QR, bf16
     tensor-core matmuls, a ``1e-3`` decoder ridge, and residual error for EAS.
+
+    Passing ``encoders`` reuses stored directions instead of learning them
+    (offline path): CholeskyQR init, covariance power iteration, and Householder
+    QR are skipped. The decoder is still solved from the current context.
     """
     if target.dim() != 4:
         raise ValueError(f"target must be [B,H,L,D]; got {tuple(target.shape)}")
@@ -116,6 +150,13 @@ def quantize_block32_online(
     batch, heads, length, dim = target.shape
     rows = batch * heads
     groups = bits // ONLINE_GROUP_BITS
+    fixed_encoders = (
+        None
+        if encoders is None
+        else _prepare_fixed_encoders(
+            encoders, batch, heads, bits, dim, target.device, target.dtype
+        )
+    )
     generator = torch.Generator(device=target.device)
     generator.manual_seed(int(seed))
     init_vectors = torch.randn(
@@ -129,25 +170,30 @@ def quantize_block32_online(
     )
 
     residual = target.reshape(rows, length, dim).contiguous().clone()
-    init_columns = (
-        init_vectors.reshape(rows, groups, ONLINE_GROUP_BITS, dim)
-        .transpose(-1, -2)
-        .contiguous()
-        .reshape(rows * groups, dim, ONLINE_GROUP_BITS)
-    )
-    init_q = _cholesky_qr(init_columns).reshape(
-        rows,
-        groups,
-        dim,
-        ONLINE_GROUP_BITS,
-    )
-    sample_residual, sample_indices = _sample_residual(
-        residual,
-        direction_sample_size,
-    )
+    if fixed_encoders is None:
+        init_columns = (
+            init_vectors.reshape(rows, groups, ONLINE_GROUP_BITS, dim)
+            .transpose(-1, -2)
+            .contiguous()
+            .reshape(rows * groups, dim, ONLINE_GROUP_BITS)
+        )
+        init_q = _cholesky_qr(init_columns).reshape(
+            rows,
+            groups,
+            dim,
+            ONLINE_GROUP_BITS,
+        )
+        sample_residual, sample_indices = _sample_residual(
+            residual,
+            direction_sample_size,
+        )
+    else:
+        # Fixed encoders make the power iteration and sampling dead work.
+        sample_residual, sample_indices = None, None
 
     codes = torch.empty(rows, length, bits, device=target.device, dtype=torch.int8)
     decoder = torch.empty(rows, bits, dim, device=target.device, dtype=target.dtype)
+    used_encoders = torch.empty(rows, bits, dim, device=target.device, dtype=target.dtype)
 
     for group_idx in range(groups):
         start = group_idx * ONLINE_GROUP_BITS
@@ -155,11 +201,15 @@ def quantize_block32_online(
 
         # One covariance power step estimates the dominant residual subspace;
         # Householder QR preserves accuracy after residual groups accumulate.
-        q = init_q[:, group_idx]
-        sampled = sample_residual.to(dtype=ONLINE_MATMUL_DTYPE)
-        y = torch.matmul(sampled, q.to(dtype=ONLINE_MATMUL_DTYPE))
-        q = torch.matmul(sampled.transpose(-1, -2), y)
-        encoder = _householder_qr(q).transpose(-1, -2).contiguous()
+        if fixed_encoders is None:
+            q = init_q[:, group_idx]
+            sampled = sample_residual.to(dtype=ONLINE_MATMUL_DTYPE)
+            y = torch.matmul(sampled, q.to(dtype=ONLINE_MATMUL_DTYPE))
+            q = torch.matmul(sampled.transpose(-1, -2), y)
+            encoder = _householder_qr(q).transpose(-1, -2).contiguous()
+        else:
+            encoder = fixed_encoders[:, group_idx]
+        used_encoders[:, start:end] = encoder.to(dtype=target.dtype)
 
         # Quantize to strict {-1,+1}, fit this group's decoder, then subtract
         # its reconstruction before learning the next group.
@@ -198,6 +248,7 @@ def quantize_block32_online(
         codes=codes.reshape(batch, heads, length, bits).contiguous(),
         decoder=decoder.reshape(batch, heads, bits, dim).contiguous(),
         err=residual.float().norm(dim=-1).reshape(batch, heads, length).contiguous(),
+        encoders=used_encoders.reshape(batch, heads, bits, dim).contiguous(),
     )
 
 

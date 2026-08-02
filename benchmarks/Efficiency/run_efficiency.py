@@ -35,7 +35,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from benchmarks.common import load_model, output_tag, seed_everything  # noqa: E402
+from benchmarks.common import load_model, output_tag, resolve_offline_proj_path, seed_everything  # noqa: E402
 
 
 def parse_int_list(value: str) -> list[int]:
@@ -258,6 +258,10 @@ def measure(model, make_cache, vocab_size, batch_size, prompt_len, decode_tokens
 
 def run(args) -> None:
     seed_everything(42)
+    offline_proj_path = resolve_offline_proj_path(
+        args.method, args.offline, args.offline_proj_path,
+        model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,
+    )
     model, _tokenizer, make_cache = load_model(
         args.model,
         method=args.method,
@@ -272,6 +276,8 @@ def run(args) -> None:
         use_pruning=args.use_pruning,
         prune_mode=args.prune_mode,
         log_eps=args.log_eps,
+        offline_proj_path=offline_proj_path,
+        offline_proj_mode=args.offline_proj_mode,
         # KIVI params (--method kivi)
         group_size=args.group_size,
         residual_length=args.residual_length,
@@ -305,7 +311,9 @@ def run(args) -> None:
                 f"decode={r['decode_ms_per_token']}ms/tok ({r['decode_toks_per_s']} tok/s)"
             )
 
-    tag = output_tag(args.method, args.k_bits, args.v_bits, args.num_bits)
+    tag = output_tag(args.method, args.k_bits, args.v_bits, args.num_bits,
+                     offline=(args.offline or args.offline_proj_path is not None),
+                     offline_mode=args.offline_proj_mode)
     payload = {
         "method": args.method,
         "tag": tag,
@@ -399,6 +407,9 @@ def main() -> None:
     parser.add_argument("--kv-norm", default="1", help="OScaR kv norm (INT2 默认 1)")
     parser.add_argument("--residual-evict-size", type=int, default=256, help="OScaR residual evict size (INT2 默认 256)")
     parser.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
+    parser.add_argument("--offline", action="store_true", help="quantpc: use offline block-32 encoders (default path offline_projection/{model}_k{K}_v{V}_block32.pt)")
+    parser.add_argument("--offline-proj-path", default=None, help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
+    parser.add_argument("--offline-proj-mode", default="both", choices=["both", "key", "value"], help="quantpc: which side reuses stored offline encoders (default both)")
     args = parser.parse_args()
 
     if args.compare:

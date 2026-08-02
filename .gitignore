@@ -22,3 +22,6 @@ dist/
 
 # Generated profiler traces
 results/efficiency/prof/
+offline_projection/data/proof-pile.json
+offline_projection/data/codeparrot.json
+offline_projection/data/pg19.json

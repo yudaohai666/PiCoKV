@@ -31,6 +31,13 @@ EXP_BITS="${EXP_BITS:-4}"
 EAS="${EAS:-0.01}"
 ZEROROPE="${ZEROROPE:-20}"
 
+# quantpc offline block-32 encoders: USE_OFFLINE=1 skips the online QR at prefill
+# (default path offline_projection/{model}_k{K}_v{V}_block32.pt). OFFLINE_PROJ_PATH
+# overrides the path; OFFLINE_PROJ_MODE = both|key|value (default both).
+USE_OFFLINE="${USE_OFFLINE:-0}"
+OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
+OFFLINE_PROJ_MODE="${OFFLINE_PROJ_MODE:-both}"
+
 # KIVI params (2/4-bit KV).
 KIVI_K="${KIVI_K:-2}"
 KIVI_V="${KIVI_V:-2}"
@@ -50,6 +57,10 @@ case "${METHOD}" in
   quantpc)
     METHOD_ARGS=(--k-bits "${K_BITS}" --v-bits "${V_BITS}" --sink-size "${SINK}" --local-size "${LOCAL}" \
                  --exp-bits "${EXP_BITS}" --eas "${EAS}" --zerorope "${ZEROROPE}")
+    if [ "${USE_OFFLINE}" = "1" ] || [ -n "${OFFLINE_PROJ_PATH}" ]; then
+      METHOD_ARGS+=(--offline --offline-proj-mode "${OFFLINE_PROJ_MODE}")
+      [ -n "${OFFLINE_PROJ_PATH}" ] && METHOD_ARGS+=(--offline-proj-path "${OFFLINE_PROJ_PATH}")
+    fi
     ;;
   kivi)
     METHOD_ARGS=(--k-bits "${KIVI_K}" --v-bits "${KIVI_V}" \
