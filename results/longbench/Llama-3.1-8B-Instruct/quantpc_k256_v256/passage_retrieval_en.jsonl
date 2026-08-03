@@ -8,7 +8,7 @@
 {"pred": "Paragraph 27", "answers": ["Paragraph 27"], "all_classes": null, "length": 8995}
 {"pred": "Paragraph 30", "answers": ["Paragraph 30"], "all_classes": null, "length": 7789}
 {"pred": "Paragraph 12", "answers": ["Paragraph 12"], "all_classes": null, "length": 10027}
-{"pred": "Paragraph 22", "answers": ["Paragraph 22"], "all_classes": null, "length": 9273}
+{"pred": "Paragraph 22.", "answers": ["Paragraph 22"], "all_classes": null, "length": 9273}
 {"pred": "Paragraph 30", "answers": ["Paragraph 30"], "all_classes": null, "length": 10178}
 {"pred": "Paragraph 24", "answers": ["Paragraph 24"], "all_classes": null, "length": 9221}
 {"pred": "Paragraph 19", "answers": ["Paragraph 19"], "all_classes": null, "length": 9718}
@@ -31,7 +31,7 @@
 {"pred": "Paragraph 1", "answers": ["Paragraph 1"], "all_classes": null, "length": 9908}
 {"pred": "Paragraph 25", "answers": ["Paragraph 25"], "all_classes": null, "length": 8838}
 {"pred": "Paragraph 19", "answers": ["Paragraph 19"], "all_classes": null, "length": 10016}
-{"pred": "Paragraph 22", "answers": ["Paragraph 22"], "all_classes": null, "length": 7992}
+{"pred": "Paragraph 22.", "answers": ["Paragraph 22"], "all_classes": null, "length": 7992}
 {"pred": "Paragraph 5", "answers": ["Paragraph 5"], "all_classes": null, "length": 9899}
 {"pred": "Paragraph 15", "answers": ["Paragraph 15"], "all_classes": null, "length": 9483}
 {"pred": "Paragraph 28", "answers": ["Paragraph 28"], "all_classes": null, "length": 10118}
@@ -67,14 +67,14 @@
 {"pred": "Paragraph 27", "answers": ["Paragraph 27"], "all_classes": null, "length": 8804}
 {"pred": "Paragraph 15", "answers": ["Paragraph 15"], "all_classes": null, "length": 8473}
 {"pred": "Paragraph 21", "answers": ["Paragraph 21"], "all_classes": null, "length": 9216}
-{"pred": "Paragraph 28", "answers": ["Paragraph 28"], "all_classes": null, "length": 10941}
+{"pred": "Paragraph 28.", "answers": ["Paragraph 28"], "all_classes": null, "length": 10941}
 {"pred": "Paragraph 5", "answers": ["Paragraph 5"], "all_classes": null, "length": 10198}
 {"pred": "Paragraph 9", "answers": ["Paragraph 9"], "all_classes": null, "length": 8526}
 {"pred": "Paragraph 20", "answers": ["Paragraph 20"], "all_classes": null, "length": 8039}
 {"pred": "Paragraph 15", "answers": ["Paragraph 15"], "all_classes": null, "length": 9207}
 {"pred": "Paragraph 6", "answers": ["Paragraph 6"], "all_classes": null, "length": 9357}
 {"pred": "Paragraph 23", "answers": ["Paragraph 23"], "all_classes": null, "length": 9713}
-{"pred": "Paragraph 26", "answers": ["Paragraph 26"], "all_classes": null, "length": 8114}
+{"pred": "Paragraph 26.", "answers": ["Paragraph 26"], "all_classes": null, "length": 8114}
 {"pred": "Paragraph 18.", "answers": ["Paragraph 18"], "all_classes": null, "length": 9148}
 {"pred": "Paragraph 11", "answers": ["Paragraph 11"], "all_classes": null, "length": 8795}
 {"pred": "Paragraph 18", "answers": ["Paragraph 18"], "all_classes": null, "length": 8491}
@@ -126,7 +126,7 @@
 {"pred": "Paragraph 7", "answers": ["Paragraph 7"], "all_classes": null, "length": 7860}
 {"pred": "Paragraph 28.", "answers": ["Paragraph 28"], "all_classes": null, "length": 9423}
 {"pred": "Paragraph 11", "answers": ["Paragraph 11"], "all_classes": null, "length": 7818}
-{"pred": "Paragraph 18", "answers": ["Paragraph 18"], "all_classes": null, "length": 10417}
+{"pred": "Paragraph 18.", "answers": ["Paragraph 18"], "all_classes": null, "length": 10417}
 {"pred": "Paragraph 9", "answers": ["Paragraph 9"], "all_classes": null, "length": 8644}
 {"pred": "Paragraph 16", "answers": ["Paragraph 16"], "all_classes": null, "length": 8429}
 {"pred": "Paragraph 8", "answers": ["Paragraph 8"], "all_classes": null, "length": 8931}
@@ -143,11 +143,11 @@
 {"pred": "Paragraph 29", "answers": ["Paragraph 29"], "all_classes": null, "length": 10041}
 {"pred": "Paragraph 11", "answers": ["Paragraph 11"], "all_classes": null, "length": 8851}
 {"pred": "Paragraph 7", "answers": ["Paragraph 7"], "all_classes": null, "length": 10303}
-{"pred": "Paragraph 22", "answers": ["Paragraph 22"], "all_classes": null, "length": 9065}
+{"pred": "Paragraph 22.", "answers": ["Paragraph 22"], "all_classes": null, "length": 9065}
 {"pred": "Paragraph 8", "answers": ["Paragraph 8"], "all_classes": null, "length": 8976}
 {"pred": "Paragraph 28", "answers": ["Paragraph 28"], "all_classes": null, "length": 8863}
 {"pred": "Paragraph 23", "answers": ["Paragraph 23"], "all_classes": null, "length": 9616}
-{"pred": "Paragraph 8", "answers": ["Paragraph 8"], "all_classes": null, "length": 9063}
+{"pred": "Paragraph 8.", "answers": ["Paragraph 8"], "all_classes": null, "length": 9063}
 {"pred": "Paragraph 11", "answers": ["Paragraph 11"], "all_classes": null, "length": 8464}
 {"pred": "Paragraph 28", "answers": ["Paragraph 28"], "all_classes": null, "length": 9939}
 {"pred": "Paragraph 16", "answers": ["Paragraph 16"], "all_classes": null, "length": 7539}

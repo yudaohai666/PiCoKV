@@ -155,7 +155,7 @@
 {"pred": "24", "answers": ["31"], "all_classes": null, "length": 15454}
 {"pred": "2", "answers": ["3"], "all_classes": null, "length": 13841}
 {"pred": "3", "answers": ["3"], "all_classes": null, "length": 9325}
-{"pred": "3\n\nThere are 3 unique paragraphs after removing duplicates. \n\nThe first unique paragraph is about the Crimson Tide, which is a women's basketball team from the", "answers": ["3"], "all_classes": null, "length": 6771}
+{"pred": "3\n\nThe three unique paragraphs are:\n\n1. The Crimson Tide has appeared in ten post-season Tournaments for the NCAA Women's Division I Basketball Championship, including", "answers": ["3"], "all_classes": null, "length": 6771}
 {"pred": "24", "answers": ["9"], "all_classes": null, "length": 11684}
 {"pred": "5\n\nThe paragraphs can be grouped into three categories: \n\n1. Paragraphs about Unit 29 (Paragraphs 1, 2, 4,", "answers": ["3"], "all_classes": null, "length": 13730}
 {"pred": "9", "answers": ["17"], "all_classes": null, "length": 8501}

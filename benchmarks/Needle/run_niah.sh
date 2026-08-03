@@ -26,17 +26,17 @@ METHOD="${METHOD:-quantpc}"
 
 # quantpc K/V sweep + full-precision sink/local windows.
 CONFIGS=(
-  "256 256"
-  # "320 256"
+  # "256 256"
+  "320 256"
   # "320 320"
 )
 SINK="${SINK:-64}"
-LOCAL="${LOCAL:-1024}"
+LOCAL="${LOCAL:-256}"
 
 # quantpc offline block-32 encoders: USE_OFFLINE=1 skips the online QR at prefill
 # (default path offline_projection/{model}_k{K}_v{V}_block32.pt). OFFLINE_PROJ_PATH
 # overrides the path; OFFLINE_PROJ_MODE = both|key|value (default both).
-USE_OFFLINE="${USE_OFFLINE:-1}"
+USE_OFFLINE="${USE_OFFLINE:-0}"
 OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
 OFFLINE_PROJ_MODE="${OFFLINE_PROJ_MODE:-both}"
 OFFLINE_ARGS=()

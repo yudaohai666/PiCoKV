@@ -54,7 +54,7 @@ run_one sdpa sdpa
 
 
 # quantpc (CUDA backend quantpc.quanpc)
-run_one quantpc "quantpc_k256_v256${OFFLINE_TAG}" --k-bits 256 --v-bits 256 "${OFFLINE_ARGS[@]}"
+run_one quantpc "quantpc_k256_v256${OFFLINE_TAG}" --k-bits 320 --v-bits 256 "${OFFLINE_ARGS[@]}"
 
 # oscar INT2 recipe. Requires oscar_cuda built (bash src/OScaR-KV-Quant/build_oscar_cuda.sh).
 # group_size MUST be 32: the int2 V-param interleaved packer hardcodes 32-wide groups

@@ -79,7 +79,7 @@
 {"pred": "Edward Buzzell", "answers": ["Ona Munson"], "all_classes": null, "length": 11373}
 {"pred": "The Drover'S Sweetheart", "answers": ["The Drover'S Sweetheart"], "all_classes": null, "length": 3866}
 {"pred": "North Karnataka", "answers": ["Tumkur"], "all_classes": null, "length": 3459}
-{"pred": "Det Sande Ansigt", "answers": ["Det Sande Ansigt"], "all_classes": null, "length": 4713}
+{"pred": "Det Sande Ansigt (1951) came out earlier than Closely Watched Trains (1966).", "answers": ["Det Sande Ansigt"], "all_classes": null, "length": 4713}
 {"pred": "Bomgay", "answers": ["Bomgay"], "all_classes": null, "length": 4261}
 {"pred": "Haarlem", "answers": ["Preslav"], "all_classes": null, "length": 5869}
 {"pred": "The Pyrammmid.", "answers": ["Revolt Of The Praetorians"], "all_classes": null, "length": 3504}
@@ -101,7 +101,7 @@
 {"pred": "Michael Sorvino", "answers": ["Mira Sorvino"], "all_classes": null, "length": 4398}
 {"pred": "No", "answers": ["yes"], "all_classes": null, "length": 1863}
 {"pred": "Denmark", "answers": ["Norway"], "all_classes": null, "length": 3211}
-{"pred": "Heonjong of Goryeo's father, Seonjong of Goryeo, died of illness.", "answers": ["illness"], "all_classes": null, "length": 4438}
+{"pred": "He fell ill.", "answers": ["illness"], "all_classes": null, "length": 4438}
 {"pred": "Harby near Lincoln.", "answers": ["Harby"], "all_classes": null, "length": 10562}
 {"pred": "Hong Kong Film Award for Best Director", "answers": ["Hong Kong Film Award for Best Director"], "all_classes": null, "length": 3401}
 {"pred": "3 September 1992", "answers": ["3 September 1992"], "all_classes": null, "length": 1680}
@@ -114,7 +114,7 @@
 {"pred": "No", "answers": ["yes"], "all_classes": null, "length": 5918}
 {"pred": "1761", "answers": ["13 March 1753"], "all_classes": null, "length": 4323}
 {"pred": "No Trees In The Street", "answers": ["No Trees In The Street"], "all_classes": null, "length": 7162}
-{"pred": "Kerala.", "answers": ["Methala"], "all_classes": null, "length": 3129}
+{"pred": "Kerala", "answers": ["Methala"], "all_classes": null, "length": 3129}
 {"pred": "Alkohol", "answers": ["Alkohol"], "all_classes": null, "length": 5610}
 {"pred": "Do Musafir", "answers": ["Do Musafir"], "all_classes": null, "length": 1138}
 {"pred": "No", "answers": ["no"], "all_classes": null, "length": 1241}
@@ -134,7 +134,7 @@
 {"pred": "Fairmont, West Virginia", "answers": ["Fairmont, West Virginia"], "all_classes": null, "length": 3228}
 {"pred": "The Market Of Souls", "answers": ["The Market Of Souls"], "all_classes": null, "length": 2305}
 {"pred": "Yes", "answers": ["yes"], "all_classes": null, "length": 4201}
-{"pred": "I could not find any information about the father of Muhammad Al-Nasir in the given passages.", "answers": ["Morocco"], "all_classes": null, "length": 4417}
+{"pred": "Iberian Peninsula", "answers": ["Morocco"], "all_classes": null, "length": 4417}
 {"pred": "Ur", "answers": ["Akkadian empire"], "all_classes": null, "length": 8701}
 {"pred": "Solemn Promise", "answers": ["Tarzan The Magnificent"], "all_classes": null, "length": 4580}
 {"pred": "Wolf Warrior", "answers": ["Wolf Warrior"], "all_classes": null, "length": 3774}
@@ -154,7 +154,7 @@
 {"pred": "Orange County, Virginia", "answers": ["Gordonsville, Virginia"], "all_classes": null, "length": 9096}
 {"pred": "Romania", "answers": ["Mangalia"], "all_classes": null, "length": 8046}
 {"pred": "Félix Leclerc", "answers": ["Félix Leclerc"], "all_classes": null, "length": 4871}
-{"pred": "Henri I, Duke of Nemours", "answers": ["Jacques"], "all_classes": null, "length": 5577}
+{"pred": "Henri de Savoie, 4th Duc de Nemours", "answers": ["Jacques"], "all_classes": null, "length": 5577}
 {"pred": "Stephen I of Hungary", "answers": ["Géza"], "all_classes": null, "length": 11622}
 {"pred": "Queen Yi Jiang", "answers": ["Yi Jiang"], "all_classes": null, "length": 4142}
 {"pred": "1896", "answers": ["November 3, 1867"], "all_classes": null, "length": 6374}
@@ -175,7 +175,7 @@
 {"pred": "1208", "answers": ["1234"], "all_classes": null, "length": 9182}
 {"pred": "24 October 1642", "answers": ["25 July 1666"], "all_classes": null, "length": 6136}
 {"pred": "The Wind's Fierce", "answers": ["The Wind'S Fierce"], "all_classes": null, "length": 9043}
-{"pred": "He died by drowning himself in his swimming pool due to suffering from depression, pain, and a loss of mental faculties.", "answers": ["drowning"], "all_classes": null, "length": 8169}
+{"pred": "He died by drowning himself in his swimming pool due to his declining mental health and physical condition.", "answers": ["drowning"], "all_classes": null, "length": 8169}
 {"pred": "Abu Dhabi.", "answers": ["Abu Dhabi"], "all_classes": null, "length": 3593}
 {"pred": "Prenzlau", "answers": ["Prenzlau"], "all_classes": null, "length": 3584}
 {"pred": "Poznań", "answers": ["Poznań"], "all_classes": null, "length": 3814}

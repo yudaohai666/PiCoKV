@@ -15,7 +15,7 @@
 {"pred": "Gariep Dam", "answers": ["Thaba Putsoa"], "all_classes": null, "length": 8507}
 {"pred": "Rialto Bridge", "answers": ["Rialto Bridge", "Ponte di Rialto"], "all_classes": null, "length": 10991}
 {"pred": "The party that gained control of Congress in the midterm elections in 1946 was the Republican Party. The US House determines the rules of the US House itself,", "answers": ["January 2015"], "all_classes": null, "length": 10779}
-{"pred": "Clifton College, England; London; The United States", "answers": ["Clifton College"], "all_classes": null, "length": 11517}
+{"pred": "Clifton College, England, and later in London.", "answers": ["Clifton College"], "all_classes": null, "length": 11517}
 {"pred": "Malko Tarnovo", "answers": ["Malko Tarnovo Municipality"], "all_classes": null, "length": 11954}
 {"pred": "Nina Sky", "answers": ["Natalie Albino", "Nina Sky"], "all_classes": null, "length": 11174}
 {"pred": "University of Toronto", "answers": ["University of Toronto", "UT"], "all_classes": null, "length": 11283}
@@ -62,7 +62,7 @@
 {"pred": "Matthew Lawrence", "answers": ["Matthew Lawrence"], "all_classes": null, "length": 9785}
 {"pred": "Matthew Lawrence", "answers": ["Matthew Lawrence"], "all_classes": null, "length": 11813}
 {"pred": "There is no information in the given passages about the team Arthur James was a member of beating the 1894-95 FA Cup winner.", "answers": ["1 December 2010"], "all_classes": null, "length": 11845}
-{"pred": "The Free Software Directory was a project of the Free Software Foundation (FSF), and it was not specifically stated in the passage who started the foundation that developed the", "answers": ["Richard Stallman", "rms"], "all_classes": null, "length": 12411}
+{"pred": "The Free Software Directory was a project of the Free Software Foundation (FSF), and the FSF was founded by Richard Stallman.", "answers": ["Richard Stallman", "rms"], "all_classes": null, "length": 12411}
 {"pred": "Egyptian", "answers": ["ancient Egyptian religion"], "all_classes": null, "length": 11562}
 {"pred": "Vermont", "answers": ["Plymouth Notch"], "all_classes": null, "length": 11663}
 {"pred": "Claudia Wells and Elisabeth Shue", "answers": ["Claudia Wells"], "all_classes": null, "length": 11409}
@@ -73,9 +73,9 @@
 {"pred": "Tarnów", "answers": ["Aden"], "all_classes": null, "length": 10975}
 {"pred": "National Football League (NFL)", "answers": ["sports league", "Sports league", "league"], "all_classes": null, "length": 11819}
 {"pred": "A participant of the Battle of Brechin is an instance of a Scottish noble.", "answers": ["Scottish clan"], "all_classes": null, "length": 11507}
-{"pred": "The fleur-de-lis.", "answers": ["fleur - de-lis", "Fleur-de-lis", "fleur-de-lis"], "all_classes": null, "length": 10960}
+{"pred": "The fleur-de-lis", "answers": ["fleur - de-lis", "Fleur-de-lis", "fleur-de-lis"], "all_classes": null, "length": 10960}
 {"pred": "Greek mythology", "answers": ["Greek mythology"], "all_classes": null, "length": 8944}
-{"pred": "The College of Charleston", "answers": ["College of Charles Towne", "Charles Towne"], "all_classes": null, "length": 11894}
+{"pred": "The College of Charleston.", "answers": ["College of Charles Towne", "Charles Towne"], "all_classes": null, "length": 11894}
 {"pred": "Cuyahoga County", "answers": ["Cabarrus County"], "all_classes": null, "length": 11247}
 {"pred": "Clatskanie", "answers": ["Clatskanie", "Clatskanie, Oregon"], "all_classes": null, "length": 11417}
 {"pred": "Moseley's experiment", "answers": ["Manhattan Project"], "all_classes": null, "length": 11601}
@@ -124,7 +124,7 @@
 {"pred": "Lea Thompson", "answers": ["Claudia Wells"], "all_classes": null, "length": 12030}
 {"pred": "Lori Alan", "answers": ["Mr. Lawrence", "Doug Lawrence"], "all_classes": null, "length": 11158}
 {"pred": "280-279 BC", "answers": ["323–272 BC"], "all_classes": null, "length": 11671}
-{"pred": "liquidating", "answers": ["trying to find a potential buyer for all of its operations in Finland", "FIN", "fi", "Finland"], "all_classes": null, "length": 11765}
+{"pred": "liquidation", "answers": ["trying to find a potential buyer for all of its operations in Finland", "FIN", "fi", "Finland"], "all_classes": null, "length": 11765}
 {"pred": "1942", "answers": ["15 February 1942"], "all_classes": null, "length": 11659}
 {"pred": "Zeferino Martins", "answers": ["Francisco Guterres"], "all_classes": null, "length": 11204}
 {"pred": "Brandi Carlile", "answers": ["Phil Hanseroth"], "all_classes": null, "length": 11162}
@@ -133,7 +133,7 @@
 {"pred": "Fort Mitchell, Kentucky", "answers": ["Kenton County", "Kenton County, Kentucky"], "all_classes": null, "length": 11139}
 {"pred": "Best Director", "answers": ["nominated for an Academy Award for Best Supporting Actor", "Academy Award for Best Supporting Actor"], "all_classes": null, "length": 11397}
 {"pred": "1 January 1986", "answers": ["1 January 1986"], "all_classes": null, "length": 11563}
-{"pred": "A&M Records (Canada) and in 1995 through Koch Entertainment (Europe) and later reissued in 2004 through Solid Gold Records.", "answers": ["Attic Records", "Attic"], "all_classes": null, "length": 4109}
+{"pred": "A&M Records (Canada) and in 1995 through Koch Entertainment (Europe); it was later reissued in 2004 through Solid Gold Records.", "answers": ["Attic Records", "Attic"], "all_classes": null, "length": 4109}
 {"pred": "The majority party in the House of Representatives gained control of the body which approves members of the Cabinet in 2015.", "answers": ["January 2015"], "all_classes": null, "length": 10752}
 {"pred": "Barton Distillery", "answers": ["fleur - de-lis", "Fleur-de-lis", "fleur-de-lis"], "all_classes": null, "length": 11472}
 {"pred": "Wenzhou, Zhejiang", "answers": ["Yongjia County"], "all_classes": null, "length": 11007}
@@ -160,11 +160,11 @@
 {"pred": "2 million", "answers": ["2 million"], "all_classes": null, "length": 11854}
 {"pred": "Linda Cardellini", "answers": ["Jennifer Connelly"], "all_classes": null, "length": 11579}
 {"pred": "Fulton", "answers": ["Presque Isle County"], "all_classes": null, "length": 10239}
-{"pred": "Jay-Z was inspired by three different relationships he had in the past when writing \"Song Cry\".", "answers": ["three different relationships he had in the past"], "all_classes": null, "length": 11684}
+{"pred": "Jay-Z was inspired by three different relationships he had in the past when writing Song Cry.", "answers": ["three different relationships he had in the past"], "all_classes": null, "length": 11684}
 {"pred": "Ada County", "answers": ["Canyon County", "Canyon County, Idaho"], "all_classes": null, "length": 10062}
 {"pred": "Christopher McDonald", "answers": ["Bill Pullman"], "all_classes": null, "length": 11800}
 {"pred": "The Dutch East Indies", "answers": ["Dutch East Indies"], "all_classes": null, "length": 9814}
-{"pred": "Niassa Province shares a border with the province of Tete.", "answers": ["Cabo Delgado Province"], "all_classes": null, "length": 7682}
+{"pred": "Niassa Province shares a border with the province where Lago District is located.", "answers": ["Cabo Delgado Province"], "all_classes": null, "length": 7682}
 {"pred": "Association for Computing Machinery", "answers": ["Association for Computing Machinery", "ACM"], "all_classes": null, "length": 10141}
 {"pred": "Falls County", "answers": ["Bell County"], "all_classes": null, "length": 10803}
 {"pred": "Nuevo Laredo", "answers": ["Tamaulipas"], "all_classes": null, "length": 11696}
@@ -175,9 +175,9 @@
 {"pred": "Billie Jean King Cup", "answers": ["International Tennis Federation", "ITF"], "all_classes": null, "length": 10556}
 {"pred": "Xanana Gusmão", "answers": ["Francisco Guterres"], "all_classes": null, "length": 10966}
 {"pred": "Colin Firth", "answers": ["Colin Firth"], "all_classes": null, "length": 12383}
-{"pred": "The River Thames.", "answers": ["River Thames"], "all_classes": null, "length": 11892}
+{"pred": "The River Thames", "answers": ["River Thames"], "all_classes": null, "length": 11892}
 {"pred": "Tony Award and a Drama Desk Award for Outstanding Revival of a Play.", "answers": ["Pulitzer Prize for Drama"], "all_classes": null, "length": 11779}
-{"pred": "The passage does not mention the designer of the Lap Engine. However, it mentions that the Lap Engine was designed by James Watt.", "answers": ["University of Glasgow"], "all_classes": null, "length": 11575}
+{"pred": "The passage does not mention the education of the designer of the Lap Engine.", "answers": ["University of Glasgow"], "all_classes": null, "length": 11575}
 {"pred": "Louis Chedid", "answers": ["Louis Chedid"], "all_classes": null, "length": 11057}
 {"pred": "There is no information about Roncalli and The Gozzi Altarpiece in the given passages.", "answers": ["for the conclave in Rome", "Rome", "Roma"], "all_classes": null, "length": 11253}
 {"pred": "Adam Smith", "answers": ["University of Cambridge", "Cambridge"], "all_classes": null, "length": 12461}
@@ -195,6 +195,6 @@
 {"pred": "1599", "answers": ["1572"], "all_classes": null, "length": 11047}
 {"pred": "Rostov", "answers": ["Yaroslavl Oblast"], "all_classes": null, "length": 10431}
 {"pred": "Qatari Stars League", "answers": ["Qatar Stars League"], "all_classes": null, "length": 12088}
-{"pred": "The Anglo-Saxon Heptarchy was not a kingdom that was abolished, but rather a period of time in Anglo-Saxon history when England was divided into seven", "answers": ["918"], "all_classes": null, "length": 10768}
+{"pred": "The Heptarchy was not a kingdom that was abolished. It was a period of Anglo-Saxon history in England, from the 5th to the ", "answers": ["918"], "all_classes": null, "length": 10768}
 {"pred": "$48,977", "answers": ["$59,039"], "all_classes": null, "length": 11541}
 {"pred": "Santa Clara County", "answers": ["Santa Clara County", "Santa Clara County, California"], "all_classes": null, "length": 11096}

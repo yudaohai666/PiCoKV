@@ -14,7 +14,7 @@
 {"pred": "number five", "answers": ["number five"], "all_classes": null, "length": 6961}
 {"pred": "The other areas that share a common deer species with the forests of Mara and Mondrem are the Forests of Macclesfield and Wirral, which were", "answers": ["New Zealand, Canada, the United States, the Falkland Islands, and Peru."], "all_classes": null, "length": 11852}
 {"pred": "2000", "answers": ["2000 Summer Olympic Games"], "all_classes": null, "length": 8651}
-{"pred": "Mario Kempes, Claudio López, and Mariano Campodónico were all retired Argentine footballers who played as forwards and were associated with Valencia CF.", "answers": ["Claudio Javier López"], "all_classes": null, "length": 4109}
+{"pred": "Mario Kempes, Claudio López, and Mariano Campodónico", "answers": ["Claudio Javier López"], "all_classes": null, "length": 4109}
 {"pred": "Ronald Reagan", "answers": ["George H. W. Bush"], "all_classes": null, "length": 12697}
 {"pred": "Talk That Talk", "answers": ["\"Talk That Talk\""], "all_classes": null, "length": 10290}
 {"pred": "The Traveling Wilburys", "answers": ["Bob Dylan"], "all_classes": null, "length": 11185}
@@ -57,7 +57,7 @@
 {"pred": "Mississippi State", "answers": ["Washington State"], "all_classes": null, "length": 10232}
 {"pred": "Floyd Casey Stadium", "answers": ["Floyd Casey Stadium"], "all_classes": null, "length": 11849}
 {"pred": "2010", "answers": ["2010"], "all_classes": null, "length": 11456}
-{"pred": "Gajabrishta is a style of vimana in temples, especially Shiva temples, in the North Tamil Nadu area, and it is named after the", "answers": ["Sanskrit"], "all_classes": null, "length": 8823}
+{"pred": "Gajabrishta is a style of vimana in temples, specifically Shiva temples, in the North Tamil Nadu area, and it is named after the", "answers": ["Sanskrit"], "all_classes": null, "length": 8823}
 {"pred": "British", "answers": ["English"], "all_classes": null, "length": 12372}
 {"pred": "Yes", "answers": ["yes"], "all_classes": null, "length": 3708}
 {"pred": "November 23, 2002", "answers": ["November"], "all_classes": null, "length": 10261}
@@ -116,7 +116,7 @@
 {"pred": "Filmmaker", "answers": ["director"], "all_classes": null, "length": 8556}
 {"pred": "Jeffersontown", "answers": ["Jeffersontown, Kentucky"], "all_classes": null, "length": 8571}
 {"pred": "John Musker, Ron Clements, Dave Michener, and Burny Mattinson", "answers": ["Burny Mattinson, David Michener, and the team of John Musker and Ron Clements"], "all_classes": null, "length": 11970}
-{"pred": "WAMC, the Albany, New York, affiliate of NPR.", "answers": ["WAMC"], "all_classes": null, "length": 8524}
+{"pred": "WAMC", "answers": ["WAMC"], "all_classes": null, "length": 8524}
 {"pred": "Bassendean", "answers": ["Bassendean"], "all_classes": null, "length": 11587}
 {"pred": "duck", "answers": ["duck"], "all_classes": null, "length": 2491}
 {"pred": "Cryptocoryne is a genus of aquatic plants, not a shrub.", "answers": ["Mimosa"], "all_classes": null, "length": 4266}
@@ -133,7 +133,7 @@
 {"pred": "French, physicist, and engineer.", "answers": ["French mathematician and physicist"], "all_classes": null, "length": 8995}
 {"pred": "Elvis' Christmas Album", "answers": ["Elvis' Christmas Album"], "all_classes": null, "length": 6337}
 {"pred": "Operation Iceberg", "answers": ["Operation Iceberg"], "all_classes": null, "length": 11365}
-{"pred": "Logar", "answers": ["Puli Alam"], "all_classes": null, "length": 7563}
+{"pred": "Logar Province", "answers": ["Puli Alam"], "all_classes": null, "length": 7563}
 {"pred": "Allan McNish", "answers": ["BBC Formula One"], "all_classes": null, "length": 4556}
 {"pred": "Plato", "answers": ["Plato"], "all_classes": null, "length": 12021}
 {"pred": "Donaghadee, Northern Ireland", "answers": ["Northern Ireland"], "all_classes": null, "length": 12338}
@@ -146,7 +146,7 @@
 {"pred": "Jane Eyre", "answers": ["\"Currer Bell\""], "all_classes": null, "length": 12082}
 {"pred": "No", "answers": ["no"], "all_classes": null, "length": 12023}
 {"pred": "2014", "answers": ["2011"], "all_classes": null, "length": 9364}
-{"pred": "Veneto region of Northern Italy.", "answers": ["the Veneto region of Northern Italy"], "all_classes": null, "length": 7336}
+{"pred": "Veneto region of Northern Italy", "answers": ["the Veneto region of Northern Italy"], "all_classes": null, "length": 7336}
 {"pred": "Leeds United", "answers": ["1919"], "all_classes": null, "length": 11723}
 {"pred": "French forces.", "answers": ["French"], "all_classes": null, "length": 9898}
 {"pred": "The University of Vienna", "answers": ["University of Vienna"], "all_classes": null, "length": 10206}

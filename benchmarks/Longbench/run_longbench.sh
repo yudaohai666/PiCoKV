@@ -28,6 +28,12 @@ CONFIGS=(
   "256 256"
 )
 
+# quantpc scalar knobs (adjust here; override via env, e.g. LOG_EPS=-8.0).
+EXP_BITS="${EXP_BITS:-4}"
+EAS="${EAS:-0.01}"
+ZEROROPE="${ZEROROPE:-20}"
+LOG_EPS="${LOG_EPS:--10.0}"
+
 # quantpc offline block-32 encoders: USE_OFFLINE=1 skips the online QR at prefill
 # (default path offline_projection/{model}_k{K}_v{V}_block32.pt). OFFLINE_PROJ_PATH
 # overrides the path; OFFLINE_PROJ_MODE = both|key|value (default both).
@@ -77,7 +83,8 @@ for METHOD in "${METHODS[@]}"; do
       for cfg in "${CONFIGS[@]}"; do
         K=$(echo "$cfg" | awk '{print $1}'); V=$(echo "$cfg" | awk '{print $2}')
         run_lb quantpc "quantpc_k${K}_v${V}${OFFLINE_TAG}" \
-          --k-bits "${K}" --v-bits "${V}" --exp-bits 4 --eas 0.01 --zerorope 20 "${OFFLINE_ARGS[@]}"
+          --k-bits "${K}" --v-bits "${V}" --exp-bits "${EXP_BITS}" --eas "${EAS}" \
+          --zerorope "${ZEROROPE}" --log-eps "${LOG_EPS}" "${OFFLINE_ARGS[@]}"
       done
       ;;
     kivi)
