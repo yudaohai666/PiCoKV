@@ -49,8 +49,8 @@ run_one() {
 }
 
 # dense baseline
-# run_one flash_attention_2 flash_attention_2
-run_one sdpa sdpa
+run_one flash_attention_2 flash_attention_2
+# run_one sdpa sdpa
 
 
 # quantpc (CUDA backend quantpc.quanpc)

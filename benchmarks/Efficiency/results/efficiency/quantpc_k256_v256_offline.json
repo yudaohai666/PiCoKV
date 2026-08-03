@@ -16,9 +16,9 @@
   "results": {
     "131072": {
       "prompt_len": 131072,
-      "prefill_ms": 18673.127,
-      "decode_ms_per_token": 21.0802,
-      "decode_toks_per_s": 47.44,
+      "prefill_ms": 17813.04,
+      "decode_ms_per_token": 21.0897,
+      "decode_toks_per_s": 47.42,
       "prefill_peak_gb": null,
       "decode_peak_gb": null
     }

@@ -14,7 +14,7 @@ PROF_DIR="results/efficiency/prof"
 mkdir -p "${PROF_DIR}"
 
 # Profiling params (aligned with run_efficiency.py).
-LENGTH="${LENGTH:-32768}"   # prefill length
+LENGTH="${LENGTH:-131072}"   # prefill length
 WARMUP="${WARMUP:-2}"       # untimed decode steps before profiling (= --warmup)
 ACTIVE="${ACTIVE:-64}"      # profiled decode steps (= --decode-tokens)
 ROWS="${ROWS:-30}"          # key_averages table rows
@@ -23,7 +23,7 @@ ROWS="${ROWS:-30}"          # key_averages table rows
 METHOD="${METHOD:-quantpc}"
 
 # quantpc KV-cache params (aligned with run_efficiency.py defaults).
-K_BITS="${K_BITS:-256}"
+K_BITS="${K_BITS:-320}"
 V_BITS="${V_BITS:-256}"
 SINK="${SINK:-64}"
 LOCAL="${LOCAL:-1024}"

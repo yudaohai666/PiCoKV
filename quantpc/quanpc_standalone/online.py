@@ -16,12 +16,17 @@ from .constants import (
 
 @dataclass(frozen=True, slots=True)
 class OnlineQuantizedTensor:
-    """Binary codes, decoder projection, per-token residual error, and encoders."""
+    """Binary codes, decoder projection, per-token residual error, and encoders.
+
+    ``encoders`` is the learned direction stack, consumed only by the offline
+    projection generator (which always runs the online path).  It is ``None`` on
+    the offline path, where the caller already owns the fixed directions.
+    """
 
     codes: torch.Tensor
     decoder: torch.Tensor
     err: torch.Tensor
-    encoders: torch.Tensor
+    encoders: Optional[torch.Tensor]
 
 
 def _householder_qr(x: torch.Tensor) -> torch.Tensor:
@@ -193,7 +198,14 @@ def quantize_block32_online(
 
     codes = torch.empty(rows, length, bits, device=target.device, dtype=torch.int8)
     decoder = torch.empty(rows, bits, dim, device=target.device, dtype=target.dtype)
-    used_encoders = torch.empty(rows, bits, dim, device=target.device, dtype=target.dtype)
+    # The learned directions are only read by the offline-projection generator,
+    # which always takes the online path.  On the offline path they are the
+    # caller's own fixed input, so skip allocating and copying them back out.
+    used_encoders = (
+        None
+        if fixed_encoders is not None
+        else torch.empty(rows, bits, dim, device=target.device, dtype=target.dtype)
+    )
 
     for group_idx in range(groups):
         start = group_idx * ONLINE_GROUP_BITS
@@ -207,9 +219,9 @@ def quantize_block32_online(
             y = torch.matmul(sampled, q.to(dtype=ONLINE_MATMUL_DTYPE))
             q = torch.matmul(sampled.transpose(-1, -2), y)
             encoder = _householder_qr(q).transpose(-1, -2).contiguous()
+            used_encoders[:, start:end] = encoder.to(dtype=target.dtype)
         else:
             encoder = fixed_encoders[:, group_idx]
-        used_encoders[:, start:end] = encoder.to(dtype=target.dtype)
 
         # Quantize to strict {-1,+1}, fit this group's decoder, then subtract
         # its reconstruction before learning the next group.
@@ -248,7 +260,11 @@ def quantize_block32_online(
         codes=codes.reshape(batch, heads, length, bits).contiguous(),
         decoder=decoder.reshape(batch, heads, bits, dim).contiguous(),
         err=residual.float().norm(dim=-1).reshape(batch, heads, length).contiguous(),
-        encoders=used_encoders.reshape(batch, heads, bits, dim).contiguous(),
+        encoders=(
+            None
+            if used_encoders is None
+            else used_encoders.reshape(batch, heads, bits, dim).contiguous()
+        ),
     )
 
 

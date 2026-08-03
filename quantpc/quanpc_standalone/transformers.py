@@ -24,6 +24,11 @@ from .constants import ONLINE_GROUP_BITS
 from .decode import decode_attention
 from .prepare import prepare_kv_cache
 
+try:  # Match the flash_attention_2 baseline backend for a fair prefill comparison.
+    from flash_attn import flash_attn_func as _flash_attn_func
+except ImportError:  # pragma: no cover - falls back to SDPA when unavailable.
+    _flash_attn_func = None
+
 
 OFFLINE_ENCODER_FORMAT = "quanpc_standalone_block32_encoder_v1"
 
@@ -99,15 +104,38 @@ def _exact_prefill_attention(
     value: torch.Tensor,
     attention_mask: Optional[torch.Tensor],
 ) -> torch.Tensor:
-    """Run exact SDPA for prompt tokens, preserving an explicit caller mask."""
-    # Transformers' SDPA path normally passes None for an unpadded causal
-    # prompt.  Preserve an explicit mask when one is supplied.
+    """Run exact prompt attention.
+
+    Uses the ``flash_attn`` library (the same backend as the ``flash_attention_2``
+    baseline) whenever it is importable, so prefill is compared apples-to-apples.
+    SDPA is used only when ``flash_attn`` is unavailable, or when an explicit
+    additive ``attention_mask`` is supplied: ``flash_attn_func`` cannot consume an
+    arbitrary mask (a padded batch would need the varlen API), so SDPA is required
+    there for correctness.  Benchmarks use unpadded/equal-length prompts, so the
+    mask is ``None`` and the flash path is the norm.
+    """
+    # q_len == k_len here (both come from the same prompt), so the causal mask is
+    # unambiguous and query.shape[-2] > 1 marks a genuine multi-token prompt.
+    causal = attention_mask is None and query.shape[-2] > 1
+    if _flash_attn_func is not None and attention_mask is None:
+        # flash_attn_func wants (B, S, H, D); our (B, H, S, D) inputs are views of
+        # the contiguous projection layout, so transpose(1, 2) recovers it with no
+        # copy.  GQA (num_q_heads != num_kv_heads) is handled natively.
+        output = _flash_attn_func(
+            query.transpose(1, 2),
+            key.transpose(1, 2),
+            value.transpose(1, 2),
+            causal=causal,
+        )
+        # Back to (B, H, S, D) to keep the caller's transpose(1, 2) contract.
+        return output.transpose(1, 2)
+    # SDPA fallback: no flash_attn, or an explicit mask that flash cannot represent.
     return torch.nn.functional.scaled_dot_product_attention(
         query,
         key,
         value,
         attn_mask=attention_mask,
-        is_causal=attention_mask is None and query.shape[-2] > 1,
+        is_causal=causal,
         enable_gqa=True,
     )
 
