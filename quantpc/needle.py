@@ -27,13 +27,17 @@ class LLMNeedleHaystackTester:
     def __init__(self,
                  model_to_test: ModelProvider = None,
                  needle = "\nThe best thing to do in San Francisco is eat a sandwich and sit in Dolores Park on a sunny day.\n",
-                 haystack_dir = "./PaulGrahamEssays",
+                 haystack_dir = None,
                  retrieval_question = "What is the best thing to do in San Francisco?",
                  final_context_length_buffer = 200
                  ):
         
         self.needle = needle
-        self.haystack_dir = haystack_dir
+        # Resolve against this file, not the caller's cwd: a missing haystack
+        # used to leave read_context_files spinning forever on an empty string.
+        self.haystack_dir = haystack_dir or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "PaulGrahamEssays"
+        )
         self.retrieval_question = retrieval_question
         self.final_context_length_buffer = final_context_length_buffer
         self.model_to_test = model_to_test
@@ -91,9 +95,19 @@ class LLMNeedleHaystackTester:
         return len(self.model_to_test.encode_text_to_tokens(context))
 
     def read_context_files(self, context_length):
+        # Deliberately NOT sorted: benchmarks/Needle/needle.py -- the entry point
+        # every published number came from -- iterates raw glob order, and the
+        # concatenation order decides the haystack, so sorting would silently
+        # produce a different benchmark.
+        files = glob.glob(os.path.join(self.haystack_dir, "*.txt"))
+        if not files:
+            raise FileNotFoundError(
+                f"no *.txt haystack files under {self.haystack_dir!r}; "
+                "without them this loop can never reach the target length"
+            )
         context = ""
         while self.get_context_length_in_tokens(context) < context_length:
-            for file in glob.glob(os.path.join(self.haystack_dir, "*.txt")):
+            for file in files:
                 with open(file, 'r') as f:
                     context += f.read()
         return context

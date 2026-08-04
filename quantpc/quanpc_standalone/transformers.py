@@ -23,9 +23,24 @@ from .config import StandaloneConfig
 from .constants import ONLINE_GROUP_BITS
 from .decode import decode_attention
 from .prepare import prepare_kv_cache
+from .whiten import (
+    LayerWhitening,
+    find_orth_proj,
+    value_whitening_source,
+    whiten_states,
+)
 
 
 OFFLINE_ENCODER_FORMAT = "quanpc_standalone_block32_encoder_v1"
+OFFLINE_DECODER_FORMAT = "quanpc_standalone_block32_encoder_decoder_v1"
+# Encoders and decoders with the whitening already folded in (``E W`` and
+# ``D W^-1``).  Same shapes and same runtime path as the pair above -- the point
+# of folding is that nothing downstream can tell the difference, so K is never
+# rotated at prefill and ``key_projection_t`` is ``W^-1 D^T`` for free.  It needs
+# its own tag only so a folded file cannot be combined with runtime whitening,
+# which would rotate states whose basis is already accounted for.
+OFFLINE_FOLDED_FORMAT = "quanpc_standalone_block32_folded_v1"
+_FORMATS_WITH_DECODER = (OFFLINE_DECODER_FORMAT, OFFLINE_FOLDED_FORMAT)
 
 
 def load_offline_projections(path: str) -> dict:
@@ -40,11 +55,25 @@ def load_offline_projections(path: str) -> dict:
         raise ValueError("offline projection file must be a dict containing 'key' and 'value'")
     meta = data.get("meta") or {}
     fmt = meta.get("format")
-    if fmt != OFFLINE_ENCODER_FORMAT:
+    if fmt not in (
+        OFFLINE_ENCODER_FORMAT,
+        OFFLINE_DECODER_FORMAT,
+        OFFLINE_FOLDED_FORMAT,
+    ):
         raise ValueError(
-            f"{path} has format {fmt!r}, but the standalone method requires "
-            f"{OFFLINE_ENCODER_FORMAT!r}."
+            f"{path} has format {fmt!r}, but the standalone method requires one of "
+            f"{OFFLINE_ENCODER_FORMAT!r}, {OFFLINE_DECODER_FORMAT!r}, "
+            f"{OFFLINE_FOLDED_FORMAT!r}."
         )
+    if fmt in _FORMATS_WITH_DECODER:
+        for kind in ("key_decoder", "value_decoder"):
+            if kind not in data:
+                raise ValueError(f"{path} claims {fmt!r} but is missing {kind!r}")
+            if data[kind].shape != data[kind.replace("_decoder", "")].shape:
+                raise ValueError(
+                    f"{path}: {kind} shape {tuple(data[kind].shape)} does not match "
+                    f"its encoder {tuple(data[kind.replace('_decoder', '')].shape)}"
+                )
     for kind in ("key", "value"):
         tensor = data[kind]
         if tensor.dim() != 4:
@@ -127,18 +156,31 @@ class StandaloneLlamaCache(Cache):
         *,
         key_encoders: Optional[torch.Tensor] = None,
         value_encoders: Optional[torch.Tensor] = None,
+        key_decoders: Optional[torch.Tensor] = None,
+        value_decoders: Optional[torch.Tensor] = None,
     ) -> None:
         """Create an empty per-layer cache with the supplied production config.
 
         Optional ``key_encoders``/``value_encoders`` are offline-projection stacks
         ``[num_layers, num_kv_heads, bits, head_dim]``; when given, prefill skips
         the online Householder QR. ``None`` keeps the pure-online path.
+
+        Supplying ``key_decoders``/``value_decoders`` as well skips the per-group
+        least-squares solve. They are only meaningful next to the encoders they
+        were fitted with, since the codes come from a residual chain both drive.
         """
+        if key_decoders is not None and key_encoders is None:
+            raise ValueError("key_decoders require key_encoders")
+        if value_decoders is not None and value_encoders is None:
+            raise ValueError("value_decoders require value_encoders")
         self.config = config or StandaloneConfig()
         self.layers: dict[int, PreparedKVCache] = {}
         self.key_encoders = key_encoders
         self.value_encoders = value_encoders
+        self.key_decoders = key_decoders
+        self.value_decoders = value_decoders
         self._pending_encoders: Optional[tuple] = None
+        self._pending_decoders: Optional[tuple] = None
         # Layers whose prompt is shorter than sink+local have no global segment
         # to compress; they keep full-precision K/V here and serve decode with
         # plain SDPA instead of the packed CUDA path.
@@ -146,6 +188,47 @@ class StandaloneLlamaCache(Cache):
         self.seq_lengths: dict[int, int] = {}
         self.decode_calls = 0
         self._prepare_events: dict[int, tuple[torch.cuda.Event, torch.cuda.Event]] = {}
+        # Per-layer whitening factors, fitted once during prefill and reused by
+        # every decode step.  Empty when config.whiten is False.
+        self._whitening: dict[int, LayerWhitening] = {}
+
+    def fit_whitening(
+        self,
+        layer_idx: int,
+        query_states: torch.Tensor,
+        output_weight: torch.Tensor,
+        kv_heads: int,
+        head_dim: int,
+    ) -> None:
+        """Fit this layer's K/V whitening from prompt queries and ``o_proj``."""
+        if not self.config.whiten:
+            return
+        if int(layer_idx) < int(self.config.whiten_min_layer):
+            return
+        batch = int(query_states.shape[0])
+        grouped_query = query_states.reshape(batch, kv_heads, -1, head_dim)
+        key_forward, key_inverse = find_orth_proj(grouped_query)
+        if self.config.whiten_key_only:
+            # Identity leaves V in the model's basis while K still rotates, so
+            # decode's un-whitening stays a single uniform code path.
+            eye = torch.eye(
+                head_dim, device=key_forward.device, dtype=key_forward.dtype
+            ).expand_as(key_forward).contiguous()
+            value_forward, value_inverse = eye, eye
+        else:
+            value_forward, value_inverse = find_orth_proj(
+                value_whitening_source(output_weight, kv_heads, head_dim)
+            )
+        self._whitening[int(layer_idx)] = LayerWhitening(
+            key=key_forward,
+            key_inverse=key_inverse,
+            value=value_forward,
+            value_inverse=value_inverse,
+        )
+
+    def whitening(self, layer_idx: int) -> Optional[LayerWhitening]:
+        """Return this layer's whitening factors, or ``None`` when disabled."""
+        return self._whitening.get(int(layer_idx))
 
     def get_seq_length(self, layer_idx: int = 0) -> int:
         """Return logical prompt-plus-generated length for one layer."""
@@ -161,11 +244,17 @@ class StandaloneLlamaCache(Cache):
             "StandaloneLlamaCache.update requires modify_llama_for_standalone(model)"
         )
 
-    def _prepare_kwargs(self) -> dict:
+    def _prepare_kwargs(self, layer_idx: int) -> dict:
         """Return kwargs for one ``prepare_kv_cache`` call, plus offline encoders."""
         kwargs = self.config.prepare_kwargs()
         if self._pending_encoders is not None:
             kwargs["key_encoders"], kwargs["value_encoders"] = self._pending_encoders
+        if self._pending_decoders is not None:
+            kwargs["key_decoders"], kwargs["value_decoders"] = self._pending_decoders
+        whitening = self.whitening(layer_idx)
+        if whitening is not None:
+            kwargs["key_whitening"] = whitening.key
+            kwargs["value_whitening"] = whitening.value
         return kwargs
 
     def prepare(
@@ -187,6 +276,12 @@ class StandaloneLlamaCache(Cache):
         # decode fall back to SDPA (the same math the dense windows use anyway).
         total_len = int(key_states.shape[-2])
         if total_len <= self.config.sink_size + self.config.local_size:
+            # Decode whitens its query, so this dense fallback has to hold
+            # whitened K/V as well or the two would live in different bases.
+            whitening = self.whitening(layer_idx)
+            if whitening is not None:
+                key_states = whiten_states(key_states, whitening.key)
+                value_states = whiten_states(value_states, whitening.value)
             self._dense_layers[layer_idx] = (
                 key_states.contiguous(),
                 value_states.contiguous(),
@@ -199,6 +294,10 @@ class StandaloneLlamaCache(Cache):
             _layer_encoders(self.key_encoders, layer_idx, heads),
             _layer_encoders(self.value_encoders, layer_idx, heads),
         )
+        self._pending_decoders = (
+            _layer_encoders(self.key_decoders, layer_idx, heads),
+            _layer_encoders(self.value_decoders, layer_idx, heads),
+        )
         stream = torch.cuda.current_stream(key_states.device)
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
@@ -207,10 +306,11 @@ class StandaloneLlamaCache(Cache):
             self.layers[layer_idx] = prepare_kv_cache(
                 key_states,
                 value_states,
-                **self._prepare_kwargs(),
+                **self._prepare_kwargs(layer_idx),
             )
         finally:
             self._pending_encoders = None
+            self._pending_decoders = None
         end.record(stream)
         self._prepare_events[layer_idx] = (start, end)
         self.seq_lengths[layer_idx] = int(key_states.shape[-2])
@@ -314,6 +414,15 @@ def modify_llama_for_standalone(model, *, mlp_chunk_size: int = 8192) -> None:
             query_length = int(query_states.shape[-2])
             if isinstance(past_key_value, StandaloneLlamaCache):
                 if query_length > 1:
+                    # Fit whitening from the prompt queries before the cache is
+                    # built; prepare_kv_cache applies it after zerorope.
+                    past_key_value.fit_whitening(
+                        self.layer_idx,
+                        query_states,
+                        self.o_proj.weight,
+                        int(key_states.shape[1]),
+                        self.head_dim,
+                    )
                     # Cache construction happens once per layer after RoPE;
                     # prompt output itself remains exact causal SDPA.
                     past_key_value.prepare(
@@ -321,6 +430,9 @@ def modify_llama_for_standalone(model, *, mlp_chunk_size: int = 8192) -> None:
                         key_states.contiguous(),
                         value_states.contiguous(),
                     )
+                    # Prefill attention is exact, and whitening is an exact
+                    # change of basis, so it stays in the model's own basis:
+                    # rotating here would only add a bf16 round trip.
                     attn_output = _exact_prefill_attention(
                         query_states,
                         key_states,
@@ -330,12 +442,35 @@ def modify_llama_for_standalone(model, *, mlp_chunk_size: int = 8192) -> None:
                 else:
                     # Generated K/V is included in the current attention call
                     # and appended to the retained dense cache for later calls.
+                    whitening = past_key_value.whitening(self.layer_idx)
+                    if whitening is not None:
+                        batch, kv_heads = key_states.shape[0], key_states.shape[1]
+                        head_dim = key_states.shape[-1]
+                        grouped_query = query_states.reshape(
+                            batch,
+                            kv_heads,
+                            -1,
+                            head_dim,
+                        )
+                        query_states = whiten_states(
+                            grouped_query,
+                            whitening.key_inverse,
+                        ).reshape(batch, -1, query_length, head_dim)
+                        key_states = whiten_states(key_states, whitening.key)
+                        value_states = whiten_states(value_states, whitening.value)
                     attn_output = past_key_value.decode(
                         self.layer_idx,
                         query_states.contiguous(),
                         key_states.contiguous(),
                         value_states.contiguous(),
                     )
+                    if whitening is not None:
+                        batch, head_dim = attn_output.shape[0], attn_output.shape[-1]
+                        kv_heads = key_states.shape[1]
+                        attn_output = whiten_states(
+                            attn_output.reshape(batch, kv_heads, -1, head_dim),
+                            whitening.value_inverse,
+                        ).reshape(batch, -1, query_length, head_dim)
             else:
                 attn_output = _exact_prefill_attention(
                     query_states,

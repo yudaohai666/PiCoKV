@@ -91,7 +91,7 @@ def _sample_residual(
     return residual.index_select(1, indices).contiguous(), indices
 
 
-def _prepare_fixed_encoders(
+def _prepare_fixed_block32(
     encoders: torch.Tensor,
     batch: int,
     heads: int,
@@ -100,12 +100,16 @@ def _prepare_fixed_encoders(
     device: torch.device,
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    """Normalize a stored ``[H,bits,D]``/``[B,H,bits,D]`` encoder to row-major."""
+    """Normalize a stored ``[H,bits,D]``/``[B,H,bits,D]`` encoder or decoder.
+
+    Encoders and decoders share this layout: both are ``bits`` rows of length
+    ``dim``, consumed one 32-row group at a time.
+    """
     if encoders.dim() == 3:
         encoders = encoders.unsqueeze(0).expand(batch, heads, bits, dim)
     if encoders.dim() != 4:
         raise ValueError(
-            f"encoders must be [H,bits,D] or [B,H,bits,D]; got {tuple(encoders.shape)}"
+            f"stored matrix must be [H,bits,D] or [B,H,bits,D]; got {tuple(encoders.shape)}"
         )
     if tuple(encoders.shape[1:]) != (heads, bits, dim):
         raise ValueError(
@@ -126,6 +130,7 @@ def quantize_block32_online(
     direction_sample_size: Optional[int] = 8192,
     seed: int = 0,
     encoders: Optional[torch.Tensor] = None,
+    decoders: Optional[torch.Tensor] = None,
 ) -> OnlineQuantizedTensor:
     """Learn block-32 directions and immediately quantize ``[B,H,L,D]`` states.
 
@@ -135,7 +140,12 @@ def quantize_block32_online(
 
     Passing ``encoders`` reuses stored directions instead of learning them
     (offline path): CholeskyQR init, covariance power iteration, and Householder
-    QR are skipped. The decoder is still solved from the current context.
+    QR are skipped.
+
+    Passing ``decoders`` additionally reuses a stored decoder, skipping the
+    per-group least-squares solve entirely. Stored decoders are only valid
+    alongside the encoders they were fitted with, because the residual chain
+    that produces the codes depends on both.
     """
     if target.dim() != 4:
         raise ValueError(f"target must be [B,H,L,D]; got {tuple(target.shape)}")
@@ -153,8 +163,17 @@ def quantize_block32_online(
     fixed_encoders = (
         None
         if encoders is None
-        else _prepare_fixed_encoders(
+        else _prepare_fixed_block32(
             encoders, batch, heads, bits, dim, target.device, target.dtype
+        )
+    )
+    if decoders is not None and fixed_encoders is None:
+        raise ValueError("decoders require the matching encoders to be supplied")
+    fixed_decoders = (
+        None
+        if decoders is None
+        else _prepare_fixed_block32(
+            decoders, batch, heads, bits, dim, target.device, target.dtype
         )
     )
     generator = torch.Generator(device=target.device)
@@ -219,7 +238,10 @@ def quantize_block32_online(
             encoder.to(dtype=ONLINE_MATMUL_DTYPE).transpose(-1, -2),
         )
         _strict_binary_sign_(group_codes_m)
-        group_decoder = _solve_decoder_from_matrices(group_codes_m, residual_m)
+        if fixed_decoders is None:
+            group_decoder = _solve_decoder_from_matrices(group_codes_m, residual_m)
+        else:
+            group_decoder = fixed_decoders[:, group_idx]
         decoder_m = group_decoder.to(dtype=ONLINE_MATMUL_DTYPE)
 
         torch.baddbmm(

@@ -66,6 +66,7 @@ class QuantPCModel:
         use_pruning: bool = True,
         prune_mode: int = 3,
         log_eps: float = -10.0,
+        whiten: bool = False,
         # KIVI params (--method kivi)
         group_size: int = 32,
         residual_length: int = 32,
@@ -95,6 +96,7 @@ class QuantPCModel:
             use_pruning=use_pruning,
             prune_mode=prune_mode,
             log_eps=log_eps,
+            whiten=whiten,
             offline_proj_path=offline_proj_path,
             offline_proj_mode=offline_proj_mode,
             # KIVI params (--method kivi)
@@ -238,6 +240,14 @@ def parse_args(argv=None):
                    help="disable decode-time global pruning (gqa4 CUDA path); pruning is on by default")
     p.add_argument("--prune-mode", type=int, default=3, help="decode pruning mode (CUDA v1_exp8 path)")
     p.add_argument("--log-eps", type=float, default=-10.0, help="decode pruning log-epsilon threshold")
+    p.add_argument("--limit", type=int, default=None,
+                   help="evaluate only the first N samples of each dataset")
+    p.add_argument("--datasets", default=None,
+                   help="comma-separated dataset subset (default: config file list)")
+    p.add_argument("--data-dir", default="/data/zxh/datasets/longbench/data",
+                   help="directory holding the unzipped LongBench *.jsonl files")
+    p.add_argument("--whiten", action="store_true",
+                   help="quantpc: rotate K/V into the query- and o_proj-whitened bases")
     p.set_defaults(use_pruning=True)
     # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
     p.add_argument("--group-size", type=int, default=32, help="KIVI per-group quant size; OScaR group size (INT2 必须=32)")
@@ -261,6 +271,8 @@ def main() -> None:
 
     model2maxlen = json.load(open(CONFIG_DIR / "model2maxlen.json"))
     datasets = json.load(open(CONFIG_DIR / "longbench_eval_subdatasets.json"))["datasets"]
+    if args.datasets:
+        datasets = [d for d in args.datasets.split(",") if d]
     dataset2prompt = json.load(open(CONFIG_DIR / "dataset2prompt.json"))
     dataset2maxlen = json.load(open(CONFIG_DIR / "dataset2maxlen.json"))
 
@@ -293,6 +305,7 @@ def main() -> None:
         use_pruning=args.use_pruning,
         prune_mode=args.prune_mode,
         log_eps=args.log_eps,
+        whiten=args.whiten,
         # KIVI params (--method kivi)
         group_size=args.group_size,
         residual_length=args.residual_length,
@@ -310,8 +323,17 @@ def main() -> None:
     for dataset in datasets:
         print("=" * 50)
         print(f"Evaluating dataset: {dataset}")
-        data = load_dataset("THUDM/LongBench", dataset, split="test",trust_remote_code=True,)
-        data_all = [x for x in data]
+        # datasets>=4 dropped script-based loaders, so the official LongBench
+        # loader no longer works. Read the same jsonl the release ships instead.
+        local_jsonl = Path(args.data_dir) / f"{dataset}.jsonl"
+        if not local_jsonl.exists():
+            raise FileNotFoundError(
+                f"{local_jsonl} missing; unzip THUDM/LongBench data.zip into --data-dir"
+            )
+        with open(local_jsonl, encoding="utf-8") as handle:
+            data_all = [json.loads(line) for line in handle if line.strip()]
+        if args.limit:
+            data_all = data_all[: int(args.limit)]
         out_path = str(save_path / f"{dataset}.jsonl")
         run_dataset(
             model, dataset, data_all,

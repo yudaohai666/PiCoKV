@@ -64,6 +64,10 @@ current_states = None
 target_collect_layers = ()
 sink_size = DEFAULT_SINK_SIZE
 local_size = DEFAULT_LOCAL_SIZE
+# Keep every Nth collected token.  Projection learning already subsamples rows
+# evenly (``_subsample_rows``), so striding at collect time costs no fit quality
+# while cutting shard bytes -- and therefore collect passes -- proportionally.
+collect_stride = 1
 
 
 class StopForwardAfterCollect(Exception):
@@ -78,7 +82,7 @@ def load_jsonl_texts(path):
                 obj = json.loads(line)
             except Exception:
                 continue
-            for field in ("text", "content", "prompt"):
+            for field in ("text", "content", "prompt", "context"):
                 if field in obj:
                     texts.append(obj[field])
                     break
@@ -253,10 +257,51 @@ def collect_kv(layer_idx, key_states, value_states):
     end = key_states.shape[2] - local_size
     if end <= sink_size:
         return
-    current_states[layer_idx]["key"] = key_states[0, :, sink_size:end, :].detach().to("cpu", dtype=torch.bfloat16)
-    current_states[layer_idx]["value"] = value_states[0, :, sink_size:end, :].detach().to("cpu", dtype=torch.bfloat16)
+    stride = max(1, int(collect_stride))
+    # collect_query must have run for this layer already: collect_kv is what
+    # raises StopForwardAfterCollect, and the query Gram rides in the same shard.
+    current_states[layer_idx]["key"] = key_states[0, :, sink_size:end:stride, :].detach().to("cpu", dtype=torch.bfloat16)
+    current_states[layer_idx]["value"] = value_states[0, :, sink_size:end:stride, :].detach().to("cpu", dtype=torch.bfloat16)
     if layer_idx == target_collect_layers[-1]:
         raise StopForwardAfterCollect()
+
+
+# Whitening needs (Q^T Q)^{1/2} and nothing else, so unlike K/V the query never
+# has to reach disk in full: a [kv_heads, D, D] Gram rides along inside each
+# sample shard and the whitening stage just sums them.  Off by default, so the
+# encoder-only pipeline behaves exactly as before.
+collect_query_grams = False
+
+
+def set_collect_query_grams(enabled):
+    global collect_query_grams
+    collect_query_grams = bool(enabled)
+
+
+def set_collect_stride(stride):
+    """Rows kept per token position.
+
+    Block-32 learning already subsamples evenly (``_subsample_rows``), so
+    striding here costs no fit quality while cutting shard bytes -- and the
+    per-head shard re-reads during fitting -- proportionally.
+    """
+    global collect_stride
+    collect_stride = max(1, int(stride))
+
+
+def collect_query(layer_idx, query_states, num_kv_heads, chunk=8192):
+    """Accumulate this sample's per-KV-head query Gram in float64."""
+    if not collect_query_grams or layer_idx not in target_collect_layers:
+        return
+    grouped = query_states.reshape(
+        query_states.shape[0], num_kv_heads, -1, query_states.shape[-1]
+    )[0]
+    gram = None
+    for start in range(0, grouped.shape[-2], chunk):
+        block = grouped[:, start:start + chunk].double()
+        part = torch.matmul(block.transpose(-1, -2), block)
+        gram = part if gram is None else gram + part
+    current_states[layer_idx]["query_gram"] = gram.detach().to("cpu")
 
 
 def modified_mlp_forward(self, x, chunk_size=8192):
@@ -296,6 +341,7 @@ def modify_for_collect(model):
             value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
             cos, sin = position_embeddings
             query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+            collect_query(self.layer_idx, query_states, key_states.shape[1])
             collect_kv(self.layer_idx, key_states, value_states)
             attn_output = eager_attention_forward(query_states, key_states, value_states)
             attn_output = attn_output.transpose(1, 2).contiguous()

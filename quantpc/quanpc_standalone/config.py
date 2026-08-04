@@ -25,6 +25,17 @@ class StandaloneConfig:
     exp_bits: int = 4
     seed: int = 0
 
+    # Rotate K/V into the query- and o_proj-whitened bases before quantizing.
+    # Exact for an unquantized run; it only redistributes quantization error.
+    whiten: bool = False
+    # Layers below this keep their own basis. Per-layer error measurements show
+    # K-whitening cutting score error 35-43% from layer 11 up while *raising* it
+    # at layers 0-7, so whitening everything nets out to zero on task metrics.
+    whiten_min_layer: int = 0
+    # Whiten K only. Value whitening is fitted on o_proj, which is already
+    # well-conditioned: measured post-o_proj error moves by +-2%, i.e. nothing.
+    whiten_key_only: bool = False
+
     # Per-token CUDA decode.
     use_pruning: bool = True
     prune_mode: int = 3

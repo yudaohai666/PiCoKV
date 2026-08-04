@@ -17,6 +17,16 @@ dist/
 *.pth
 *.safetensors
 
+# Offline block-32 projections are the exception: they are the method's shipped
+# artifact rather than a local build product, so a run has to be reproducible
+# from the repo alone. Scratch fits are still excluded -- a partially fitted
+# file has the right shape and zeros where heads never ran, so it fails
+# silently rather than loudly if it ever reaches a benchmark.
+!offline_projection/projections/*.pt
+offline_projection/projections/smoke_*.pt
+offline_projection/projections/*_plain.pt
+offline_projection/projections/*.progress.pt
+
 # Generated run logs.
 *.log
 

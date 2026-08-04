@@ -181,6 +181,15 @@ def main(args):
         'magicpig': 'MagicPIG',
         'bpc': 'BinaryPC',
         'bpc_offline': 'BinaryPC w/ OPC',
+        'k320online': 'QuanPC k320/v256 (online)',
+        'k320offdec': 'QuanPC k320/v256 (offline decoder)',
+        # All three projections offline -- whitening, encoder, decoder -- with
+        # W^-1 D^T folded into one stored matrix; plus the local-window ablation.
+        'k320folded': 'QuanPC k320/v256 (all-offline, folded W)',
+        'k320foldedlocal256': 'QuanPC k320/v256 (all-offline, local 256)',
+        'k320onlinelocal256': 'QuanPC k320/v256 (online, local 256)',
+        'k256online': 'QuanPC k256/v256 (online)',
+        'k256offdec': 'QuanPC k256/v256 (offline decoder)',
     }
 
     # Match method names with budget suffix, e.g. snapkv-2048

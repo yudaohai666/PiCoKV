@@ -265,8 +265,10 @@ def _load_quantpc_model(
     use_pruning: bool,
     prune_mode: int,
     log_eps: float,
+    whiten: bool = False,
     offline_proj_path: Optional[str] = None,
     offline_proj_mode: str = "both",
+    offline_decoder: bool = False,
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
     """Load a HF model patched with the quanpc_standalone online-projection path.
 
@@ -299,9 +301,11 @@ def _load_quantpc_model(
         use_pruning=use_pruning,
         prune_mode=prune_mode,
         log_eps=log_eps,
+        whiten=whiten,
     )
 
     key_encoders = value_encoders = None
+    key_decoders = value_decoders = None
     if offline_proj_path is not None:
         if offline_proj_mode not in ("both", "key", "value"):
             raise ValueError(f"offline_proj_mode must be 'both', 'key' or 'value'; got {offline_proj_mode!r}")
@@ -310,6 +314,18 @@ def _load_quantpc_model(
             key_encoders = _projs["key"]
         if offline_proj_mode in ("both", "value"):
             value_encoders = _projs["value"]
+        # A decoder file also carries encoders, so `offline_decoder` only
+        # controls whether the stored decoder is used on top of them.
+        if offline_decoder:
+            if "key_decoder" not in _projs:
+                raise ValueError(
+                    f"{offline_proj_path} stores encoders only; rebuild it with "
+                    "offline_projection/create_offline_decoder.py to use --offline-decoder"
+                )
+            if offline_proj_mode in ("both", "key"):
+                key_decoders = _projs["key_decoder"]
+            if offline_proj_mode in ("both", "value"):
+                value_decoders = _projs["value_decoder"]
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     device_map = _auto_device_map()
@@ -328,6 +344,8 @@ def _load_quantpc_model(
             standalone_config,
             key_encoders=key_encoders,
             value_encoders=value_encoders,
+            key_decoders=key_decoders,
+            value_decoders=value_decoders,
         )
 
     return model, tokenizer, make_cache
@@ -371,6 +389,7 @@ def load_model(
     use_pruning: bool = True,
     prune_mode: int = 3,
     log_eps: float = -10.0,
+    whiten: bool = False,
     group_size: int = 32,
     residual_length: int = 32,
     num_bits: int = 4,
@@ -381,6 +400,7 @@ def load_model(
     offline_v_hadamard: bool = False,
     offline_proj_path: Optional[str] = None,
     offline_proj_mode: str = "both",
+    offline_decoder: bool = False,
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
     """Load a HF model+tokenizer and return ``(model, tokenizer, make_cache)``.
 
@@ -434,8 +454,10 @@ def load_model(
             use_pruning=use_pruning,
             prune_mode=prune_mode,
             log_eps=log_eps,
+            whiten=whiten,
             offline_proj_path=offline_proj_path,
             offline_proj_mode=offline_proj_mode,
+            offline_decoder=offline_decoder,
         )
 
     if method not in BASELINE_ATTN:
