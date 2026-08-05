@@ -60,7 +60,7 @@ def resolve_offline_proj_path(
     if not Path(path).exists():
         raise FileNotFoundError(
             f"offline projection not found: {path}. Generate it with "
-            f"offline_projection/create_offline_projection.py, or pass --offline-proj-path."
+            f"offline_projection/create_offline_projections.py, or pass --offline-proj-path."
         )
     return path
 
@@ -320,7 +320,7 @@ def _load_quantpc_model(
             if "key_decoder" not in _projs:
                 raise ValueError(
                     f"{offline_proj_path} stores encoders only; rebuild it with "
-                    "offline_projection/create_offline_decoder.py to use --offline-decoder"
+                    "offline_projection/create_offline_projections.py to use --offline-decoder"
                 )
             if offline_proj_mode in ("both", "key"):
                 key_decoders = _projs["key_decoder"]

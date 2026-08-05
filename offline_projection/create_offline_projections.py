@@ -5,8 +5,8 @@ the encoder must be learned on ``K W``; the decoder must be fitted against the
 codes that encoder produces in that same basis.  Splitting them across scripts
 means three calibration passes and three chances to disagree about which W the
 encoder was fitted against -- the failure already latent in this tree, where
-``create_offline_projection.py`` writes ``meta["whitened"] = False`` and nothing
-ever reads it.  So: one pass, one artifact, one meta block.
+the encoder-only script wrote ``meta["whitened"] = False`` and nothing ever read
+it.  So: one pass, one artifact, one meta block.
 
 What ships is the *folded* pair.  Writing the block-32 chain in the whitened
 basis (``R_g = R'_g W``) and rewriting it in the model basis gives
@@ -47,7 +47,7 @@ if str(ROOT) not in sys.path:
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
 
-from create_offline_projection import (  # noqa: E402
+from collect import (  # noqa: E402
     DEFAULT_BLOCK32_LEARN_TOKENS,
     DEFAULT_DATASET_DIR,
     DEFAULT_LOCAL_SIZE,
@@ -74,17 +74,14 @@ from create_offline_projection import (  # noqa: E402
     set_collect_query_grams,
     set_collect_stride,
 )
-from create_offline_decoder import (  # noqa: E402
-    DEFAULT_DECODER_ITERS,
-    chain_codes,
-    joint_solve,
-    reconstruction_error,
-)
 from quantpc.quanpc_standalone.constants import (  # noqa: E402
     ONLINE_DECODER_RIDGE,
     ONLINE_GROUP_BITS,
 )
-from quantpc.quanpc_standalone.online import quantize_block32_online  # noqa: E402
+from quantpc.quanpc_standalone.online import (  # noqa: E402
+    _strict_binary_sign_,
+    quantize_block32_online,
+)
 from transformers import AutoModelForCausalLM  # noqa: E402
 
 FOLDED_FORMAT = "quanpc_standalone_block32_folded_v1"
@@ -97,6 +94,42 @@ DEFAULT_V_BITS = 256
 # safety net is gone, and inverting a 1e6-condition Gram exactly is what makes
 # whitening lose on layer 0.  Here it is explicit and tunable.
 DEFAULT_WHITEN_RIDGE = 1e-3
+DEFAULT_DECODER_ITERS = 5
+
+
+def chain_codes(states, encoders, decoders):
+    """Replay the production residual chain with fixed encoders and decoders.
+
+    ``states`` is ``[rows, length, dim]``; the returned codes are ``[rows,
+    length, bits]`` in the same group order the cache stores them.
+    """
+    residual = states.clone()
+    collected = []
+    for start in range(0, encoders.shape[-2], ONLINE_GROUP_BITS):
+        end = start + ONLINE_GROUP_BITS
+        codes = torch.matmul(residual, encoders[:, start:end].transpose(-1, -2))
+        _strict_binary_sign_(codes)
+        collected.append(codes)
+        residual -= torch.matmul(codes, decoders[:, start:end])
+    return torch.cat(collected, dim=-1)
+
+
+def joint_solve(codes, states):
+    """Ridge-regularized ``argmin_D ||states - codes @ D||_F``."""
+    length = codes.shape[-2]
+    gram = torch.matmul(codes.transpose(-1, -2).float(), codes.float()) / length
+    rhs = torch.matmul(codes.transpose(-1, -2).float(), states.float()) / length
+    gram.diagonal(dim1=-2, dim2=-1).add_(ONLINE_DECODER_RIDGE)
+    solution, _ = torch.linalg.solve_ex(gram, rhs, check_errors=False)
+    return solution.to(states.dtype)
+
+
+def reconstruction_error(states, encoders, decoders):
+    """Relative Frobenius error of the fixed-decoder chain on ``states``."""
+    codes = chain_codes(states, encoders, decoders)
+    approx = torch.matmul(codes, decoders)
+    return float((approx.float() - states.float()).norm() / states.float().norm())
+
 
 
 def whitening_from_gram(gram, ridge):
@@ -122,7 +155,7 @@ def whitening_from_gram(gram, ridge):
 def load_layer_states(shard_paths, device):
     """Read every shard once and return ``{kind: [heads, rows, dim]}`` plus the Gram.
 
-    ``load_head_from_layer_shards`` re-reads the whole layer for each head, so
+    Reading a head at a time would re-read the whole layer for each head, so
     fitting one layer costs sixteen full passes over ~5GB of shards.  Reading
     once and keeping the layer in host memory turns that into one pass; a layer
     is a few GB and the fit machine has hundreds.
@@ -136,7 +169,7 @@ def load_layer_states(shard_paths, device):
         if sample_gram is None:
             raise RuntimeError(
                 f"{shard_path} has no query_gram; re-run collect with this script "
-                "(create_offline_projection.py alone does not store it)"
+                "(collect.py only stores it when set_collect_query_grams is on)"
             )
         sample_gram = sample_gram.to(device=device, dtype=torch.float64)
         gram = sample_gram if gram is None else gram + sample_gram
@@ -257,8 +290,8 @@ def load_state(args, num_layers, num_kv_heads, head_dim, k_bits, v_bits,
     empty = {
         "key_encoder": torch.zeros(shapes["key_encoder"], dtype=torch.bfloat16),
         "value_encoder": torch.zeros(shapes["value_encoder"], dtype=torch.bfloat16),
-        "key_decoder": torch.zeros(shapes["key"], dtype=torch.bfloat16),
-        "value_decoder": torch.zeros(shapes["value"], dtype=torch.bfloat16),
+        "key_decoder": torch.zeros(shapes["key_encoder"], dtype=torch.bfloat16),
+        "value_decoder": torch.zeros(shapes["value_encoder"], dtype=torch.bfloat16),
         "key_whitening": torch.zeros(
             num_layers, num_kv_heads, head_dim, head_dim, dtype=torch.float32
         ),
@@ -491,7 +524,9 @@ def main():
     parser.add_argument("--verbose_fit", action="store_true")
     args = parser.parse_args()
 
-    import create_offline_projection as collector
+    # The collector reads sink/local off its own module globals: the attention
+    # hook it installs has no argument channel.
+    import collect as collector
 
     collector.sink_size = int(args.sink_size)
     collector.local_size = int(args.local_size)
