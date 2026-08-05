@@ -188,6 +188,9 @@ def main(args):
         'k320folded': 'QuanPC k320/v256 (all-offline, folded W)',
         'k320foldedlocal256': 'QuanPC k320/v256 (all-offline, local 256)',
         'k320onlinelocal256': 'QuanPC k320/v256 (online, local 256)',
+        'k256folded': 'QuanPC k256/v256 (all-offline, folded W)',
+        'k256onlinewhiten': 'QuanPC k256/v256 (online + whitening)',
+        'k320onlinewhiten': 'QuanPC k320/v256 (online + whitening)',
         'k256online': 'QuanPC k256/v256 (online)',
         'k256offdec': 'QuanPC k256/v256 (offline decoder)',
     }
