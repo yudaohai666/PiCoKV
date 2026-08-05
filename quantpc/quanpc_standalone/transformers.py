@@ -44,15 +44,26 @@ _FORMATS_WITH_DECODER = (OFFLINE_DECODER_FORMAT, OFFLINE_FOLDED_FORMAT)
 
 
 def load_offline_projections(path: str) -> dict:
-    """Load stored block-32 encoders as ``{"key": ..., "value": ..., "meta": ...}``.
+    """Load stored block-32 matrices, keyed ``key_encoder`` / ``key_decoder`` …
 
-    ``key``/``value`` are ``[num_layers, num_kv_heads, bits, head_dim]`` stacks of
-    orthonormal scoring directions produced offline.  The format tag guards
-    against loading incompatible (e.g. greedy-era) files that share the shape.
+    Each entry is a ``[num_layers, num_kv_heads, bits, head_dim]`` stack.  The
+    format tag guards against loading incompatible (e.g. greedy-era) files that
+    share the shape.
+
+    Files written before the encoder fields were named store them under plain
+    ``key``/``value``, which read as "the projection" back when a decoder did not
+    exist.  Those are aliased on load so callers only ever see the explicit
+    names.
     """
     data = torch.load(path, map_location="cpu")
-    if not isinstance(data, dict) or "key" not in data or "value" not in data:
-        raise ValueError("offline projection file must be a dict containing 'key' and 'value'")
+    for side in ("key", "value"):
+        if f"{side}_encoder" not in data and side in data:
+            data[f"{side}_encoder"] = data.pop(side)
+    if not isinstance(data, dict) or "key_encoder" not in data or "value_encoder" not in data:
+        raise ValueError(
+            "offline projection file must be a dict containing "
+            "'key_encoder' and 'value_encoder'"
+        )
     meta = data.get("meta") or {}
     fmt = meta.get("format")
     if fmt not in (
@@ -67,14 +78,15 @@ def load_offline_projections(path: str) -> dict:
         )
     if fmt in _FORMATS_WITH_DECODER:
         for kind in ("key_decoder", "value_decoder"):
+            encoder = kind.replace("_decoder", "_encoder")
             if kind not in data:
                 raise ValueError(f"{path} claims {fmt!r} but is missing {kind!r}")
-            if data[kind].shape != data[kind.replace("_decoder", "")].shape:
+            if data[kind].shape != data[encoder].shape:
                 raise ValueError(
                     f"{path}: {kind} shape {tuple(data[kind].shape)} does not match "
-                    f"its encoder {tuple(data[kind.replace('_decoder', '')].shape)}"
+                    f"its encoder {tuple(data[encoder].shape)}"
                 )
-    for kind in ("key", "value"):
+    for kind in ("key_encoder", "value_encoder"):
         tensor = data[kind]
         if tensor.dim() != 4:
             raise ValueError(

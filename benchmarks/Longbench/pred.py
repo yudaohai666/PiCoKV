@@ -1,6 +1,6 @@
 """LongBench runner for the QuanPC quantized KV-cache algorithm.
 
-Adapted from ``benchmarks/Needle/run_bin_v4.py``: loads a HuggingFace model
+Adapted from ``benchmarks/Needle/run_bin.py``: loads a HuggingFace model
 directly and injects a fresh ``QuantKVCache`` per request (``quantpc`` method),
 or runs a dense full-precision baseline attn implementation
 (``flash_attention_2`` / ``sdpa`` / ``eager``).

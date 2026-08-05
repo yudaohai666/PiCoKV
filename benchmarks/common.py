@@ -311,9 +311,9 @@ def _load_quantpc_model(
             raise ValueError(f"offline_proj_mode must be 'both', 'key' or 'value'; got {offline_proj_mode!r}")
         _projs = load_offline_projections(offline_proj_path)
         if offline_proj_mode in ("both", "key"):
-            key_encoders = _projs["key"]
+            key_encoders = _projs["key_encoder"]
         if offline_proj_mode in ("both", "value"):
-            value_encoders = _projs["value"]
+            value_encoders = _projs["value_encoder"]
         # A decoder file also carries encoders, so `offline_decoder` only
         # controls whether the stored decoder is used on top of them.
         if offline_decoder:

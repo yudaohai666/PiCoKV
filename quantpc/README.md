@@ -128,7 +128,7 @@ Run from the repository root with the environment configured as above:
 ```bash
 python quantpc/test_quanpc_standalone_online.py
 
-cd quantpc && python run_standalone_niah.py \
-  --lengths 64000,110000 \
-  --direction-sample-size 8192
+python benchmarks/Needle/run_bin.py --method quantpc \
+  --k-bits 320 --v-bits 256 --local-size 256 --zerorope 20 \
+  --lengths 64000,110000 --depths 50
 ```

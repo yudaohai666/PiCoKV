@@ -6,7 +6,7 @@
 # rotates Q, and key_projection_t is W^-1 D^T.
 #
 # Consume it with:
-#   run_standalone_niah.py --offline-proj-path <file> --offline-decoder
+#   benchmarks/Needle/run_bin.py --offline-proj-path <file> --offline-decoder
 # and *without* --whiten (the loader guard rejects that combination).
 #
 # Override any tunable via env, e.g. WHITEN_RIDGE=1e-2 bash create_offline_projections.sh

@@ -227,7 +227,10 @@ def folded_meta(args, k_bits, v_bits, zerorope, whiten_layers):
         "sink_size": args.sink_size,
         "local_size": args.local_size,
         "decoder_iters": args.decoder_iters,
-        "whitened": True,
+        # Must follow --whiten_layers: with `none` every layer ships W = I, so
+        # the stored pair is the plain encoder/decoder and the runtime guard
+        # against double-rotating must not fire on it.
+        "whitened": bool(whiten_layers),
         "whiten_key_only": True,
         "whiten_ridge": args.whiten_ridge,
         "whiten_layers": sorted(whiten_layers),
@@ -248,12 +251,12 @@ def folded_meta(args, k_bits, v_bits, zerorope, whiten_layers):
 def load_state(args, num_layers, num_kv_heads, head_dim, k_bits, v_bits,
                zerorope, whiten_layers):
     shapes = {
-        "key": (num_layers, num_kv_heads, k_bits, head_dim),
-        "value": (num_layers, num_kv_heads, v_bits, head_dim),
+        "key_encoder": (num_layers, num_kv_heads, k_bits, head_dim),
+        "value_encoder": (num_layers, num_kv_heads, v_bits, head_dim),
     }
     empty = {
-        "key": torch.zeros(shapes["key"], dtype=torch.bfloat16),
-        "value": torch.zeros(shapes["value"], dtype=torch.bfloat16),
+        "key_encoder": torch.zeros(shapes["key_encoder"], dtype=torch.bfloat16),
+        "value_encoder": torch.zeros(shapes["value_encoder"], dtype=torch.bfloat16),
         "key_decoder": torch.zeros(shapes["key"], dtype=torch.bfloat16),
         "value_decoder": torch.zeros(shapes["value"], dtype=torch.bfloat16),
         "key_whitening": torch.zeros(
@@ -269,8 +272,8 @@ def load_state(args, num_layers, num_kv_heads, head_dim, k_bits, v_bits,
         return empty, progress
 
     stored = torch.load(args.output_path, map_location="cpu")
-    for field in ("key", "value", "key_decoder", "value_decoder"):
-        expected = shapes[field.replace("_decoder", "")]
+    for field in ("key_encoder", "value_encoder", "key_decoder", "value_decoder"):
+        expected = shapes[field.replace("_decoder", "_encoder")]
         if field not in stored or tuple(stored[field].shape) != expected:
             print(f"existing {args.output_path} incompatible; starting over", flush=True)
             return empty, progress
@@ -292,8 +295,8 @@ def load_state(args, num_layers, num_kv_heads, head_dim, k_bits, v_bits,
 def save_state(args, state, progress):
     save_pt(
         {
-            "key": state["key"],
-            "value": state["value"],
+            "key_encoder": state["key_encoder"],
+            "value_encoder": state["value_encoder"],
             "key_decoder": state["key_decoder"],
             "value_decoder": state["value_decoder"],
             "key_whitening": state["key_whitening"],
@@ -320,7 +323,7 @@ def fit_layer(args, state, progress, layer_idx, sample_count, device,
               f"ridge={args.whiten_ridge}", flush=True)
         state["key_whitening"][layer_idx] = forward.float().cpu()
     else:
-        eye = torch.eye(state["key"].shape[-1], device=device, dtype=torch.float64)
+        eye = torch.eye(state["key_encoder"].shape[-1], device=device, dtype=torch.float64)
         forward = eye.unsqueeze(0).expand(num_heads, -1, -1).contiguous()
         inverse = forward.clone()
         state["key_whitening"][layer_idx] = forward.float().cpu()
@@ -328,8 +331,8 @@ def fit_layer(args, state, progress, layer_idx, sample_count, device,
 
     for head_idx in tqdm(range(num_heads), desc=f"layer {layer_idx} heads"):
         for kind, bits, rope, done_key, enc_field, dec_field in (
-            ("key", k_bits, zerorope, "key_done", "key", "key_decoder"),
-            ("value", v_bits, 0, "value_done", "value", "value_decoder"),
+            ("key", k_bits, zerorope, "key_done", "key_encoder", "key_decoder"),
+            ("value", v_bits, 0, "value_done", "value_encoder", "value_decoder"),
         ):
             if bool(progress[done_key][layer_idx, head_idx]):
                 continue

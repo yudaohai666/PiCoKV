@@ -71,7 +71,7 @@ run_niah() {
   local subdir="$1"; shift
   mkdir -p "${subdir}"
   echo "=== NIAH: method=${METHOD} -> ${subdir}/results.json ==="
-  CUDA_VISIBLE_DEVICES=${GPU} python "${SCRIPT_DIR}/run_bin_v4.py" \
+  CUDA_VISIBLE_DEVICES=${GPU} python "${SCRIPT_DIR}/run_bin.py" \
     --model "${MODEL}" --method "${METHOD}" \
     --lengths "${LENGTHS}" --depths "${DEPTHS}" \
     --output "${subdir}/results.json" "$@"

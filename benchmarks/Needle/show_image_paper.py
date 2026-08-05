@@ -30,7 +30,16 @@ def main(args):
     dir_name = path.split('/')[-1]
     dir_name_lower = dir_name.lower()
 
-    if dir_name_lower.endswith('_offline'):
+    # Preferred split: --model already names the model, so strip that prefix and
+    # let the method keep its underscores.  The rsplit heuristics below can only
+    # recover one trailing token, which forces run tags to be crammed together
+    # (k320foldedlocal256) and drops fields like the local-window size from the
+    # title.  Legacy directory names still fall through to them.
+    model_tag = args.model.rstrip('/').split('/')[-1]
+    if dir_name.startswith(model_tag + '_'):
+        model = model_tag
+        method = dir_name[len(model_tag) + 1:].lower()
+    elif dir_name_lower.endswith('_offline'):
         # e.g. Llama-3.1-8B-Instruct_bpc_offline
         parts = dir_name.rsplit('_', 2)
         if len(parts) >= 3:
@@ -189,16 +198,30 @@ def main(args):
         'k320foldedlocal256': 'QuanPC k320/v256 (all-offline, local 256)',
         'k320onlinelocal256': 'QuanPC k320/v256 (online, local 256)',
         'k256folded': 'QuanPC k256/v256 (all-offline, folded W)',
+        'k320offlinenowhiten': 'QuanPC k320/v256 (all-offline, no whitening, local 256)',
+        'k256offlinenowhiten': 'QuanPC k256/v256 (all-offline, no whitening, local 256)',
         'k256onlinewhiten': 'QuanPC k256/v256 (online + whitening)',
         'k320onlinewhiten': 'QuanPC k320/v256 (online + whitening)',
         'k256online': 'QuanPC k256/v256 (online)',
         'k256offdec': 'QuanPC k256/v256 (offline decoder)',
     }
 
+    # Structured QuanPC run tags carry every field that distinguishes a sweep, so
+    # build the title from them instead of adding a name_map row per config --
+    # that is how earlier plots ended up titled "(online)" for a local-256 run.
+    structured = re.fullmatch(
+        r'(online|offline)_k(\d+)_v(\d+)_local(\d+)_(whiten|nowhiten)',
+        method, re.IGNORECASE,
+    )
+    if structured:
+        mode, k, v, local, whiten = structured.groups()
+        method_title = (
+            f"QuanPC k{k}/v{v} ({mode.lower()}, local {local}, "
+            f"{'whitened' if whiten.lower() == 'whiten' else 'no whitening'})"
+        )
     # Match method names with budget suffix, e.g. snapkv-2048
-    m = re.match(r'([^-]+)-(\d+)', method, re.IGNORECASE)
-    if m:
-        method_name, kv_budget = m.groups()
+    elif re.match(r'([^-]+)-(\d+)', method, re.IGNORECASE):
+        method_name = re.match(r'([^-]+)-(\d+)', method, re.IGNORECASE).group(1)
         method_title = name_map.get(method_name.lower(), method_name.capitalize())
     else:
         method_title = name_map.get(method.lower(), method.capitalize())

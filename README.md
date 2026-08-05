@@ -1,9 +1,9 @@
 # QuanPC KV Cache Experiments
 
 This workspace contains QuanPC quantized KV-cache attention code for
-long-context decoding. The active implementation is the **online-projection
-standalone** path under `quantpc/`; the previous pre-learned-projection code is
-preserved under `quantpc_legacy/` for reference only.
+long-context decoding. The implementation lives under `quantpc/` and supports
+both online projection learning and fully offline projections, whose whitening,
+encoder and decoder are folded into a single stored pair.
 
 ## Environment Setup
 
@@ -105,12 +105,8 @@ Active core (`quantpc/`):
 - `quantpc/quanpc_standalone/`: online-projection prepare/decode API + HF Llama adapter.
 - `quantpc/quanpc_cuda_extension/`: single-token decode CUDA kernels.
 - `quantpc/quanpc_prefill_cuda_extension/`: cache-packing / gather CUDA kernels.
-- `quantpc/README.md`, `quantpc/test_quanpc_standalone_online.py`,
-  `quantpc/run_standalone_niah.py` (+ `needle.py`, `PaulGrahamEssays/`).
-
-Legacy (`quantpc_legacy/`): the previous `quanpc.py` / `quanpc_torch.py` /
-`quanpc_api.py` / `kernel.py` / `extension/` and their experiment scripts. Kept
-for reference; not imported by the active benchmarks.
+- `quantpc/README.md`, `quantpc/test_quanpc_standalone_online.py`
+  (+ `needle.py`, `PaulGrahamEssays/` for the self-contained corpus).
 
 Benchmarks (`benchmarks/`):
 `benchmarks/common.py::load_quantpc_model(method="quantpc")` patches the model
@@ -133,11 +129,13 @@ Standalone regression test:
 python quantpc/test_quanpc_standalone_online.py
 ```
 
-Standalone NIAH (self-contained corpus + needle):
+NIAH (all methods go through the one runner):
 
 ```bash
-cd quantpc && python run_standalone_niah.py \
-  --lengths 64000,110000 --direction-sample-size 8192
+python benchmarks/Needle/run_bin.py --method quantpc \
+  --k-bits 320 --v-bits 256 --local-size 256 --zerorope 20 \
+  --lengths 64000,110000 --depths 50 \
+  --output results/niah/sweeps/online_k320_v256_local256_nowhiten.json
 ```
 
 Efficiency benchmark (quantpc vs dense/KIVI baselines):

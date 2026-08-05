@@ -17,7 +17,7 @@ from pathlib import Path
 import torch
 
 from needle import LLMNeedleHaystackTester
-from run_bin_v4 import Transformer, parse_int_list
+from run_bin import Transformer, parse_int_list
 
 
 @dataclass(frozen=True)

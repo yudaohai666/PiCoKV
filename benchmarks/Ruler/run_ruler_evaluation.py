@@ -2,7 +2,7 @@
 #!/usr/bin/env python3
 """RULER evaluation runner for the QuanPC quantized KV-cache algorithm.
 
-Mirrors benchmarks/Needle/run_bin_v4.py in HOW the QuanPC method is applied:
+Mirrors benchmarks/Needle/run_bin.py in HOW the QuanPC method is applied:
   * load a plain HF model + tokenizer
   * modify(model) monkey-patches the attention
   * a fresh QuantKVCache is injected as past_key_values for every generation
