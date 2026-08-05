@@ -129,14 +129,29 @@ Standalone regression test:
 python quantpc/test_quanpc_standalone_online.py
 ```
 
-NIAH (all methods go through the one runner):
+NIAH. `benchmarks/Needle/run_bin.py` is the shared entry point for every
+method (quantpc / kivi / oscar / dense baselines) and writes the flat format
+`show_image_paper.py` plots:
 
 ```bash
 python benchmarks/Needle/run_bin.py --method quantpc \
   --k-bits 320 --v-bits 256 --local-size 256 --zerorope 20 \
   --lengths 64000,110000 --depths 50 \
-  --output results/niah/sweeps/online_k320_v256_local256_nowhiten.json
+  --output results/niah/Llama-3.1-8B-Instruct_online_k320_v256_local256_nowhiten/results.json
 ```
+
+`quantpc/run_standalone_niah.py` runs the same sweep for quantpc alone but also
+records per-cell prefill timing and the full config, which is where the speed
+numbers come from:
+
+```bash
+python quantpc/run_standalone_niah.py \
+  --k-bits 320 --v-bits 256 --local-size 256 \
+  --lengths 64000,110000 --depths 50 \
+  --output-json results/niah/timed_runs/online_k320_v256_local256_nowhiten.json
+```
+
+See `results/niah/README.md` for what each output holds.
 
 Efficiency benchmark (quantpc vs dense/KIVI baselines):
 
