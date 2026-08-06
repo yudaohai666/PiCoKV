@@ -178,7 +178,7 @@ def prepare_kv_cache(
     value_bits: int = 256,
     direction_sample_size: Optional[int] = 8192,
     sink_size: int = 64,
-    local_size: int = 1024,
+    local_size: int = 256,
     eas: float = 0.01,
     zerorope: int = 20,
     exp_bits: int = 4,

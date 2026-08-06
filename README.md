@@ -49,7 +49,7 @@ full_key = torch.randn(B, KVH, L, D, device=device, dtype=dtype)
 full_value = torch.randn_like(full_key)
 
 # Projections are learned online inside prepare_kv_cache; no projection args.
-config = StandaloneConfig()  # k/v bits 256, sink 64, local 1024, eas 0.01, zerorope 20
+config = StandaloneConfig()  # k320/v256, sink 64, local 256, eas 0.01, zerorope 20
 cache = prepare_kv_cache(full_key, full_value, **config.prepare_kwargs())
 
 query = torch.randn(B, QH, 1, D, device=device, dtype=dtype)

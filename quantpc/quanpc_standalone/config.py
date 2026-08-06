@@ -15,11 +15,11 @@ class StandaloneConfig:
     """
 
     # Cache construction / online projection.
-    key_bits: int = 256
+    key_bits: int = 320
     value_bits: int = 256
     direction_sample_size: int | None = 8192
     sink_size: int = 64
-    local_size: int = 1024
+    local_size: int = 256
     eas: float = 0.01
     zerorope: int = 20
     exp_bits: int = 4

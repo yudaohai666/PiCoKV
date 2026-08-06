@@ -38,7 +38,7 @@ DEFAULT_DATASET_DIR = BASE / "data"
 DEFAULT_TMP_DIR = BASE / "offline_states.tmp"
 DEFAULT_MODEL_NAME = "/data/Llama-3.1-8B-Instruct"
 DEFAULT_SINK_SIZE = 64
-DEFAULT_LOCAL_SIZE = 1024
+DEFAULT_LOCAL_SIZE = 256
 DEFAULT_ZEROROPE = 20
 # block-32 learning only needs enough rows to resolve a 128-dim subspace, while
 # the coding/residual passes scale with row count. Subsample to bound memory.

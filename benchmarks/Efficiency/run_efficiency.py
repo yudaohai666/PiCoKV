@@ -386,7 +386,7 @@ def main() -> None:
     parser.add_argument("--k-bits", type=int, default=320, help="key projection bits (also KIVI KV bits)")
     parser.add_argument("--v-bits", type=int, default=256, help="value projection bits (also KIVI KV bits)")
     parser.add_argument("--sink-size", type=int, default=64, help="initial (sink) tokens kept in full precision")
-    parser.add_argument("--local-size", type=int, default=1024, help="most-recent (local) tokens kept in full precision")
+    parser.add_argument("--local-size", type=int, default=256, help="most-recent (local) tokens kept in full precision")
     parser.add_argument("--exp-bits", type=int, default=4)
     parser.add_argument("--eas", type=float, default=0.01)
     parser.add_argument("--zerorope", type=int, default=20)

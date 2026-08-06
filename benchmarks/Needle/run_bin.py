@@ -28,7 +28,7 @@ class Transformer(ModelProvider):
         k_bits: int = 320,
         v_bits: int = 256,
         sink_size: int = 64,
-        local_size: int = 1024,
+        local_size: int = 256,
         exp_bits: int = 4,
         eas: float = 0.01,
         zerorope: int = 20,
@@ -265,7 +265,7 @@ def main() -> None:
     parser.add_argument(
         "--local-size",
         type=int,
-        default=1024,
+        default=256,
         help="number of most-recent (local) tokens kept in full precision",
     )
     parser.add_argument(

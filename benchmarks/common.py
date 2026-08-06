@@ -371,7 +371,7 @@ def load_model(
     k_bits: int = 128,
     v_bits: int = 256,
     sink_size: int = 64,
-    local_size: int = 1024,
+    local_size: int = 256,
     exp_bits: int = 4,
     eas: float = 0.01,
     zerorope: int = 30,

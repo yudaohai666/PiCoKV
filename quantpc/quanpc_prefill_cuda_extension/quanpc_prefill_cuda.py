@@ -207,7 +207,7 @@ def prepare_prefill_cuda(
     value_projection,
     *,
     sink_size: int = 64,
-    local_size: int = 1024,
+    local_size: int = 256,
     eas: float = 0.01,
     zerorope: int = 20,
     keep_intermediates: bool = False,

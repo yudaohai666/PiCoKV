@@ -59,7 +59,7 @@ class QuantPCModel:
         k_bits: int = 320,
         v_bits: int = 256,
         sink_size: int = 64,
-        local_size: int = 1024,
+        local_size: int = 256,
         exp_bits: int = 4,
         eas: float = 0.01,
         zerorope: int = 20,
@@ -230,7 +230,7 @@ def parse_args(argv=None):
     p.add_argument("--k-bits", type=int, default=320, help="key projection bits (also KIVI KV bits)")
     p.add_argument("--v-bits", type=int, default=256, help="value projection bits (also KIVI KV bits)")
     p.add_argument("--sink-size", type=int, default=64, help="initial (sink) tokens kept in full precision")
-    p.add_argument("--local-size", type=int, default=1024, help="most-recent (local) tokens kept in full precision")
+    p.add_argument("--local-size", type=int, default=256, help="most-recent (local) tokens kept in full precision")
     p.add_argument("--exp-bits", type=int, default=4)
     p.add_argument("--eas", type=float, default=0.01)
     p.add_argument("--zerorope", type=int, default=20)

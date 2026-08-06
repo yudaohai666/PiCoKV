@@ -149,7 +149,7 @@ def main() -> None:
     parser.add_argument("--v-bits", type=int, default=256)
     parser.add_argument("--direction-sample-size", type=int, default=8192)
     parser.add_argument("--sink-size", type=int, default=64)
-    parser.add_argument("--local-size", type=int, default=1024)
+    parser.add_argument("--local-size", type=int, default=256)
     parser.add_argument("--eas", type=float, default=0.01)
     parser.add_argument("--zerorope", type=int, default=20)
     parser.add_argument("--exp-bits", type=int, default=4)

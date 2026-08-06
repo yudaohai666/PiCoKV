@@ -31,7 +31,7 @@ CONFIGS=(
   # "320 320"
 )
 SINK="${SINK:-64}"
-LOCAL="${LOCAL:-1024}"
+LOCAL="${LOCAL:-256}"
 
 # quantpc offline block-32 encoders: USE_OFFLINE=1 skips the online QR at prefill
 # (default path offline_projection/{model}_k{K}_v{V}_block32.pt). OFFLINE_PROJ_PATH
