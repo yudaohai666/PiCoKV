@@ -277,7 +277,6 @@ def run(args) -> None:
         prune_mode=args.prune_mode,
         log_eps=args.log_eps,
         offline_proj_path=offline_proj_path,
-        offline_proj_mode=args.offline_proj_mode,
         # KIVI params (--method kivi)
         group_size=args.group_size,
         residual_length=args.residual_length,
@@ -312,8 +311,7 @@ def run(args) -> None:
             )
 
     tag = output_tag(args.method, args.k_bits, args.v_bits, args.num_bits,
-                     offline=(args.offline or args.offline_proj_path is not None),
-                     offline_mode=args.offline_proj_mode)
+                     offline=(args.offline or args.offline_proj_path is not None))
     payload = {
         "method": args.method,
         "tag": tag,
@@ -385,7 +383,7 @@ def main() -> None:
                              "when off, run latency benchmark only and do NO memory-related work")
     parser.add_argument("--output", default="results/efficiency/quantpc.json")
     # ── quantpc KV-cache params (--method quantpc) ──
-    parser.add_argument("--k-bits", type=int, default=256, help="key projection bits (also KIVI KV bits)")
+    parser.add_argument("--k-bits", type=int, default=320, help="key projection bits (also KIVI KV bits)")
     parser.add_argument("--v-bits", type=int, default=256, help="value projection bits (also KIVI KV bits)")
     parser.add_argument("--sink-size", type=int, default=64, help="initial (sink) tokens kept in full precision")
     parser.add_argument("--local-size", type=int, default=1024, help="most-recent (local) tokens kept in full precision")
@@ -409,7 +407,6 @@ def main() -> None:
     parser.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
     parser.add_argument("--offline", action="store_true", help="quantpc: use offline block-32 encoders (default path offline_projection/{model}_k{K}_v{V}_block32.pt)")
     parser.add_argument("--offline-proj-path", default=None, help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
-    parser.add_argument("--offline-proj-mode", default="both", choices=["both", "key", "value"], help="quantpc: which side reuses stored offline encoders (default both)")
     args = parser.parse_args()
 
     if args.compare:

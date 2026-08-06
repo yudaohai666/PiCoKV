@@ -56,13 +56,13 @@ class QuantPCModel:
         model_name: str,
         method: str = "quantpc",
         # quantpc KV-cache params (--method quantpc)
-        k_bits: int = 128,
+        k_bits: int = 320,
         v_bits: int = 256,
         sink_size: int = 64,
         local_size: int = 1024,
         exp_bits: int = 4,
         eas: float = 0.01,
-        zerorope: int = 30,
+        zerorope: int = 20,
         use_pruning: bool = True,
         prune_mode: int = 3,
         log_eps: float = -10.0,
@@ -79,7 +79,6 @@ class QuantPCModel:
         offline_v_hadamard: bool = True,
         # quantpc offline block-32 encoders (--method quantpc)
         offline_proj_path: str | None = None,
-        offline_proj_mode: str = "both",
     ):
         self.method = method
         self.model, self.tokenizer, self._make_cache = load_model(
@@ -98,7 +97,6 @@ class QuantPCModel:
             log_eps=log_eps,
             whiten=whiten,
             offline_proj_path=offline_proj_path,
-            offline_proj_mode=offline_proj_mode,
             # KIVI params (--method kivi)
             group_size=group_size,
             residual_length=residual_length,
@@ -229,13 +227,13 @@ def parse_args(argv=None):
     p.add_argument("--save_dir", default="results/longbench", help="base output dir")
     p.add_argument("--seed", type=int, default=42)
     # ── quantpc KV-cache params (--method quantpc) ──
-    p.add_argument("--k-bits", type=int, default=128, help="key projection bits (also KIVI KV bits)")
+    p.add_argument("--k-bits", type=int, default=320, help="key projection bits (also KIVI KV bits)")
     p.add_argument("--v-bits", type=int, default=256, help="value projection bits (also KIVI KV bits)")
     p.add_argument("--sink-size", type=int, default=64, help="initial (sink) tokens kept in full precision")
     p.add_argument("--local-size", type=int, default=1024, help="most-recent (local) tokens kept in full precision")
     p.add_argument("--exp-bits", type=int, default=4)
     p.add_argument("--eas", type=float, default=0.01)
-    p.add_argument("--zerorope", type=int, default=30)
+    p.add_argument("--zerorope", type=int, default=20)
     p.add_argument("--no-pruning", dest="use_pruning", action="store_false",
                    help="disable decode-time global pruning (gqa4 CUDA path); pruning is on by default")
     p.add_argument("--prune-mode", type=int, default=3, help="decode pruning mode (CUDA v1_exp8 path)")
@@ -261,7 +259,6 @@ def parse_args(argv=None):
     p.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
     p.add_argument("--offline", action="store_true", help="quantpc: use offline block-32 encoders (default path offline_projection/{model}_k{K}_v{V}_block32.pt)")
     p.add_argument("--offline-proj-path", default=None, help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
-    p.add_argument("--offline-proj-mode", default="both", choices=["both", "key", "value"], help="quantpc: which side reuses stored offline encoders (default both)")
     return p.parse_args(argv)
 
 
@@ -281,8 +278,7 @@ def main() -> None:
     print(f"Model: {args.model} | Method: {args.method} | max_length: {max_length}")
 
     tag = output_tag(args.method, args.k_bits, args.v_bits, args.num_bits,
-                     offline=(args.offline or args.offline_proj_path is not None),
-                     offline_mode=args.offline_proj_mode)
+                     offline=(args.offline or args.offline_proj_path is not None))
     save_path = Path(args.save_dir) / model_key / tag
     save_path.mkdir(parents=True, exist_ok=True)
     print(f"Output dir: {save_path}")
@@ -317,7 +313,6 @@ def main() -> None:
         residual_evict_size=args.residual_evict_size,
         offline_v_hadamard=args.offline_v_hadamard,
         offline_proj_path=offline_proj_path,
-        offline_proj_mode=args.offline_proj_mode,
     )
 
     for dataset in datasets:

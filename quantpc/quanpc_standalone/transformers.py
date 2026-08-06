@@ -212,25 +212,20 @@ class StandaloneLlamaCache(Cache):
         kv_heads: int,
         head_dim: int,
     ) -> None:
-        """Fit this layer's K/V whitening from prompt queries and ``o_proj``."""
+        """Fit this layer's K/V whitening from prompt queries and ``o_proj``.
+
+        The two sides do not share a source: K is whitened by the query Gram,
+        which is context-dependent, while V is whitened by ``o_proj``'s weight,
+        a constant of the model. Both are fitted whenever whitening is on.
+        """
         if not self.config.whiten:
-            return
-        if int(layer_idx) < int(self.config.whiten_min_layer):
             return
         batch = int(query_states.shape[0])
         grouped_query = query_states.reshape(batch, kv_heads, -1, head_dim)
         key_forward, key_inverse = find_orth_proj(grouped_query)
-        if self.config.whiten_key_only:
-            # Identity leaves V in the model's basis while K still rotates, so
-            # decode's un-whitening stays a single uniform code path.
-            eye = torch.eye(
-                head_dim, device=key_forward.device, dtype=key_forward.dtype
-            ).expand_as(key_forward).contiguous()
-            value_forward, value_inverse = eye, eye
-        else:
-            value_forward, value_inverse = find_orth_proj(
-                value_whitening_source(output_weight, kv_heads, head_dim)
-            )
+        value_forward, value_inverse = find_orth_proj(
+            value_whitening_source(output_weight, kv_heads, head_dim)
+        )
         self._whitening[int(layer_idx)] = LayerWhitening(
             key=key_forward,
             key_inverse=key_inverse,

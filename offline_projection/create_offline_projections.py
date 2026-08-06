@@ -26,8 +26,9 @@ Stages (``--stage``):
                fit the decoder to its fixed point, store the folded pair.
   * all     -> collect then fit, layer group by layer group (default).
 
-V is left in the model basis: value whitening is fitted on ``o_proj``, which is
-already well-conditioned, and measured post-``o_proj`` error moves by +-2%.
+Both sides are whitened. They do not share a source: K's comes from the
+calibration query Gram, V's from ``o_proj``'s weight -- a constant of the model,
+so the fit stage reads it from the checkpoint rather than through the shards.
 """
 from __future__ import annotations
 
@@ -78,6 +79,7 @@ from quantpc.quanpc_standalone.constants import (  # noqa: E402
     ONLINE_DECODER_RIDGE,
     ONLINE_GROUP_BITS,
 )
+from quantpc.quanpc_standalone.whiten import value_whitening_source  # noqa: E402
 from quantpc.quanpc_standalone.online import (  # noqa: E402
     _strict_binary_sign_,
     quantize_block32_online,
@@ -150,6 +152,38 @@ def whitening_from_gram(gram, ridge):
     forward = (vectors * values.unsqueeze(-2)) @ vectors.transpose(-1, -2)
     inverse = (vectors / values.unsqueeze(-2)) @ vectors.transpose(-1, -2)
     return forward, inverse
+
+
+def value_whitening_factors(model_name, layer_idx, num_kv_heads, head_dim, ridge, device):
+    """Fit V whitening for one layer from that layer's ``o_proj`` weight.
+
+    Unlike K, whose Gram comes from the calibration queries, V's whitening
+    source is a constant of the model, so the fit stage reads the weight
+    straight from the checkpoint rather than carrying anything through the
+    shards. Only the one tensor is materialized, not the model.
+    """
+    from safetensors import safe_open
+    import glob as _glob
+    import json as _json
+
+    index = os.path.join(model_name, "model.safetensors.index.json")
+    key = f"model.layers.{layer_idx}.self_attn.o_proj.weight"
+    if os.path.exists(index):
+        shard = _json.load(open(index))["weight_map"][key]
+        files = [os.path.join(model_name, shard)]
+    else:
+        files = sorted(_glob.glob(os.path.join(model_name, "*.safetensors")))
+    for path in files:
+        with safe_open(path, framework="pt") as handle:
+            if key in handle.keys():
+                weight = handle.get_tensor(key)
+                break
+    else:
+        raise RuntimeError(f"{key} not found under {model_name}")
+
+    source = value_whitening_source(weight.to(device), num_kv_heads, head_dim)
+    gram = torch.matmul(source.transpose(-1, -2).double(), source.double())
+    return whitening_from_gram(gram, ridge)
 
 
 def load_layer_states(shard_paths, device):
@@ -264,7 +298,6 @@ def folded_meta(args, k_bits, v_bits, zerorope, whiten_layers):
         # the stored pair is the plain encoder/decoder and the runtime guard
         # against double-rotating must not fire on it.
         "whitened": bool(whiten_layers),
-        "whiten_key_only": True,
         "whiten_ridge": args.whiten_ridge,
         "whiten_layers": sorted(whiten_layers),
         "folded": True,
@@ -295,6 +328,9 @@ def load_state(args, num_layers, num_kv_heads, head_dim, k_bits, v_bits,
         "key_whitening": torch.zeros(
             num_layers, num_kv_heads, head_dim, head_dim, dtype=torch.float32
         ),
+        "value_whitening": torch.zeros(
+            num_layers, num_kv_heads, head_dim, head_dim, dtype=torch.float32
+        ),
         "meta": folded_meta(args, k_bits, v_bits, zerorope, whiten_layers),
     }
     progress = {
@@ -311,8 +347,9 @@ def load_state(args, num_layers, num_kv_heads, head_dim, k_bits, v_bits,
             print(f"existing {args.output_path} incompatible; starting over", flush=True)
             return empty, progress
         empty[field] = stored[field]
-    if "key_whitening" in stored:
-        empty["key_whitening"] = stored["key_whitening"]
+    for field in ("key_whitening", "value_whitening"):
+        if field in stored:
+            empty[field] = stored[field]
     saved = stored.get("progress")
     if saved is not None:
         progress["key_done"] = saved["key_done"]
@@ -333,6 +370,7 @@ def save_state(args, state, progress):
             "key_decoder": state["key_decoder"],
             "value_decoder": state["value_decoder"],
             "key_whitening": state["key_whitening"],
+            "value_whitening": state["value_whitening"],
             "meta": state["meta"],
             "progress": progress,
         },
@@ -348,19 +386,24 @@ def fit_layer(args, state, progress, layer_idx, sample_count, device,
 
     if whiten:
         forward, inverse = whitening_from_gram(gram, args.whiten_ridge)
+        value_forward, value_inverse = value_whitening_factors(
+            args.model_name, layer_idx, num_heads,
+            state["key_encoder"].shape[-1], args.whiten_ridge, device,
+        )
         condition = float(
             (torch.linalg.svdvals(gram)[..., 0]
              / torch.linalg.svdvals(gram)[..., -1].clamp_min(1e-30)).mean()
         )
         print(f"layer {layer_idx} whitening: cond(Q^T Q)={condition:.3e} "
               f"ridge={args.whiten_ridge}", flush=True)
-        state["key_whitening"][layer_idx] = forward.float().cpu()
     else:
         eye = torch.eye(state["key_encoder"].shape[-1], device=device, dtype=torch.float64)
         forward = eye.unsqueeze(0).expand(num_heads, -1, -1).contiguous()
         inverse = forward.clone()
-        state["key_whitening"][layer_idx] = forward.float().cpu()
+        value_forward, value_inverse = forward, inverse
         print(f"layer {layer_idx} whitening: disabled (identity)", flush=True)
+    state["key_whitening"][layer_idx] = forward.float().cpu()
+    state["value_whitening"][layer_idx] = value_forward.float().cpu()
 
     for head_idx in tqdm(range(num_heads), desc=f"layer {layer_idx} heads"):
         for kind, bits, rope, done_key, enc_field, dec_field in (
@@ -378,9 +421,11 @@ def fit_layer(args, state, progress, layer_idx, sample_count, device,
             del tokens
             apply_key_zerorope(states, rope)
 
-            if kind == "key" and whiten:
-                head_forward = forward[head_idx]
-                head_inverse = inverse[head_idx]
+            if whiten:
+                side_forward = forward if kind == "key" else value_forward
+                side_inverse = inverse if kind == "key" else value_inverse
+                head_forward = side_forward[head_idx]
+                head_inverse = side_inverse[head_idx]
                 rotated = rotate_states(states, head_forward)
                 encoder, decoder, history = learn_pair(
                     rotated, bits, args.decoder_iters
@@ -389,7 +434,7 @@ def fit_layer(args, state, progress, layer_idx, sample_count, device,
                 folded_encoder, folded_decoder = fold(
                     encoder, decoder, head_forward, head_inverse
                 )
-                if head_idx == 0:
+                if head_idx == 0 and kind == "key":
                     rotated_error, folded_error = check_fold(
                         states, encoder, decoder,
                         folded_encoder, folded_decoder, head_forward,

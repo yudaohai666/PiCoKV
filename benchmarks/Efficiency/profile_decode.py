@@ -106,7 +106,7 @@ def main() -> None:
     p.add_argument("--record-shapes", action="store_true", help="record op input shapes (adds overhead)")
     p.add_argument("--trace", default=None, help="export a chrome trace to this path")
     # ── quantpc KV-cache params (--method quantpc) ──
-    p.add_argument("--k-bits", type=int, default=256, help="key projection bits (also KIVI KV bits)")
+    p.add_argument("--k-bits", type=int, default=320, help="key projection bits (also KIVI KV bits)")
     p.add_argument("--v-bits", type=int, default=256, help="value projection bits (also KIVI KV bits)")
     p.add_argument("--sink-size", type=int, default=64, help="initial (sink) tokens kept in full precision")
     p.add_argument("--local-size", type=int, default=1024, help="most-recent (local) tokens kept in full precision")
@@ -121,8 +121,6 @@ def main() -> None:
                    help="quantpc: use offline block-32 encoders (skip online QR at prefill); path defaults to offline_projection/{model}_k{K}_v{V}_block32.pt")
     p.add_argument("--offline-proj-path", default=None,
                    help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
-    p.add_argument("--offline-proj-mode", default="both", choices=["both", "key", "value"],
-                   help="quantpc: which side reuses stored offline encoders (default both)")
     p.set_defaults(use_pruning=True)
     # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
     p.add_argument("--group-size", type=int, default=32, help="KIVI per-group quant size; OScaR group size (INT2 必须=32)")
@@ -168,7 +166,6 @@ def main() -> None:
         residual_evict_size=args.residual_evict_size,
         offline_v_hadamard=args.offline_v_hadamard,
         offline_proj_path=offline_proj_path,
-        offline_proj_mode=args.offline_proj_mode,
     )
     device = model.device
     vocab = model.config.vocab_size

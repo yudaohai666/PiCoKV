@@ -25,13 +25,13 @@ class Transformer(ModelProvider):
         model_name: str = "/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct",
         method: str = "quantpc",
         # quantpc KV-cache params (--method quantpc)
-        k_bits: int = 128,
+        k_bits: int = 320,
         v_bits: int = 256,
         sink_size: int = 64,
         local_size: int = 1024,
         exp_bits: int = 4,
         eas: float = 0.01,
-        zerorope: int = 30,
+        zerorope: int = 20,
         use_pruning: bool = True,
         prune_mode: int = 3,
         log_eps: float = -10.0,
@@ -48,8 +48,6 @@ class Transformer(ModelProvider):
         offline_v_hadamard: bool = True,
         # quantpc offline block-32 encoders (--method quantpc)
         offline_proj_path: str | None = None,
-        offline_proj_mode: str = "both",
-        offline_decoder: bool = False,
         whiten: bool = False,
         max_new_tokens: int = 50,
     ):
@@ -71,8 +69,6 @@ class Transformer(ModelProvider):
             prune_mode=prune_mode,
             log_eps=log_eps,
             offline_proj_path=offline_proj_path,
-            offline_proj_mode=offline_proj_mode,
-            offline_decoder=offline_decoder,
             whiten=whiten,
             # KIVI params (--method kivi)
             group_size=group_size,
@@ -181,8 +177,6 @@ def run_experiment(
     residual_evict_size: int | None = 256,
     offline_v_hadamard: bool = True,
     offline_proj_path: str | None = None,
-    offline_proj_mode: str = "both",
-    offline_decoder: bool = False,
     whiten: bool = False,
     max_new_tokens: int = 50,
 ) -> dict[tuple[int, int], str]:
@@ -204,8 +198,6 @@ def run_experiment(
         prune_mode=prune_mode,
         log_eps=log_eps,
         offline_proj_path=offline_proj_path,
-        offline_proj_mode=offline_proj_mode,
-        offline_decoder=offline_decoder,
         whiten=whiten,
         max_new_tokens=max_new_tokens,
         # KIVI params (--method kivi)
@@ -262,7 +254,7 @@ def main() -> None:
     parser.add_argument("--depths", default="50", help="comma-separated needle depths")
     parser.add_argument("--output", default="results/niah/results_shared_kv.json")
     # ── quantpc KV-cache params (--method quantpc) ──
-    parser.add_argument("--k-bits", type=int, default=128, help="key projection bits (also KIVI KV bits)")
+    parser.add_argument("--k-bits", type=int, default=320, help="key projection bits (also KIVI KV bits)")
     parser.add_argument("--v-bits", type=int, default=256, help="value projection bits (also KIVI KV bits)")
     parser.add_argument(
         "--sink-size",
@@ -283,7 +275,7 @@ def main() -> None:
         help="unsigned per-64-token quantization bits for global exp weights; quantization is always enabled",
     )
     parser.add_argument("--eas", type=float, default=0.01)
-    parser.add_argument("--zerorope", type=int, default=30)
+    parser.add_argument("--zerorope", type=int, default=20)
     parser.add_argument(
         "--no-pruning",
         dest="use_pruning",
@@ -327,18 +319,6 @@ def main() -> None:
         "--offline-proj-path",
         default=None,
         help="quantpc: explicit offline encoder .pt (overrides the --offline default path)",
-    )
-    parser.add_argument(
-        "--offline-proj-mode",
-        default="both",
-        choices=["both", "key", "value"],
-        help="quantpc: which side reuses stored offline encoders (default both)",
-    )
-    parser.add_argument(
-        "--offline-decoder",
-        action="store_true",
-        help="quantpc: also reuse the stored decoder, skipping the per-context "
-             "least-squares solve",
     )
     parser.add_argument(
         "--whiten",
@@ -391,8 +371,6 @@ def main() -> None:
         residual_evict_size=args.residual_evict_size,
         offline_v_hadamard=args.offline_v_hadamard,
         offline_proj_path=offline_proj_path,
-        offline_proj_mode=args.offline_proj_mode,
-        offline_decoder=args.offline_decoder,
         whiten=args.whiten,
         max_new_tokens=args.max_new_tokens,
     )

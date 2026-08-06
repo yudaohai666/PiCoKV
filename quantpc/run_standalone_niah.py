@@ -145,11 +145,7 @@ def main() -> None:
                              "--depths x --lengths cross product so a handful of "
                              "cells can be rechecked without the full sweep")
     parser.add_argument("--whiten", action="store_true")
-    parser.add_argument("--whiten-min-layer", type=int, default=0,
-                        help="layers below this keep their own basis")
-    parser.add_argument("--whiten-key-only", action="store_true",
-                        help="whiten K only; leave V in the model basis")
-    parser.add_argument("--k-bits", type=int, default=256)
+    parser.add_argument("--k-bits", type=int, default=320)
     parser.add_argument("--v-bits", type=int, default=256)
     parser.add_argument("--direction-sample-size", type=int, default=8192)
     parser.add_argument("--sink-size", type=int, default=64)
@@ -168,10 +164,6 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--offline-proj-path", default=None,
                         help="stored block-32 encoders (and decoders, if the file has them)")
-    parser.add_argument("--offline-decoder", action="store_true",
-                        help="also reuse the stored decoder, skipping the per-context solve")
-    parser.add_argument("--offline-proj-mode", default="both",
-                        choices=["both", "key", "value"])
     parser.add_argument(
         "--output-json",
         default="results/niah/standalone_current_64k_110k_sample8192.json",
@@ -199,8 +191,6 @@ def main() -> None:
         prune_mode=args.prune_mode,
         log_eps=args.log_eps,
         whiten=args.whiten,
-        whiten_min_layer=args.whiten_min_layer,
-        whiten_key_only=args.whiten_key_only,
     )
     offline: dict = {}
     if args.offline_proj_path is not None:
@@ -211,22 +201,17 @@ def main() -> None:
                 "its encoder/decoder; --whiten would rotate states whose basis is "
                 "already accounted for. Drop --whiten."
             )
-        if args.offline_proj_mode in ("both", "key"):
-            offline["key_encoders"] = stored["key_encoder"]
-        if args.offline_proj_mode in ("both", "value"):
-            offline["value_encoders"] = stored["value_encoder"]
-        if args.offline_decoder:
-            if "key_decoder" not in stored:
+        # An offline projection is used whole: its decoder was fitted against
+        # the codes its own encoder produces, so the two only make sense together.
+        for side in ("key", "value"):
+            if f"{side}_decoder" not in stored:
                 raise SystemExit(
-                    f"{args.offline_proj_path} stores encoders only; rebuild it with "
-                    "offline_projection/create_offline_projections.py"
+                    f"{args.offline_proj_path} stores encoders only; rebuild it "
+                    "with offline_projection/create_offline_projections.py"
                 )
-            if args.offline_proj_mode in ("both", "key"):
-                offline["key_decoders"] = stored["key_decoder"]
-            if args.offline_proj_mode in ("both", "value"):
-                offline["value_decoders"] = stored["value_decoder"]
-        print(f"offline: {args.offline_proj_path} "
-              f"(mode={args.offline_proj_mode}, decoder={args.offline_decoder})", flush=True)
+            offline[f"{side}_encoders"] = stored[f"{side}_encoder"]
+            offline[f"{side}_decoders"] = stored[f"{side}_decoder"]
+        print(f"offline: {args.offline_proj_path}", flush=True)
 
     output_path = Path(args.output_json)
     output_path.parent.mkdir(parents=True, exist_ok=True)

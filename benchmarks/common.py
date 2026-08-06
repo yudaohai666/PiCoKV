@@ -83,12 +83,11 @@ def output_tag(
     num_bits: int = 2,
     *,
     offline: bool = False,
-    offline_mode: str = "both",
 ) -> str:
     """Directory/file tag keyed by method + KV bits, shared across runners.
 
-    For quantpc, ``offline`` appends ``_offline`` (plus the side when not
-    ``both``) so online and offline runs at the same bits do not overwrite.
+    For quantpc, ``offline`` appends ``_offline`` so online and offline runs at
+    the same bits do not overwrite each other.
     """
     if method == "kivi":
         return f"kivi_k{k_bits}_v{v_bits}"
@@ -98,7 +97,7 @@ def output_tag(
         return method
     tag = f"quantpc_k{k_bits}_v{v_bits}"
     if offline:
-        tag += "_offline" if offline_mode == "both" else f"_offline_{offline_mode}"
+        tag += "_offline"
     return tag
 
 
@@ -267,8 +266,6 @@ def _load_quantpc_model(
     log_eps: float,
     whiten: bool = False,
     offline_proj_path: Optional[str] = None,
-    offline_proj_mode: str = "both",
-    offline_decoder: bool = False,
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
     """Load a HF model patched with the quanpc_standalone online-projection path.
 
@@ -278,10 +275,8 @@ def _load_quantpc_model(
     removed. ``make_cache`` returns a fresh ``StandaloneLlamaCache`` per call (the
     model must have been patched via ``modify_llama_for_standalone``).
 
-    When ``offline_proj_path`` is given, the stored block-32 encoders are loaded
+    When ``offline_proj_path`` is given, the stored block-32 pair is loaded
     once and threaded into every cache so prefill skips the online Householder QR
-    (the decoder is still solved per context). ``offline_proj_mode`` selects which
-    side reuses stored encoders: ``both`` (default), ``key``, or ``value``.
     """
     from quantpc.quanpc_standalone import StandaloneConfig
     from quantpc.quanpc_standalone.transformers import (
@@ -307,25 +302,19 @@ def _load_quantpc_model(
     key_encoders = value_encoders = None
     key_decoders = value_decoders = None
     if offline_proj_path is not None:
-        if offline_proj_mode not in ("both", "key", "value"):
-            raise ValueError(f"offline_proj_mode must be 'both', 'key' or 'value'; got {offline_proj_mode!r}")
         _projs = load_offline_projections(offline_proj_path)
-        if offline_proj_mode in ("both", "key"):
-            key_encoders = _projs["key_encoder"]
-        if offline_proj_mode in ("both", "value"):
-            value_encoders = _projs["value_encoder"]
-        # A decoder file also carries encoders, so `offline_decoder` only
-        # controls whether the stored decoder is used on top of them.
-        if offline_decoder:
-            if "key_decoder" not in _projs:
+        # An offline projection is used whole: its decoder was fitted against the
+        # codes its own encoder produces, so the two only make sense together.
+        for side in ("key", "value"):
+            if f"{side}_decoder" not in _projs:
                 raise ValueError(
                     f"{offline_proj_path} stores encoders only; rebuild it with "
-                    "offline_projection/create_offline_projections.py to use --offline-decoder"
+                    "offline_projection/create_offline_projections.py"
                 )
-            if offline_proj_mode in ("both", "key"):
-                key_decoders = _projs["key_decoder"]
-            if offline_proj_mode in ("both", "value"):
-                value_decoders = _projs["value_decoder"]
+        key_encoders = _projs["key_encoder"]
+        value_encoders = _projs["value_encoder"]
+        key_decoders = _projs["key_decoder"]
+        value_decoders = _projs["value_decoder"]
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     device_map = _auto_device_map()
@@ -399,8 +388,6 @@ def load_model(
     residual_evict_size: Optional[int] = None,
     offline_v_hadamard: bool = False,
     offline_proj_path: Optional[str] = None,
-    offline_proj_mode: str = "both",
-    offline_decoder: bool = False,
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
     """Load a HF model+tokenizer and return ``(model, tokenizer, make_cache)``.
 
@@ -456,8 +443,6 @@ def load_model(
             log_eps=log_eps,
             whiten=whiten,
             offline_proj_path=offline_proj_path,
-            offline_proj_mode=offline_proj_mode,
-            offline_decoder=offline_decoder,
         )
 
     if method not in BASELINE_ATTN:

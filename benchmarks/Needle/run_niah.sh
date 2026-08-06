@@ -35,19 +35,17 @@ LOCAL="${LOCAL:-1024}"
 
 # quantpc offline block-32 encoders: USE_OFFLINE=1 skips the online QR at prefill
 # (default path offline_projection/{model}_k{K}_v{V}_block32.pt). OFFLINE_PROJ_PATH
-# overrides the path; OFFLINE_PROJ_MODE = both|key|value (default both).
 USE_OFFLINE="${USE_OFFLINE:-1}"
 OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
-OFFLINE_PROJ_MODE="${OFFLINE_PROJ_MODE:-both}"
 OFFLINE_ARGS=()
 if [ "${USE_OFFLINE}" = "1" ] || [ -n "${OFFLINE_PROJ_PATH}" ]; then
-  OFFLINE_ARGS=(--offline --offline-proj-mode "${OFFLINE_PROJ_MODE}")
+  OFFLINE_ARGS=(--offline)
   [ -n "${OFFLINE_PROJ_PATH}" ] && OFFLINE_ARGS+=(--offline-proj-path "${OFFLINE_PROJ_PATH}")
 fi
 # Output-dir suffix so offline runs don't overwrite online ones (matches output_tag).
 OFFLINE_TAG=""
 if [ ${#OFFLINE_ARGS[@]} -gt 0 ]; then
-  OFFLINE_TAG="_offline"; [ "${OFFLINE_PROJ_MODE}" != "both" ] && OFFLINE_TAG="_offline_${OFFLINE_PROJ_MODE}"
+  OFFLINE_TAG="_offline"
 fi
 
 # KIVI params (2/4-bit KV only).
