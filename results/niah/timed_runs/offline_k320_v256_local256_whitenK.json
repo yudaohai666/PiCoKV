@@ -21,7 +21,7 @@
     "mlp_chunk_size": 8192,
     "max_new_tokens": 50,
     "seed": 0,
-    "offline_proj_path": "/data/zxh/QuantPC/offline_projection/projections/Llama-3.1-8B-Instruct_k320_v256_block32_folded.pt",
+    "offline_proj_path": "/data/zxh/QuantPC/offline_projection/projections/Llama-3.1-8B-Instruct_k320_v256_block32_folded_whitenK.pt",
     "offline_decoder": true,
     "offline_proj_mode": "both",
     "output_json": "/data/zxh/QuantPC/results/niah/folded_k320/offline_folded_local256.json"

@@ -30,7 +30,7 @@ config are unique to `timed_runs/`.
 ## Tag format
 
 ```
-{online|offline}_k{K}_v{V}_local{L}_{whiten|nowhiten}
+{online|offline}_k{K}_v{V}_local{L}_{whiten|whitenK|nowhiten}
 ```
 
 `whiten` on an offline tag means the whitening is folded into the stored
@@ -39,6 +39,10 @@ runtime `--whiten` switch is rejected, because the basis is already accounted
 for. `local` is the dense local-window size, which the tag has to carry: a
 sweep at 1024 and one at 256 are otherwise indistinguishable by name, and the
 plot title is built from this tag.
+
+`whitenK` marks the three historical offline runs whose folded artifacts used
+the earlier K-only whitening fit. New rebuilt artifacts and their NIAH runs use
+the plain `whiten` suffix and include the current K+V whitening fit.
 
 ## `vis/`
 

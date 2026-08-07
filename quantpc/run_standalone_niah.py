@@ -161,7 +161,7 @@ def main() -> None:
     # 50 matches benchmarks/Needle/run_bin.py; at 30 the model was still
     # mid-preamble on several cells and got cut off before naming the needle.
     parser.add_argument("--max-new-tokens", type=int, default=50)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--offline-proj-path", default=None,
                         help="stored block-32 encoders (and decoders, if the file has them)")
     parser.add_argument(
