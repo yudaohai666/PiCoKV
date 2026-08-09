@@ -1,7 +1,10 @@
 #!/bin/bash
 # RULER eval: QuanPC methods + dense baselines.
+# Mirrors the offline/whiten switches in Needle/run_niah.sh and
+# Longbench/run_longbench.sh so all three benchmarks drive the same projection
+# sweeps.
 # Output (relative to REPO_ROOT, cd'd below):
-#   quantpc:  results/ruler/<MODEL>_quantpc_k{K}_v{V}_exp{E}_zr{ZR}/
+#   quantpc:  results/ruler/<MODEL>_quantpc_k{K}_v{V}_exp{E}_zr{ZR}{TAG}/
 #   baseline: results/ruler/<MODEL>_{flash_attention_2|sdpa}/
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,19 +17,20 @@ cd "${REPO_ROOT}"
 # hotpot QA local file (CMU source is often 502; use local copy). Absolute path.
 export HOTPOTQA_JSON="${SCRIPT_DIR}/ruler_qa/hotpot_dev_distractor_v1.json"
 
-GPU=3
+GPU="${GPU:-3}"
 MODEL="/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct"
+MODEL_NAME="$(basename "${MODEL}")"
 
 # RULER params
-MAX_SEQ_LENGTHS="32768"   # comma-separated, e.g. "4096,8192,16384,32768,65536,131072"
-MAX_LENGTH=131072
-BATCH_SIZE=1
-MAX_GEN_TOKS=128
-LIMIT=100
+MAX_SEQ_LENGTHS="${MAX_SEQ_LENGTHS:-8192,16384,32768,65536,131072}"   # comma-separated, e.g. "4096,8192,16384,32768,65536,131072"
+MAX_LENGTH="${MAX_LENGTH:-131072}"
+BATCH_SIZE="${BATCH_SIZE:-1}"
+MAX_GEN_TOKS="${MAX_GEN_TOKS:-128}"
+LIMIT="${LIMIT:-100}"
 # Use "ruler" for all tasks; here only cwe (fast, 100 samples).
-TASKS="ruler_cwe"
+# TASKS="${TASKS:-ruler_cwe}"
 # All tasks:
-# TASKS="niah_single_1,niah_single_2,niah_single_3,niah_multikey_1,niah_multikey_2,niah_multikey_3,niah_multiquery,niah_multivalue,ruler_vt,ruler_cwe,ruler_fwe,ruler_qa_squad,ruler_qa_hotpot"
+TASKS="niah_single_1,niah_single_2,niah_single_3,niah_multikey_1,niah_multikey_2,niah_multikey_3,niah_multiquery,niah_multivalue,ruler_vt,ruler_cwe,ruler_fwe,ruler_qa_squad,ruler_qa_hotpot"
 
 # Methods to run. quantpc/kivi/oscar = quantized KV; flash_attention_2/sdpa/eager = dense baselines.
 METHODS=(
@@ -36,6 +40,33 @@ METHODS=(
   # flash_attention_2
   # sdpa
 )
+# Back-compat: METHOD=oscar forces a single method.
+if [ -n "${METHOD:-}" ]; then METHODS=("${METHOD}"); fi
+
+# quantpc K/V sweep (quantpc only). Override a single pair via env, e.g.
+# KV="320 256" bash run_ruler.sh; otherwise use the list below.
+if [ -n "${KV:-}" ]; then
+  CONFIGS=("${KV}")
+else
+  CONFIGS=(
+    "320 256"
+  )
+fi
+
+# quantpc. Offline whitening is baked into the folded artifact (never pass
+# --whiten for offline); online whitening rotates K/V at prefill. Mirrors the
+# offline/whiten switches in Needle/run_niah.sh so all benchmarks drive the
+# same projection sweeps.
+SINK="${SINK:-64}"; LOCAL="${LOCAL:-256}"
+EXP_BITS="${EXP_BITS:-4}"; EAS="${EAS:-0.01}"; ZEROROPE="${ZEROROPE:-20}"
+USE_OFFLINE="${USE_OFFLINE:-1}"      # 1=load pre-fitted projections; 0=online QR
+WHITEN="${WHITEN:-1}"                # 1=whiten K+V; k=whiten K only (offline); 0=no
+OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"  # override the derived offline file
+
+# exp-bits / zerorope ablation: the offline folded pair is calibrated at
+# zerorope 20, so vary these only on the online path (USE_OFFLINE=0), e.g.
+#   for zr in 0 5 10 15 25 30; do USE_OFFLINE=0 ZEROROPE=$zr bash run_ruler.sh; done
+#   for e  in 2 4 6 8;         do USE_OFFLINE=0 EXP_BITS=$e  bash run_ruler.sh; done
 
 # KIVI params (2/4-bit KV, single run).
 KIVI_K="${KIVI_K:-2}"
@@ -53,42 +84,6 @@ OSCAR_KV_NORM="${OSCAR_KV_NORM:-1}"
 OSCAR_EVICT="${OSCAR_EVICT:-256}"
 OSCAR_OFFLINE_V_HAD="${OSCAR_OFFLINE_V_HAD:-1}"
 
-# quantpc offline block-32 encoders: USE_OFFLINE=1 skips the online QR at prefill
-# (default path offline_projection/{model}_k{K}_v{V}_block32.pt). OFFLINE_PROJ_PATH
-USE_OFFLINE="${USE_OFFLINE:-0}"
-OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
-OFFLINE_ARGS=()
-if [ "${USE_OFFLINE}" = "1" ] || [ -n "${OFFLINE_PROJ_PATH}" ]; then
-  OFFLINE_ARGS=(--offline)
-  [ -n "${OFFLINE_PROJ_PATH}" ] && OFFLINE_ARGS+=(--offline-proj-path "${OFFLINE_PROJ_PATH}")
-fi
-# Output-dir suffix so offline runs don't overwrite online ones (matches output_tag).
-OFFLINE_TAG=""
-if [ ${#OFFLINE_ARGS[@]} -gt 0 ]; then
-  OFFLINE_TAG="_offline"
-fi
-
-# quantpc ablation sweep (quantpc only). Fields: "K V EXP_BITS ZEROROPE".
-#   K/V      = per-token binary projection components (storage precision)
-#   EXP_BITS = softmax weight quant bits, CUDA supports {1,2,4,8}
-#   ZEROROPE = RoPE dims zeroed before quantizing key, 0 <= ZR <= head_dim/2 (=64)
-# Output dir encodes all vars so same K/V with different exp/zr don't overwrite.
-CONFIGS=(
-  # K   V   exp  zr    (anchor = current default)
-  "320 320  4   20"
-  # exp-bits ablation (fixed K320 V320 zr20)
-  "320 320  2   20"
-  "320 320  6   20"
-  "320 320  8   20"
-  # zerorope ablation (fixed K320 V320 exp4)
-  "320 320  4   0"
-  "320 320  4   5"
-  "320 320  4   10"
-  "320 320  4   15"
-  "320 320  4   25"
-  "320 320  4   30"
-)
-
 # run_ruler METHOD OUT_PATH RUN_ARGS...
 run_ruler() {
   local method="$1"; shift
@@ -102,17 +97,28 @@ run_ruler() {
     "${out_arg[@]}" --apply_chat_template "$@"
 }
 
-MODEL_NAME="$(basename "${MODEL}")"
-
-for method in "${METHODS[@]}"; do
-  case "${method}" in
+for METHOD in "${METHODS[@]}"; do
+  case "${METHOD}" in
     quantpc)
       for cfg in "${CONFIGS[@]}"; do
-        read -r K V EXP ZR <<< "$cfg"
-        OUT="results/ruler/${MODEL_NAME}_quantpc_k${K}_v${V}_exp${EXP}_zr${ZR}${OFFLINE_TAG}/"
-        echo "=== RULER: quantpc k=${K} v=${V} exp=${EXP} zr=${ZR} -> ${OUT} ==="
+        read -r K V <<< "$cfg"
+        ARGS=()
+        if [ "${USE_OFFLINE}" = "1" ]; then
+          case "${WHITEN}" in
+            1) SUFFIX="folded";         TAG="_offline_whiten"   ;;  # K+V whitened
+            k) SUFFIX="folded_whitenK"; TAG="_offline_whitenK"  ;;  # K-only whitened
+            *) SUFFIX="nowhiten";       TAG="_offline_nowhiten" ;;
+          esac
+          PROJ="${OFFLINE_PROJ_PATH:-${REPO_ROOT}/offline_projection/projections/${MODEL_NAME}_k${K}_v${V}_block32_${SUFFIX}.pt}"
+          ARGS+=(--offline-proj-path "${PROJ}")
+        else
+          [ "${WHITEN}" = "1" ] && { ARGS+=(--whiten); TAG="_online_whiten"; } || TAG="_online"
+        fi
+        OUT="results/ruler/${MODEL_NAME}_quantpc_k${K}_v${V}_exp${EXP_BITS}_zr${ZEROROPE}${TAG}/"
+        echo "=== RULER: quantpc k=${K} v=${V} exp=${EXP_BITS} zr=${ZEROROPE} -> ${OUT} ==="
         run_ruler quantpc "${OUT}" \
-          --k-bits "${K}" --v-bits "${V}" --exp-bits "${EXP}" --eas 0.01 --zerorope "${ZR}" "${OFFLINE_ARGS[@]}"
+          --k-bits "${K}" --v-bits "${V}" --sink-size "${SINK}" --local-size "${LOCAL}" \
+          --exp-bits "${EXP_BITS}" --eas "${EAS}" --zerorope "${ZEROROPE}" "${ARGS[@]}"
       done
       ;;
     kivi)
@@ -131,8 +137,10 @@ for method in "${METHODS[@]}"; do
       run_ruler oscar "" "${OSCAR_ARGS[@]}"
       ;;
     *)
-      echo "=== RULER: ${method} (dense baseline) ==="
-      run_ruler "${method}" ""
+      echo "=== RULER: ${METHOD} (dense baseline) ==="
+      run_ruler "${METHOD}" ""
       ;;
   esac
 done
+
+echo "All done."

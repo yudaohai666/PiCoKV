@@ -313,7 +313,7 @@ def main() -> None:
     parser.add_argument(
         "--offline",
         action="store_true",
-        help="quantpc: use offline block-32 encoders (default path offline_projection/{model}_k{K}_v{V}_block32.pt)",
+        help="quantpc: use offline block-32 encoders (default path offline_projection/projections/{model}_k{K}_v{V}_block32_folded.pt)",
     )
     parser.add_argument(
         "--offline-proj-path",

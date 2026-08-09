@@ -180,8 +180,14 @@ def parse_arguments():
     parser.add_argument("--kv-norm", default="1", help="OScaR kv norm (INT2 默认 1)")
     parser.add_argument("--residual-evict-size", type=int, default=256, help="OScaR residual evict size (INT2 默认 256)")
     parser.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
-    parser.add_argument("--offline", action="store_true", help="quantpc: use offline block-32 encoders (default path offline_projection/{model}_k{K}_v{V}_block32.pt)")
+    parser.add_argument("--offline", action="store_true", help="quantpc: use offline block-32 encoders (default path offline_projection/projections/{model}_k{K}_v{V}_block32_folded.pt)")
     parser.add_argument("--offline-proj-path", default=None, help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
+    parser.add_argument(
+        "--whiten",
+        action="store_true",
+        help="quantpc: rotate K/V into the query-whitened basis at runtime; a "
+             "folded projection already has this baked into its stored pair",
+    )
 
     # Task configuration
     parser.add_argument(
@@ -252,8 +258,52 @@ def create_ruler_model(model, tokenizer, kv_cache_factory, args):
     return ruler_model
 
 
+def _base_len(metric_key):
+    """Return the leading sequence-length int of an lm_eval metric key, or None.
+
+    RULER metric keys look like "16384,none" or "16384_stderr,none"; the length
+    is the leading integer before the first ``,`` / ``_``.
+    """
+    head = metric_key.split(",")[0].split("_")[0]
+    try:
+        return int(head)
+    except ValueError:
+        return None
+
+
+def _merge_length_results(per_length):
+    """Merge single-length simple_evaluate outputs into one results dict.
+
+    Each per-length call only yields real metric values for its own length (all
+    other lengths aggregate to -1), so for every task we keep exactly the metric
+    keys whose leading length equals the length that call was run at. ``config``
+    is taken from the first call; ``samples`` are concatenated across lengths so
+    the predictions .jsonl still spans every length.
+    """
+    merged_results, merged_samples, config = {}, {}, {}
+    for length, res in per_length:
+        if not config:
+            config = res.get("config", {})
+        for task, metrics in res.get("results", {}).items():
+            tgt = merged_results.setdefault(task, {})
+            for mk, mv in metrics.items():
+                if _base_len(mk) == length:
+                    tgt[mk] = mv
+        for task, samps in res.get("samples", {}).items():
+            merged_samples.setdefault(task, []).extend(samps)
+    return {"results": merged_results, "config": config, "samples": merged_samples}
+
+
 def run_evaluation(ruler_model, args, output_path):
-    """Run RULER evaluation via lm_eval."""
+    """Run RULER evaluation via lm_eval.
+
+    lm_eval concatenates every sequence length into a single length-ascending doc
+    list per task, and ``--limit N`` truncates that combined list from the front,
+    so one global limit lands entirely in the shortest length. To make ``--limit``
+    mean N samples PER length, evaluate one length at a time (each call regenerates
+    only that length's synthetic docs, so the limit applies within it) and merge
+    the per-length metrics back into one results dict.
+    """
     tasks = [task.strip() for task in args.tasks.split(",")]
     max_seq_lengths = [int(x.strip()) for x in args.max_seq_lengths.split(",")]
 
@@ -266,11 +316,6 @@ def run_evaluation(ruler_model, args, output_path):
             f"({max_seq_length_needed})"
         )
 
-    metadata = {
-        "max_seq_lengths": max_seq_lengths,
-        "pretrained": args.model,
-        "tokenizer": args.model,
-    }
     model_args_str = f"pretrained={args.model},max_length={args.max_length}"
 
     os.makedirs(output_path, exist_ok=True)
@@ -278,27 +323,39 @@ def run_evaluation(ruler_model, args, output_path):
     logger.info("Starting RULER evaluation...")
     if args.apply_chat_template:
         logger.info("Chat template enabled")
+    if args.limit:
+        logger.info(f"Per-length sample limit: {args.limit} (evaluated one length at a time)")
 
-    results = evaluator.simple_evaluate(
-        model=ruler_model,
-        tasks=tasks,
-        num_fewshot=args.num_fewshot,
-        batch_size=args.batch_size,
-        limit=args.limit,
-        write_out=args.write_out,
-        log_samples=True,
-        metadata=metadata,
-        model_args=model_args_str,
-        apply_chat_template=args.apply_chat_template,
-        fewshot_as_multiturn=args.fewshot_as_multiturn,
-        # Override lm_eval's default seeds (0 / 1234) so args.seed applies
-        # consistently across python/numpy/torch and the fewshot sampler.
-        random_seed=args.seed,
-        numpy_random_seed=args.seed,
-        torch_random_seed=args.seed,
-        fewshot_random_seed=args.seed,
-    )
-    return results
+    per_length = []
+    for length in max_seq_lengths:
+        logger.info(f"=== RULER length {length} (limit={args.limit} samples/length) ===")
+        metadata = {
+            "max_seq_lengths": [length],
+            "pretrained": args.model,
+            "tokenizer": args.model,
+        }
+        res = evaluator.simple_evaluate(
+            model=ruler_model,
+            tasks=tasks,
+            num_fewshot=args.num_fewshot,
+            batch_size=args.batch_size,
+            limit=args.limit,
+            write_out=args.write_out,
+            log_samples=True,
+            metadata=metadata,
+            model_args=model_args_str,
+            apply_chat_template=args.apply_chat_template,
+            fewshot_as_multiturn=args.fewshot_as_multiturn,
+            # Override lm_eval's default seeds (0 / 1234) so args.seed applies
+            # consistently across python/numpy/torch and the fewshot sampler.
+            random_seed=args.seed,
+            numpy_random_seed=args.seed,
+            torch_random_seed=args.seed,
+            fewshot_random_seed=args.seed,
+        )
+        per_length.append((length, res))
+
+    return _merge_length_results(per_length)
 
 
 def save_results(results, args, output_path):
@@ -368,7 +425,8 @@ def main():
     if args.method == "quantpc":
         logger.info("Backend: CUDA (quantpc.quanpc_standalone)")
         logger.info(f"KV cache: k_bits={args.k_bits}, v_bits={args.v_bits}, "
-                    f"exp_bits={args.exp_bits}, eas={args.eas}, zerorope={args.zerorope}")
+                    f"exp_bits={args.exp_bits}, eas={args.eas}, zerorope={args.zerorope}, "
+                    f"whiten={args.whiten}")
     logger.info(f"Tasks: {args.tasks}")
     if args.limit:
         logger.info(f"Sample limit: {args.limit}")
@@ -378,6 +436,14 @@ def main():
             args.method, args.offline, args.offline_proj_path,
             model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,
         )
+        # A folded projection already carries the whitening in its stored pair;
+        # rotating again at runtime would account for the same basis twice.
+        if offline_proj_path is not None and args.whiten:
+            from quantpc.quanpc_standalone.transformers import load_offline_projections
+            if load_offline_projections(offline_proj_path).get("meta", {}).get("whitened"):
+                raise SystemExit(
+                    f"{offline_proj_path} already has the whitening folded in; drop --whiten."
+                )
         model, tokenizer, kv_cache_factory = load_model(
             args.model,
             method=args.method,
@@ -392,6 +458,7 @@ def main():
             use_pruning=args.use_pruning,
             prune_mode=args.prune_mode,
             log_eps=args.log_eps,
+            whiten=args.whiten,
             offline_proj_path=offline_proj_path,
             # KIVI params (--method kivi)
             group_size=args.group_size,

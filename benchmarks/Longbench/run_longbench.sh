@@ -11,6 +11,8 @@ GPU="${GPU:-7}"
 MODEL="/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct"
 BASE_RESULT_DIR="results/longbench"
 MODEL_NAME=$(basename "${MODEL}")
+# Directory holding the unzipped LongBench *.jsonl files (passed to pred.py).
+DATA_DIR="${DATA_DIR:-/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/LongBench/data}"
 
 # Methods to run. quantpc/kivi/oscar = quantized KV; flash_attention_2/sdpa/eager = dense baselines.
 METHODS=(
@@ -23,25 +25,25 @@ METHODS=(
 # Back-compat: METHOD=oscar forces a single method.
 if [ -n "${METHOD:-}" ]; then METHODS=("${METHOD}"); fi
 
-# quantpc K/V sweep (quantpc only).
-CONFIGS=(
-  "256 256"
-)
+# quantpc K/V sweep (quantpc only). Override a single pair via env, e.g.
+# KV="384 320" bash run_longbench.sh; otherwise use the list below.
+if [ -n "${KV:-}" ]; then
+  CONFIGS=("${KV}")
+else
+  CONFIGS=(
+    "320 256"
+  )
+fi
 
-# quantpc offline block-32 encoders: USE_OFFLINE=1 skips the online QR at prefill
-# (default path offline_projection/{model}_k{K}_v{V}_block32.pt). OFFLINE_PROJ_PATH
-USE_OFFLINE="${USE_OFFLINE:-0}"
-OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
-OFFLINE_ARGS=()
-if [ "${USE_OFFLINE}" = "1" ] || [ -n "${OFFLINE_PROJ_PATH}" ]; then
-  OFFLINE_ARGS=(--offline)
-  [ -n "${OFFLINE_PROJ_PATH}" ] && OFFLINE_ARGS+=(--offline-proj-path "${OFFLINE_PROJ_PATH}")
-fi
-# Output-tag suffix so offline runs don't overwrite online ones (matches output_tag).
-OFFLINE_TAG=""
-if [ ${#OFFLINE_ARGS[@]} -gt 0 ]; then
-  OFFLINE_TAG="_offline"
-fi
+# quantpc. Offline whitening is baked into the folded artifact (never pass
+# --whiten for offline); online whitening rotates K/V at prefill. Mirrors the
+# offline/whiten switches in Needle/run_niah.sh so both benchmarks drive the
+# same projection sweeps.
+SINK="${SINK:-64}"; LOCAL="${LOCAL:-256}"
+EXP_BITS="${EXP_BITS:-4}"; EAS="${EAS:-0.01}"; ZEROROPE="${ZEROROPE:-20}"
+USE_OFFLINE="${USE_OFFLINE:-1}"      # 1=load pre-fitted projections; 0=online QR
+WHITEN="${WHITEN:-1}"                # 1=whiten K+V; k=whiten K only (offline); 0=no
+OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"  # override the derived offline file
 
 # KIVI params (2/4-bit KV, single run).
 KIVI_K="${KIVI_K:-2}"
@@ -65,7 +67,8 @@ run_lb() {
   local out_dir="${BASE_RESULT_DIR}/${MODEL_NAME}/${tag}"
   echo "=== LongBench: method=${method} -> ${out_dir} ==="
   CUDA_VISIBLE_DEVICES=${GPU} python "${SCRIPT_DIR}/pred.py" \
-    --model "${MODEL}" --method "${method}" --save_dir "${BASE_RESULT_DIR}" "$@"
+    --model "${MODEL}" --method "${method}" --save_dir "${BASE_RESULT_DIR}" \
+    --data-dir "${DATA_DIR}" --output-tag "${tag}" "$@"
   python "${SCRIPT_DIR}/eval.py" --path "${out_dir}/" --eval_avg
 }
 
@@ -73,9 +76,22 @@ for METHOD in "${METHODS[@]}"; do
   case "${METHOD}" in
     quantpc)
       for cfg in "${CONFIGS[@]}"; do
-        K=$(echo "$cfg" | awk '{print $1}'); V=$(echo "$cfg" | awk '{print $2}')
-        run_lb quantpc "quantpc_k${K}_v${V}${OFFLINE_TAG}" \
-          --k-bits "${K}" --v-bits "${V}" --exp-bits 4 --eas 0.01 --zerorope 20 "${OFFLINE_ARGS[@]}"
+        read -r K V <<< "$cfg"
+        ARGS=()
+        if [ "${USE_OFFLINE}" = "1" ]; then
+          case "${WHITEN}" in
+            1) SUFFIX="folded";         TAG="_offline_whiten"   ;;  # K+V whitened
+            k) SUFFIX="folded_whitenK"; TAG="_offline_whitenK"  ;;  # K-only whitened
+            *) SUFFIX="nowhiten";       TAG="_offline_nowhiten" ;;
+          esac
+          PROJ="${OFFLINE_PROJ_PATH:-${REPO_ROOT}/offline_projection/projections/${MODEL_NAME}_k${K}_v${V}_block32_${SUFFIX}.pt}"
+          ARGS+=(--offline-proj-path "${PROJ}")
+        else
+          [ "${WHITEN}" = "1" ] && { ARGS+=(--whiten); TAG="_online_whiten"; } || TAG="_online"
+        fi
+        run_lb quantpc "quantpc_k${K}_v${V}${TAG}" \
+          --k-bits "${K}" --v-bits "${V}" --sink-size "${SINK}" --local-size "${LOCAL}" \
+          --exp-bits "${EXP_BITS}" --eas "${EAS}" --zerorope "${ZEROROPE}" "${ARGS[@]}"
       done
       ;;
     kivi)

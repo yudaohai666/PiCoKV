@@ -46,8 +46,9 @@ def resolve_offline_proj_path(
 
     Offline is requested when ``--offline`` is set or an explicit path is given
     (quantpc only). With no explicit path, the default is derived from the model
-    tag and bits: ``offline_projection/projections/{model_tag}_k{k}_v{v}_block32.pt``. Raises
-    a clear error when the resolved file is missing.
+    tag and bits: ``offline_projection/projections/{model_tag}_k{k}_v{v}_block32_folded.pt``
+    (the folded encoder+decoder+whitening artifact). Raises a clear error when
+    the resolved file is missing.
     """
     if method != "quantpc":
         return None
@@ -55,7 +56,7 @@ def resolve_offline_proj_path(
         return None
     model_tag = Path(model_name.rstrip("/")).name
     path = offline_proj_path or str(
-        _REPO_ROOT / "offline_projection" / "projections" / f"{model_tag}_k{k_bits}_v{v_bits}_block32.pt"
+        _REPO_ROOT / "offline_projection" / "projections" / f"{model_tag}_k{k_bits}_v{v_bits}_block32_folded.pt"
     )
     if not Path(path).exists():
         raise FileNotFoundError(
@@ -317,7 +318,15 @@ def _load_quantpc_model(
         value_decoders = _projs["value_decoder"]
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    device_map = _auto_device_map()
+    # With a single visible GPU (CUDA_VISIBLE_DEVICES pins one device),
+    # device_map="auto" lets accelerate offload layers to CPU under transient
+    # memory pressure -- e.g. many jobs loading at once -- silently dropping the
+    # model to CPU (516MiB VRAM, ~40x slower decode). Pin the whole model to that
+    # GPU; keep "auto" only for genuine multi-GPU sharding. Mirrors _load_baseline_model.
+    if torch.cuda.is_available() and torch.cuda.device_count() <= 1:
+        device_map = {"": 0}
+    else:
+        device_map = _auto_device_map()
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         device_map=device_map,
@@ -351,7 +360,13 @@ def _load_baseline_model(
     use its default (DynamicCache) KV cache.
     """
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    device_map = _auto_device_map()
+    # With a single visible GPU, device_map="auto" can offload a tiny buffer to
+    # CPU, which breaks flash_attention_2 (its kernel is CUDA-only). Pin the whole
+    # model to that GPU; keep "auto" only for genuine multi-GPU sharding.
+    if torch.cuda.is_available() and torch.cuda.device_count() <= 1:
+        device_map = {"": 0}
+    else:
+        device_map = _auto_device_map()
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         device_map=device_map,

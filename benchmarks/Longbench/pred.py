@@ -225,6 +225,10 @@ def parse_args(argv=None):
              "baseline attn impl ('flash_attention_2' / 'sdpa' / 'eager')",
     )
     p.add_argument("--save_dir", default="results/longbench", help="base output dir")
+    p.add_argument("--output-tag", default=None,
+                   help="explicit output subdir name under save_dir/<model>/; overrides the "
+                        "derived method+bits tag so the runner can drive offline/whiten sweeps "
+                        "(mirrors Needle/run_niah.sh's shell-controlled output path)")
     p.add_argument("--seed", type=int, default=42)
     # ── quantpc KV-cache params (--method quantpc) ──
     p.add_argument("--k-bits", type=int, default=320, help="key projection bits (also KIVI KV bits)")
@@ -242,7 +246,7 @@ def parse_args(argv=None):
                    help="evaluate only the first N samples of each dataset")
     p.add_argument("--datasets", default=None,
                    help="comma-separated dataset subset (default: config file list)")
-    p.add_argument("--data-dir", default="/data/zxh/datasets/longbench/data",
+    p.add_argument("--data-dir", default="datasets/longbench/data",
                    help="directory holding the unzipped LongBench *.jsonl files")
     p.add_argument("--whiten", action="store_true",
                    help="quantpc: rotate K/V into the query- and o_proj-whitened bases")
@@ -277,8 +281,10 @@ def main() -> None:
     max_length = model2maxlen.get(model_key, 31500)
     print(f"Model: {args.model} | Method: {args.method} | max_length: {max_length}")
 
-    tag = output_tag(args.method, args.k_bits, args.v_bits, args.num_bits,
-                     offline=(args.offline or args.offline_proj_path is not None))
+    tag = args.output_tag or output_tag(
+        args.method, args.k_bits, args.v_bits, args.num_bits,
+        offline=(args.offline or args.offline_proj_path is not None),
+    )
     save_path = Path(args.save_dir) / model_key / tag
     save_path.mkdir(parents=True, exist_ok=True)
     print(f"Output dir: {save_path}")
