@@ -32,11 +32,12 @@ LIMIT="${LIMIT:-100}"
 # All tasks:
 TASKS="niah_single_1,niah_single_2,niah_single_3,niah_multikey_1,niah_multikey_2,niah_multikey_3,niah_multiquery,niah_multivalue,ruler_vt,ruler_cwe,ruler_fwe,ruler_qa_squad,ruler_qa_hotpot"
 
-# Methods to run. quantpc/kivi/oscar = quantized KV; flash_attention_2/sdpa/eager = dense baselines.
+# Methods to run. quantpc/kivi/oscar/polar = quantized KV; flash_attention_2/sdpa/eager = dense baselines.
 METHODS=(
   quantpc
   # kivi
   # oscar
+  # polar
   # flash_attention_2
   # sdpa
 )
@@ -83,6 +84,14 @@ OSCAR_KV_ROTATION="${OSCAR_KV_ROTATION:-hadamard}"
 OSCAR_KV_NORM="${OSCAR_KV_NORM:-1}"
 OSCAR_EVICT="${OSCAR_EVICT:-256}"
 OSCAR_OFFLINE_V_HAD="${OSCAR_OFFLINE_V_HAD:-1}"
+
+# PolarQuant (src/PolarQuant). K polar-quant + (mixed) V KIVI-quant. Passed to
+# run_ruler_evaluation.py as --polar-* flags (threaded to common.py::_load_polar_model).
+# NOTE: polar decode is bsz=1 only; keep BATCH_SIZE=1.
+#   POLAR_MODE : mixed | group (K-only) | snapkv ; RBITS/TBITS: K bits (sum<=8, def 33)
+#   VBITS: V bits, mixed only (KIVI kernel 2 or 4; def 2)
+POLAR_MODE="${POLAR_MODE:-mixed}"
+POLAR_RBITS="${POLAR_RBITS:-3}"; POLAR_TBITS="${POLAR_TBITS:-3}"; POLAR_VBITS="${POLAR_VBITS:-2}"
 
 # run_ruler METHOD OUT_PATH RUN_ARGS...
 run_ruler() {
@@ -135,6 +144,13 @@ for METHOD in "${METHODS[@]}"; do
       [ -n "${OSCAR_EVICT}" ]             && OSCAR_ARGS+=(--residual-evict-size "${OSCAR_EVICT}")
       [ "${OSCAR_OFFLINE_V_HAD}" = "1" ]  && OSCAR_ARGS+=(--offline-v-hadamard)
       run_ruler oscar "" "${OSCAR_ARGS[@]}"
+      ;;
+    polar)
+      OUT="results/ruler/${MODEL_NAME}_polar_${POLAR_MODE}_${POLAR_RBITS}${POLAR_TBITS}${POLAR_VBITS}/"
+      echo "=== RULER: polar mode=${POLAR_MODE} rbits=${POLAR_RBITS} tbits=${POLAR_TBITS} vbits=${POLAR_VBITS} -> ${OUT} ==="
+      run_ruler polar "${OUT}" \
+        --polar-mode "${POLAR_MODE}" --polar-rbits "${POLAR_RBITS}" \
+        --polar-tbits "${POLAR_TBITS}" --polar-vbits "${POLAR_VBITS}"
       ;;
     *)
       echo "=== RULER: ${METHOD} (dense baseline) ==="

@@ -15,11 +15,12 @@ mkdir -p "${PROF_DIR}"
 
 # Profiling params (aligned with run_efficiency.py).
 LENGTH="${LENGTH:-32768}"   # prefill length
+BATCH="${BATCH:-1}"         # prefill/decode batch size (polar: safe >1, inputs are equal-length)
 WARMUP="${WARMUP:-2}"       # untimed decode steps before profiling (= --warmup)
 ACTIVE="${ACTIVE:-64}"      # profiled decode steps (= --decode-tokens)
 ROWS="${ROWS:-30}"          # key_averages table rows
 
-# Method: quantpc | kivi | oscar | flash_attention_2 | sdpa | eager
+# Method: quantpc | kivi | oscar | polar | flash_attention_2 | sdpa | eager
 METHOD="${METHOD:-quantpc}"
 
 # quantpc KV-cache params (aligned with run_efficiency.py defaults).
@@ -51,6 +52,10 @@ OSCAR_KV_NORM="${OSCAR_KV_NORM:-1}"
 OSCAR_EVICT="${OSCAR_EVICT:-256}"
 OSCAR_OFFLINE_V_HAD="${OSCAR_OFFLINE_V_HAD:-1}"
 
+# PolarQuant (src/PolarQuant). Passed to profile_decode.py as --polar-* flags.
+POLAR_MODE="${POLAR_MODE:-mixed}"
+POLAR_RBITS="${POLAR_RBITS:-3}"; POLAR_TBITS="${POLAR_TBITS:-3}"; POLAR_VBITS="${POLAR_VBITS:-2}"
+
 case "${METHOD}" in
   quantpc)
     METHOD_ARGS=(--k-bits "${K_BITS}" --v-bits "${V_BITS}" --sink-size "${SINK}" --local-size "${LOCAL}" \
@@ -71,6 +76,10 @@ case "${METHOD}" in
     [ -n "${OSCAR_EVICT}" ]             && METHOD_ARGS+=(--residual-evict-size "${OSCAR_EVICT}")
     [ "${OSCAR_OFFLINE_V_HAD}" = "1" ]  && METHOD_ARGS+=(--offline-v-hadamard)
     ;;
+  polar)
+    METHOD_ARGS=(--polar-mode "${POLAR_MODE}" --polar-rbits "${POLAR_RBITS}" \
+                 --polar-tbits "${POLAR_TBITS}" --polar-vbits "${POLAR_VBITS}")
+    ;;
   *)
     METHOD_ARGS=()
     ;;
@@ -80,5 +89,5 @@ TRACE="${PROF_DIR}/${METHOD}_${LENGTH}.json"
 echo "=== Profiling decode: method=${METHOD} length=${LENGTH} -> ${TRACE} ==="
 CUDA_VISIBLE_DEVICES=${GPU} python "${SCRIPT_DIR}/profile_decode.py" \
   --model "${MODEL}" --method "${METHOD}" \
-  --length "${LENGTH}" --warmup "${WARMUP}" --active "${ACTIVE}" --rows "${ROWS}" \
+  --length "${LENGTH}" --batch "${BATCH}" --warmup "${WARMUP}" --active "${ACTIVE}" --rows "${ROWS}" \
   --trace "${TRACE}" "${METHOD_ARGS[@]}"

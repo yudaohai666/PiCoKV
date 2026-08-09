@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import copy
 import random
 import sys
 from pathlib import Path
@@ -8,7 +9,14 @@ from typing import Callable, Optional, Tuple
 
 import numpy as np
 import torch
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    GenerationConfig,
+    PreTrainedModel,
+    PreTrainedTokenizerBase,
+)
 
 # Dense-baseline attn implementations selectable via --method. Anything not in
 # this set and not "quantpc"/"kivi"/"oscar" is rejected by load_model.
@@ -25,6 +33,12 @@ KIVI_SRC = Path(__file__).resolve().parents[1] / "src" / "KIVI"
 # oscar_cuda.*.so into this dir, so putting OSCAR_SRC on sys.path resolves both
 # `import oscar` and `import oscar_cuda`.
 OSCAR_SRC = Path(__file__).resolve().parents[1] / "src" / "OScaR-KV-Quant"
+
+# PolarQuant ships a custom HF modeling file (models/modeling_llama_polar.py) plus a
+# triton decode kernel (models/kernel4group.py). Its Mixed (K+V) variant reuses KIVI's
+# value-quant kernels under src/KIVI/quant, so _load_polar_model puts both trees on
+# sys.path. See _load_polar_model for the (models-package) name-collision handling.
+POLAR_SRC = Path(__file__).resolve().parents[1] / "src" / "PolarQuant"
 
 # make_cache is a zero-arg callable returning a fresh QuantKVCache (quantpc), or
 # None for dense baselines (the model uses its default cache).
@@ -349,6 +363,106 @@ def _load_quantpc_model(
     return model, tokenizer, make_cache
 
 
+def _load_polar_model(
+    model_name: str,
+    *,
+    polar_mode: str = "mixed",
+    rbits: int = 3,
+    tbits: int = 3,
+    vbits: int = 2,
+) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
+    """Load PolarQuant's custom HF model (src/PolarQuant/models/modeling_llama_polar.py).
+
+    ``polar_mode`` selects the attention variant baked into every decoder layer:
+      * ``group``  -> K-only polar quant (no extra deps).
+      * ``mixed``  -> K polar + V group-quant; reuses KIVI's value kernels under
+                      src/KIVI/quant (triton_quantize_and_pack_along_last_dim /
+                      cuda_bmm_fA_qB_outer, backed by the compiled kivi_gemv .so).
+      * ``snapkv`` -> SnapKV eviction + K polar quant.
+    ``rbits/tbits`` are the polar radius/angle bits; ``vbits`` the V bits (mixed only).
+
+    PolarQuant drives generation through its own ``generate`` free function (not HF
+    ``model.generate``) and keeps a tuple-of-tuples KV cache built internally from
+    ``past_key_values=None``. So ``make_cache`` is ``None`` (the runner must NOT
+    override ``past_key_values``), and we monkeypatch ``model.generate`` with a thin
+    HF-compatible adapter. Config comes from the runner's CLI flags
+    (--polar-mode / --polar-rbits / --polar-tbits / --polar-vbits), threaded through
+    ``load_model`` just like the quantpc/kivi/oscar flags.
+
+    NOTE: the accuracy runners feed one prompt at a time (PolarQuant's decode skips
+    padding-mask handling and tracks a single scalar kv_seq_len); the Efficiency
+    runners use equal-length synthetic inputs, so batch>1 is safe there.
+    """
+    # Both KIVI and PolarQuant ship a top-level `models` package. KIVI's has an
+    # __init__.py (a regular package), which would shadow PolarQuant's namespace
+    # `models` regardless of sys.path order. So for the Mixed path we import KIVI's
+    # value kernels FIRST (while src/KIVI is on the path, populating sys.modules for
+    # `quant.*` + `kivi_gemv`), then DROP src/KIVI so only PolarQuant provides
+    # `models` when we import the polar model. src/KIVI/quant stays on the path so
+    # kivi_gemv keeps resolving. One method per process in the runners, so this is safe.
+    if polar_mode == "mixed":
+        for p in (str(KIVI_SRC), str(KIVI_SRC / "quant")):
+            if p not in sys.path:
+                sys.path.insert(0, p)
+        import quant.new_pack  # noqa: F401  (cached; used lazily by the mixed attn)
+        import quant.matmul  # noqa: F401
+        if str(KIVI_SRC) in sys.path:
+            sys.path.remove(str(KIVI_SRC))
+    if str(POLAR_SRC) not in sys.path:
+        sys.path.insert(0, str(POLAR_SRC))
+
+    from models.modeling_llama_polar import (  # noqa: E402
+        LlamaPolarForCausalLM,
+        generate as polar_generate,
+    )
+
+    config = AutoConfig.from_pretrained(model_name)
+    config.polar_mode = polar_mode
+    config.polar_rbits = rbits
+    config.polar_tbits = tbits
+    config.polar_vbits = vbits
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    gen_cfg = GenerationConfig.from_pretrained(model_name)
+
+    # kernel4group and the KIVI value kernels are fp16-only; do NOT use bf16.
+    model = LlamaPolarForCausalLM.from_pretrained(
+        model_name, config=config, torch_dtype=torch.float16,
+    )
+    if torch.cuda.is_available():
+        model = model.cuda()
+    model.eval()
+
+    @torch.no_grad()
+    def _generate(
+        input_ids=None,
+        attention_mask=None,
+        max_new_tokens=32,
+        do_sample=False,
+        eos_token_id=None,
+        return_dict_in_generate=False,
+        **_ignored,
+    ):
+        cfg = gen_cfg
+        if eos_token_id is not None:  # e.g. LongBench samsum passes a custom eos list
+            cfg = copy.deepcopy(gen_cfg)
+            cfg.eos_token_id = eos_token_id
+        gen_ids = polar_generate(
+            model, input_ids, attention_mask, cfg,
+            do_sample=do_sample, max_new_tokens=max_new_tokens,
+        )
+        # PolarQuant returns ONLY the new tokens; HF callers expect prompt+continuation
+        # and slice output[context_length:] / output.sequences[:, ctx:].
+        full = torch.cat([input_ids, gen_ids], dim=-1)
+        if return_dict_in_generate:
+            from transformers.generation.utils import GenerateDecoderOnlyOutput
+            return GenerateDecoderOnlyOutput(sequences=full)
+        return full
+
+    model.generate = _generate
+    return model, tokenizer, None
+
+
 def _load_baseline_model(
     model_name: str,
     *,
@@ -403,6 +517,10 @@ def load_model(
     residual_evict_size: Optional[int] = None,
     offline_v_hadamard: bool = False,
     offline_proj_path: Optional[str] = None,
+    polar_mode: str = "mixed",
+    polar_rbits: int = 3,
+    polar_tbits: int = 3,
+    polar_vbits: int = 2,
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
     """Load a HF model+tokenizer and return ``(model, tokenizer, make_cache)``.
 
@@ -419,6 +537,11 @@ def load_model(
                                  ``num_bits`` / ``quant_mode`` / ``group_size`` set
                                  the KV quantization. ``make_cache`` is ``None``
                                  (OScaR builds its quantized cache internally).
+      * ``polar``             -> ``_load_polar_model`` (src/PolarQuant);
+                                 ``polar_mode`` / ``polar_rbits`` / ``polar_tbits`` /
+                                 ``polar_vbits`` set the polar KV quantization.
+                                 ``make_cache`` is ``None`` (PolarQuant builds its own
+                                 tuple KV cache and drives its own ``generate``).
       * flash_attention_2 / sdpa / eager -> dense full-precision baseline;
                                  ``make_cache`` is ``None`` (default KV cache).
     """
@@ -460,8 +583,17 @@ def load_model(
             offline_proj_path=offline_proj_path,
         )
 
+    if method == "polar":
+        return _load_polar_model(
+            model_name,
+            polar_mode=polar_mode,
+            rbits=polar_rbits,
+            tbits=polar_tbits,
+            vbits=polar_vbits,
+        )
+
     if method not in BASELINE_ATTN:
         raise ValueError(
-            f"Unknown method '{method}'. Supported: 'quantpc', 'kivi', 'oscar', {sorted(BASELINE_ATTN)}."
+            f"Unknown method '{method}'. Supported: 'quantpc', 'kivi', 'oscar', 'polar', {sorted(BASELINE_ATTN)}."
         )
     return _load_baseline_model(model_name, attn_implementation=method)

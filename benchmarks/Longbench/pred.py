@@ -79,6 +79,11 @@ class QuantPCModel:
         offline_v_hadamard: bool = True,
         # quantpc offline block-32 encoders (--method quantpc)
         offline_proj_path: str | None = None,
+        # PolarQuant params (--method polar)
+        polar_mode: str = "mixed",
+        polar_rbits: int = 3,
+        polar_tbits: int = 3,
+        polar_vbits: int = 2,
     ):
         self.method = method
         self.model, self.tokenizer, self._make_cache = load_model(
@@ -107,6 +112,11 @@ class QuantPCModel:
             kv_norm=kv_norm,
             residual_evict_size=residual_evict_size,
             offline_v_hadamard=offline_v_hadamard,
+            # PolarQuant params (--method polar)
+            polar_mode=polar_mode,
+            polar_rbits=polar_rbits,
+            polar_tbits=polar_tbits,
+            polar_vbits=polar_vbits,
         )
 
     def build_cache(self):
@@ -263,6 +273,11 @@ def parse_args(argv=None):
     p.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
     p.add_argument("--offline", action="store_true", help="quantpc: use offline block-32 encoders (default path offline_projection/{model}_k{K}_v{V}_block32.pt)")
     p.add_argument("--offline-proj-path", default=None, help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
+    # ── PolarQuant params (--method polar) ──
+    p.add_argument("--polar-mode", default="mixed", choices=["mixed", "group", "snapkv"], help="PolarQuant attention variant: mixed (K polar + V KIVI-quant) | group (K-only) | snapkv")
+    p.add_argument("--polar-rbits", type=int, default=3, help="PolarQuant K radius bits (rbits+tbits<=8)")
+    p.add_argument("--polar-tbits", type=int, default=3, help="PolarQuant K angle bits (rbits+tbits<=8)")
+    p.add_argument("--polar-vbits", type=int, default=2, help="PolarQuant V bits (mixed only; KIVI kernel supports 2 or 4)")
     return p.parse_args(argv)
 
 
@@ -319,6 +334,11 @@ def main() -> None:
         residual_evict_size=args.residual_evict_size,
         offline_v_hadamard=args.offline_v_hadamard,
         offline_proj_path=offline_proj_path,
+        # PolarQuant params (--method polar)
+        polar_mode=args.polar_mode,
+        polar_rbits=args.polar_rbits,
+        polar_tbits=args.polar_tbits,
+        polar_vbits=args.polar_vbits,
     )
 
     for dataset in datasets:

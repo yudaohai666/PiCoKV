@@ -19,6 +19,12 @@ BATCH_SIZE=1
 WARMUP=1
 REPEATS=3
 
+# PolarQuant (src/PolarQuant). Passed to run_efficiency.py as --polar-* flags.
+# NOTE: polar batches only over equal-length prompts; Efficiency uses synthetic
+# equal-length inputs, so BATCH_SIZE>1 is safe here (unlike the accuracy harnesses).
+POLAR_MODE="${POLAR_MODE:-mixed}"
+POLAR_RBITS="${POLAR_RBITS:-3}"; POLAR_TBITS="${POLAR_TBITS:-3}"; POLAR_VBITS="${POLAR_VBITS:-2}"
+
 # quantpc offline block-32 encoders: USE_OFFLINE=1 skips the online QR at prefill
 # (default path offline_projection/{model}_k{K}_v{V}_block32.pt). OFFLINE_PROJ_PATH
 USE_OFFLINE="${USE_OFFLINE:-1}"
@@ -48,7 +54,7 @@ run_one() {
 
 # dense baseline
 # run_one flash_attention_2 flash_attention_2
-run_one sdpa sdpa
+# run_one sdpa sdpa
 
 
 # quantpc (CUDA backend quantpc.quanpc)
@@ -63,6 +69,11 @@ run_one quantpc "quantpc_k256_v256${OFFLINE_TAG}" --k-bits 256 --v-bits 256 "${O
 
 # kivi (2-bit K/V)
 # run_one kivi kivi_k2_v2 --k-bits 2 --v-bits 2 --group-size 32 --residual-length 128
+
+# polar (src/PolarQuant). K polar + (mixed) V KIVI-quant; config via --polar-* flags.
+# run_one polar "polar_${POLAR_MODE}_${POLAR_RBITS}${POLAR_TBITS}${POLAR_VBITS}" \
+#   --polar-mode "${POLAR_MODE}" --polar-rbits "${POLAR_RBITS}" \
+#   --polar-tbits "${POLAR_TBITS}" --polar-vbits "${POLAR_VBITS}"
 
 echo "=== Comparison table ==="
 python "${SCRIPT_DIR}/run_efficiency.py" --compare "${RESULT_DIR}"

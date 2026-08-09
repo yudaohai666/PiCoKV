@@ -134,6 +134,11 @@ def main() -> None:
     p.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
     p.add_argument("--sort", default=None, choices=["cpu", "cuda"],
                    help="override sort key: cpu=self_cpu_time_total, cuda=self_cuda_time_total")
+    # ── PolarQuant params (--method polar) ──
+    p.add_argument("--polar-mode", default="mixed", choices=["mixed", "group", "snapkv"], help="PolarQuant attention variant: mixed (K polar + V KIVI-quant) | group (K-only) | snapkv")
+    p.add_argument("--polar-rbits", type=int, default=3, help="PolarQuant K radius bits (rbits+tbits<=8)")
+    p.add_argument("--polar-tbits", type=int, default=3, help="PolarQuant K angle bits (rbits+tbits<=8)")
+    p.add_argument("--polar-vbits", type=int, default=2, help="PolarQuant V bits (mixed only; KIVI kernel supports 2 or 4)")
     args = p.parse_args()
 
     seed_everything(42)
@@ -166,6 +171,11 @@ def main() -> None:
         residual_evict_size=args.residual_evict_size,
         offline_v_hadamard=args.offline_v_hadamard,
         offline_proj_path=offline_proj_path,
+        # PolarQuant params (--method polar)
+        polar_mode=args.polar_mode,
+        polar_rbits=args.polar_rbits,
+        polar_tbits=args.polar_tbits,
+        polar_vbits=args.polar_vbits,
     )
     device = model.device
     vocab = model.config.vocab_size

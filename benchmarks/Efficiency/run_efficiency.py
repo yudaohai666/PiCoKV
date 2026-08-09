@@ -287,6 +287,11 @@ def run(args) -> None:
         kv_norm=args.kv_norm,
         residual_evict_size=args.residual_evict_size,
         offline_v_hadamard=args.offline_v_hadamard,
+        # PolarQuant params (--method polar)
+        polar_mode=args.polar_mode,
+        polar_rbits=args.polar_rbits,
+        polar_tbits=args.polar_tbits,
+        polar_vbits=args.polar_vbits,
     )
     device = model.device
     vocab_size = model.config.vocab_size
@@ -407,6 +412,11 @@ def main() -> None:
     parser.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
     parser.add_argument("--offline", action="store_true", help="quantpc: use offline block-32 encoders (default path offline_projection/{model}_k{K}_v{V}_block32.pt)")
     parser.add_argument("--offline-proj-path", default=None, help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
+    # ── PolarQuant params (--method polar) ──
+    parser.add_argument("--polar-mode", default="mixed", choices=["mixed", "group", "snapkv"], help="PolarQuant attention variant: mixed (K polar + V KIVI-quant) | group (K-only) | snapkv")
+    parser.add_argument("--polar-rbits", type=int, default=3, help="PolarQuant K radius bits (rbits+tbits<=8)")
+    parser.add_argument("--polar-tbits", type=int, default=3, help="PolarQuant K angle bits (rbits+tbits<=8)")
+    parser.add_argument("--polar-vbits", type=int, default=2, help="PolarQuant V bits (mixed only; KIVI kernel supports 2 or 4)")
     args = parser.parse_args()
 
     if args.compare:

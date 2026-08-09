@@ -50,6 +50,11 @@ class Transformer(ModelProvider):
         offline_proj_path: str | None = None,
         whiten: bool = False,
         max_new_tokens: int = 50,
+        # PolarQuant params (--method polar)
+        polar_mode: str = "mixed",
+        polar_rbits: int = 3,
+        polar_tbits: int = 3,
+        polar_vbits: int = 2,
     ):
         self.max_new_tokens = int(max_new_tokens)
         self.method = method
@@ -80,6 +85,11 @@ class Transformer(ModelProvider):
             kv_norm=kv_norm,
             residual_evict_size=residual_evict_size,
             offline_v_hadamard=offline_v_hadamard,
+            # PolarQuant params (--method polar)
+            polar_mode=polar_mode,
+            polar_rbits=polar_rbits,
+            polar_tbits=polar_tbits,
+            polar_vbits=polar_vbits,
         )
 
     def evaluate_model(self, prompt, needle=None) -> str:
@@ -179,6 +189,11 @@ def run_experiment(
     offline_proj_path: str | None = None,
     whiten: bool = False,
     max_new_tokens: int = 50,
+    # PolarQuant params (--method polar)
+    polar_mode: str = "mixed",
+    polar_rbits: int = 3,
+    polar_tbits: int = 3,
+    polar_vbits: int = 2,
 ) -> dict[tuple[int, int], str]:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -210,6 +225,11 @@ def run_experiment(
         kv_norm=kv_norm,
         residual_evict_size=residual_evict_size,
         offline_v_hadamard=offline_v_hadamard,
+        # PolarQuant params (--method polar)
+        polar_mode=polar_mode,
+        polar_rbits=polar_rbits,
+        polar_tbits=polar_tbits,
+        polar_vbits=polar_vbits,
     )
     tester = LLMNeedleHaystackTester(model)
     results = {}
@@ -328,6 +348,11 @@ def main() -> None:
     )
     parser.add_argument("--max-new-tokens", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42)
+    # ── PolarQuant params (--method polar) ──
+    parser.add_argument("--polar-mode", default="mixed", choices=["mixed", "group", "snapkv"], help="PolarQuant attention variant: mixed (K polar + V KIVI-quant) | group (K-only) | snapkv")
+    parser.add_argument("--polar-rbits", type=int, default=3, help="PolarQuant K radius bits (rbits+tbits<=8)")
+    parser.add_argument("--polar-tbits", type=int, default=3, help="PolarQuant K angle bits (rbits+tbits<=8)")
+    parser.add_argument("--polar-vbits", type=int, default=2, help="PolarQuant V bits (mixed only; KIVI kernel supports 2 or 4)")
     args = parser.parse_args()
 
     seed_everything(args.seed)
@@ -373,6 +398,11 @@ def main() -> None:
         offline_proj_path=offline_proj_path,
         whiten=args.whiten,
         max_new_tokens=args.max_new_tokens,
+        # PolarQuant params (--method polar)
+        polar_mode=args.polar_mode,
+        polar_rbits=args.polar_rbits,
+        polar_tbits=args.polar_tbits,
+        polar_vbits=args.polar_vbits,
     )
 
 

@@ -14,11 +14,12 @@ MODEL_NAME=$(basename "${MODEL}")
 # Directory holding the unzipped LongBench *.jsonl files (passed to pred.py).
 DATA_DIR="${DATA_DIR:-/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/LongBench/data}"
 
-# Methods to run. quantpc/kivi/oscar = quantized KV; flash_attention_2/sdpa/eager = dense baselines.
+# Methods to run. quantpc/kivi/oscar/polar = quantized KV; flash_attention_2/sdpa/eager = dense baselines.
 METHODS=(
   quantpc
   # kivi
   # oscar
+  # polar
   # flash_attention_2
   # sdpa
 )
@@ -60,6 +61,14 @@ OSCAR_KV_ROTATION="${OSCAR_KV_ROTATION:-hadamard}"
 OSCAR_KV_NORM="${OSCAR_KV_NORM:-1}"
 OSCAR_EVICT="${OSCAR_EVICT:-256}"
 OSCAR_OFFLINE_V_HAD="${OSCAR_OFFLINE_V_HAD:-1}"
+
+# PolarQuant params (src/PolarQuant). K polar-quant + (mixed) V KIVI-quant. Passed
+# to pred.py as --polar-* flags (threaded to common.py::_load_polar_model).
+#   POLAR_MODE : mixed (K polar + V KIVI) | group (K-only) | snapkv
+#   RBITS/TBITS: K radius/angle bits (rbits+tbits<=8; default 33)
+#   VBITS      : V bits, mixed only (KIVI kernel supports 2 or 4; default 2)
+POLAR_MODE="${POLAR_MODE:-mixed}"
+POLAR_RBITS="${POLAR_RBITS:-3}"; POLAR_TBITS="${POLAR_TBITS:-3}"; POLAR_VBITS="${POLAR_VBITS:-2}"
 
 # run_lb METHOD TAG RUN_ARGS...
 run_lb() {
@@ -106,6 +115,12 @@ for METHOD in "${METHODS[@]}"; do
       [ -n "${OSCAR_EVICT}" ]             && OSCAR_ARGS+=(--residual-evict-size "${OSCAR_EVICT}")
       [ "${OSCAR_OFFLINE_V_HAD}" = "1" ]  && OSCAR_ARGS+=(--offline-v-hadamard)
       run_lb oscar "oscar_int${OSCAR_NUM_BITS}" "${OSCAR_ARGS[@]}"
+      ;;
+    polar)
+      TAG="polar_${POLAR_MODE}_${POLAR_RBITS}${POLAR_TBITS}${POLAR_VBITS}"
+      run_lb polar "${TAG}" \
+        --polar-mode "${POLAR_MODE}" --polar-rbits "${POLAR_RBITS}" \
+        --polar-tbits "${POLAR_TBITS}" --polar-vbits "${POLAR_VBITS}"
       ;;
     *)
       run_lb "${METHOD}" "${METHOD}"

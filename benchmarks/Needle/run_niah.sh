@@ -16,7 +16,7 @@ LENGTHS="8192,16384,24576,32768,40960,49152,57344,65536,73728,81920,90112,98304,
 DEPTHS="0,11,22,33,44,56,67,78,89,100"
 EXPECTED_ANSWER="eat a sandwich and sit in Dolores Park on a sunny day."  # must match show_image_paper.py
 
-METHOD="${METHOD:-quantpc}"          # quantpc | kivi | oscar | flash_attention_2 | sdpa | eager
+METHOD="${METHOD:-quantpc}"          # quantpc | kivi | oscar | polar | flash_attention_2 | sdpa | eager
 
 # quantpc. Offline whitening is baked into the folded artifact (never pass
 # --whiten for offline); online whitening rotates K/V at prefill.
@@ -34,6 +34,13 @@ KIVI_K="${KIVI_K:-2}"; KIVI_V="${KIVI_V:-2}"; KIVI_GROUP="${KIVI_GROUP:-32}"; KI
 OSCAR_NUM_BITS="${OSCAR_NUM_BITS:-2}"; OSCAR_QUANT_MODE="${OSCAR_QUANT_MODE:-k-channel}"; OSCAR_GROUP="${OSCAR_GROUP:-32}"
 OSCAR_KV_ROTATION="${OSCAR_KV_ROTATION:-hadamard}"; OSCAR_KV_NORM="${OSCAR_KV_NORM:-1}"
 OSCAR_EVICT="${OSCAR_EVICT:-256}"; OSCAR_OFFLINE_V_HAD="${OSCAR_OFFLINE_V_HAD:-1}"
+
+# PolarQuant (src/PolarQuant). K polar-quant + (mixed) V KIVI-quant. Passed to
+# run_bin.py as --polar-* flags (threaded to common.py::_load_polar_model).
+#   POLAR_MODE : mixed | group (K-only) | snapkv ; RBITS/TBITS: K bits (sum<=8, def 33)
+#   VBITS: V bits, mixed only (KIVI kernel 2 or 4; def 2)
+POLAR_MODE="${POLAR_MODE:-mixed}"
+POLAR_RBITS="${POLAR_RBITS:-3}"; POLAR_TBITS="${POLAR_TBITS:-3}"; POLAR_VBITS="${POLAR_VBITS:-2}"
 
 # run_niah SUBDIR RUN_ARGS... - run one config and plot.
 run_niah() {
@@ -81,6 +88,11 @@ case "${METHOD}" in
     [ -n "${OSCAR_EVICT}" ]             && ARGS+=(--residual-evict-size "${OSCAR_EVICT}")
     [ "${OSCAR_OFFLINE_V_HAD}" = "1" ]  && ARGS+=(--offline-v-hadamard)
     run_niah "${BASE_RESULT_DIR}/${MODEL_NAME}_oscar_int${OSCAR_NUM_BITS}" "${ARGS[@]}"
+    ;;
+  polar)
+    run_niah "${BASE_RESULT_DIR}/${MODEL_NAME}_polar_${POLAR_MODE}_${POLAR_RBITS}${POLAR_TBITS}${POLAR_VBITS}" \
+      --polar-mode "${POLAR_MODE}" --polar-rbits "${POLAR_RBITS}" \
+      --polar-tbits "${POLAR_TBITS}" --polar-vbits "${POLAR_VBITS}"
     ;;
   *)
     run_niah "${BASE_RESULT_DIR}/${MODEL_NAME}_${METHOD}"

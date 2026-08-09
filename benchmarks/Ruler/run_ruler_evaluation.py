@@ -189,6 +189,12 @@ def parse_arguments():
              "folded projection already has this baked into its stored pair",
     )
 
+    # ── PolarQuant params (--method polar) ──
+    parser.add_argument("--polar-mode", default="mixed", choices=["mixed", "group", "snapkv"], help="PolarQuant attention variant: mixed (K polar + V KIVI-quant) | group (K-only) | snapkv")
+    parser.add_argument("--polar-rbits", type=int, default=3, help="PolarQuant K radius bits (rbits+tbits<=8)")
+    parser.add_argument("--polar-tbits", type=int, default=3, help="PolarQuant K angle bits (rbits+tbits<=8)")
+    parser.add_argument("--polar-vbits", type=int, default=2, help="PolarQuant V bits (mixed only; KIVI kernel supports 2 or 4)")
+
     # Task configuration
     parser.add_argument(
         "--tasks",
@@ -470,6 +476,11 @@ def main():
             kv_norm=args.kv_norm,
             residual_evict_size=args.residual_evict_size,
             offline_v_hadamard=args.offline_v_hadamard,
+            # PolarQuant params (--method polar)
+            polar_mode=args.polar_mode,
+            polar_rbits=args.polar_rbits,
+            polar_tbits=args.polar_tbits,
+            polar_vbits=args.polar_vbits,
         )
         # RULER's lm_eval harness pads batches; ensure a pad token exists.
         if tokenizer.pad_token is None:
