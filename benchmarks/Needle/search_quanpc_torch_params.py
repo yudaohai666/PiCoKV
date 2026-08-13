@@ -1,8 +1,8 @@
-"""Parameter search for the torch-only QuanPC NIAH implementation.
+"""Parameter search for the CUDA QuanPC NIAH implementation.
 
-The script keeps one model loaded and mutates the QuantKVCache options on the
-Transformer wrapper between runs.  It is intended for accuracy search, not
-throughput benchmarking.
+The production runner captures its cache configuration when the model is
+constructed, so every configuration is evaluated with a fresh Transformer
+instead of mutating stale attributes on an already-created model.
 """
 
 from __future__ import annotations
@@ -10,11 +10,20 @@ from __future__ import annotations
 import argparse
 import gc
 import json
+import sys
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import torch
+
+# Allow both ``python benchmarks/Needle/search_quanpc_torch_params.py`` and
+# importing this helper from the repository root.
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parents[1]
+for _path in (str(REPO_ROOT), str(SCRIPT_DIR)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
 
 from needle import LLMNeedleHaystackTester
 from run_bin import Transformer, parse_int_list
@@ -24,7 +33,6 @@ from run_bin import Transformer, parse_int_list
 class Config:
     k_bits: int
     v_bits: int
-    projected_query_bits: int
     exp_bits: int
     zerorope: int
     eas: float = 0.01
@@ -32,7 +40,7 @@ class Config:
     @property
     def name(self) -> str:
         return (
-            f"k{self.k_bits}_v{self.v_bits}_q{self.projected_query_bits}_"
+            f"k{self.k_bits}_v{self.v_bits}_"
             f"e{self.exp_bits}_zr{self.zerorope}_eas{self.eas:g}"
         )
 
@@ -42,7 +50,7 @@ class Config:
             self.k_bits + self.v_bits,
             self.k_bits,
             self.v_bits,
-            self.projected_query_bits + self.exp_bits,
+            self.exp_bits,
             self.zerorope,
         )
 
@@ -68,13 +76,17 @@ def save_results(path: Path, results: dict[str, dict]) -> None:
     path.write_text(json.dumps(results, indent=4, ensure_ascii=False))
 
 
-def apply_config(model: Transformer, config: Config) -> None:
-    model.k_bits = config.k_bits
-    model.v_bits = config.v_bits
-    model.projected_query_bits = config.projected_query_bits
-    model.exp_bits = config.exp_bits
-    model.eas = config.eas
-    model.zerorope = config.zerorope
+def build_model(model_name: str, config: Config) -> Transformer:
+    """Construct a model whose cache factory uses exactly ``config``."""
+    return Transformer(
+        model_name=model_name,
+        method="quantpc",
+        k_bits=config.k_bits,
+        v_bits=config.v_bits,
+        exp_bits=config.exp_bits,
+        eas=config.eas,
+        zerorope=config.zerorope,
+    )
 
 
 def set_seed(seed: int) -> None:
@@ -93,34 +105,31 @@ def make_grid(args) -> list[Config]:
         for zerorope in parse_int_list(args.zerorope_values):
             for k_bits in parse_int_list(args.k_bits_values):
                 for v_bits in parse_int_list(args.v_bits_values):
-                    for q_bits in parse_int_list(args.projected_query_bits_values):
-                        for exp_bits in parse_int_list(args.exp_bits_values):
-                            configs.append(
-                                Config(
-                                    k_bits=k_bits,
-                                    v_bits=v_bits,
-                                    projected_query_bits=q_bits,
-                                    exp_bits=exp_bits,
-                                    zerorope=zerorope,
-                                    eas=eas,
-                                )
+                    for exp_bits in parse_int_list(args.exp_bits_values):
+                        configs.append(
+                            Config(
+                                k_bits=k_bits,
+                                v_bits=v_bits,
+                                exp_bits=exp_bits,
+                                zerorope=zerorope,
+                                eas=eas,
                             )
+                        )
     if args.sort_by_cost:
         configs.sort(key=lambda cfg: cfg.cost_key)
     return configs
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Search torch-only QuanPC NIAH parameters.")
+    parser = argparse.ArgumentParser(description="Search CUDA QuanPC NIAH parameters.")
     parser.add_argument("--model", default="/data/Llama-3.1-8B-Instruct")
-    parser.add_argument("--output", default="results/niah/results_torch_quanpc_param_search.json")
+    parser.add_argument("--output", default="results/niah/results_quanpc_param_search.json")
     parser.add_argument("--length", type=int, default=100000)
     parser.add_argument("--depth", type=int, default=50)
-    parser.add_argument("--k-bits-values", default="128,192,256")
-    parser.add_argument("--v-bits-values", default="128,192,256")
-    parser.add_argument("--projected-query-bits-values", default="4,6,8")
-    parser.add_argument("--exp-bits-values", default="4,6,8")
-    parser.add_argument("--zerorope-values", default="10,15,20")
+    parser.add_argument("--k-bits-values", default="320")
+    parser.add_argument("--v-bits-values", default="320")
+    parser.add_argument("--exp-bits-values", default="1,2,4,8")
+    parser.add_argument("--zerorope-values", default="20")
     parser.add_argument("--eas-values", default="0.01")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-new", type=int, default=0, help="0 means no limit")
@@ -132,22 +141,22 @@ def main() -> None:
     results = load_results(output_path)
     configs = make_grid(args)
 
-    model = Transformer(model_name=args.model)
-    tester = LLMNeedleHaystackTester(model)
-
     new_runs = 0
     for config in configs:
         name = config.name
         if name in results:
             continue
 
-        apply_config(model, config)
         set_seed(args.seed)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
         started = time.time()
+        model = None
+        tester = None
         try:
+            model = build_model(args.model, config)
+            tester = LLMNeedleHaystackTester(model)
             response = tester.evaluate(args.length, args.depth)
             elapsed = time.time() - started
             ok, hits = contains_needle(response)
@@ -181,6 +190,7 @@ def main() -> None:
 
         results[name] = result
         save_results(output_path, results)
+        del tester, model
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -195,7 +205,6 @@ def main() -> None:
     ok_results.sort(key=lambda item: Config(
         item["k_bits"],
         item["v_bits"],
-        item["projected_query_bits"],
         item["exp_bits"],
         item["zerorope"],
         item.get("eas", 0.01),

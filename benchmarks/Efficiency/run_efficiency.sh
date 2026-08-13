@@ -9,7 +9,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}"
 
 GPU=6
-MODEL="/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct"
+MODEL="${MODEL:-/data/Llama-3.1-8B-Instruct}"
 RESULT_DIR="results/efficiency"
 mkdir -p "${RESULT_DIR}"
 
@@ -26,8 +26,8 @@ POLAR_MODE="${POLAR_MODE:-mixed}"
 POLAR_RBITS="${POLAR_RBITS:-3}"; POLAR_TBITS="${POLAR_TBITS:-3}"; POLAR_VBITS="${POLAR_VBITS:-2}"
 
 # quantpc offline block-32 encoders: USE_OFFLINE=1 skips the online QR at prefill
-# (default path offline_projection/{model}_k{K}_v{V}_block32.pt). OFFLINE_PROJ_PATH
-USE_OFFLINE="${USE_OFFLINE:-1}"
+# (default path offline_projection/projections/{model}_k{K}_v{V}_nowhiten.pt). OFFLINE_PROJ_PATH
+USE_OFFLINE="${USE_OFFLINE:-0}"
 OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
 OFFLINE_ARGS=()
 if [ "${USE_OFFLINE}" = "1" ] || [ -n "${OFFLINE_PROJ_PATH}" ]; then
@@ -58,7 +58,7 @@ run_one() {
 
 
 # quantpc (CUDA backend quantpc.quanpc)
-run_one quantpc "quantpc_k256_v256${OFFLINE_TAG}" --k-bits 256 --v-bits 256 "${OFFLINE_ARGS[@]}"
+run_one quantpc "quantpc_k320_v320${OFFLINE_TAG}" --k-bits 320 --v-bits 320 "${OFFLINE_ARGS[@]}"
 
 # oscar INT2 recipe. Requires oscar_cuda built (bash src/OScaR-KV-Quant/build_oscar_cuda.sh).
 # group_size MUST be 32: the int2 V-param interleaved packer hardcodes 32-wide groups

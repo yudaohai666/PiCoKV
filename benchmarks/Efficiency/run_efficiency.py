@@ -261,6 +261,7 @@ def run(args) -> None:
     offline_proj_path = resolve_offline_proj_path(
         args.method, args.offline, args.offline_proj_path,
         model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,
+        whiten=False,
     )
     model, _tokenizer, make_cache = load_model(
         args.model,
@@ -376,7 +377,7 @@ def compare(directory: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prefill vs decode efficiency benchmark.")
     parser.add_argument("--compare", default=None, help="aggregate all *.json under this dir into a table and exit")
-    parser.add_argument("--model", default="/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct")
+    parser.add_argument("--model", default="/data/Llama-3.1-8B-Instruct")
     parser.add_argument("--method", default="quantpc", help="quantpc | oscar | kivi | flash_attention_2 | sdpa | eager")
     parser.add_argument("--lengths", default="4096,16384,32768", help="comma-separated prompt lengths")
     parser.add_argument("--decode-tokens", type=int, default=64, help="new tokens to generate for decode timing")
@@ -388,8 +389,8 @@ def main() -> None:
                              "when off, run latency benchmark only and do NO memory-related work")
     parser.add_argument("--output", default="results/efficiency/quantpc.json")
     # ── quantpc KV-cache params (--method quantpc) ──
-    parser.add_argument("--k-bits", type=int, default=320, help="key projection bits (also KIVI KV bits)")
-    parser.add_argument("--v-bits", type=int, default=256, help="value projection bits (also KIVI KV bits)")
+    parser.add_argument("--k-bits", type=int, default=None, help="QuanPC K projection bits; KIVI defaults to 2")
+    parser.add_argument("--v-bits", type=int, default=None, help="QuanPC V projection bits; KIVI defaults to 2")
     parser.add_argument("--sink-size", type=int, default=64, help="initial (sink) tokens kept in full precision")
     parser.add_argument("--local-size", type=int, default=256, help="most-recent (local) tokens kept in full precision")
     parser.add_argument("--exp-bits", type=int, default=4)
@@ -410,7 +411,7 @@ def main() -> None:
     parser.add_argument("--kv-norm", default="1", help="OScaR kv norm (INT2 默认 1)")
     parser.add_argument("--residual-evict-size", type=int, default=256, help="OScaR residual evict size (INT2 默认 256)")
     parser.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
-    parser.add_argument("--offline", action="store_true", help="quantpc: use offline block-32 encoders (default path offline_projection/{model}_k{K}_v{V}_block32.pt)")
+    parser.add_argument("--offline", action="store_true", help="quantpc: use offline encoders (default path offline_projection/projections/{model}_k{K}_v{V}_nowhiten.pt)")
     parser.add_argument("--offline-proj-path", default=None, help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
     # ── PolarQuant params (--method polar) ──
     parser.add_argument("--polar-mode", default="mixed", choices=["mixed", "group", "snapkv"], help="PolarQuant attention variant: mixed (K polar + V KIVI-quant) | group (K-only) | snapkv")
@@ -418,6 +419,10 @@ def main() -> None:
     parser.add_argument("--polar-tbits", type=int, default=3, help="PolarQuant K angle bits (rbits+tbits<=8)")
     parser.add_argument("--polar-vbits", type=int, default=2, help="PolarQuant V bits (mixed only; KIVI kernel supports 2 or 4)")
     args = parser.parse_args()
+    if args.k_bits is None:
+        args.k_bits = 2 if args.method == "kivi" else 320
+    if args.v_bits is None:
+        args.v_bits = 2 if args.method == "kivi" else 320
 
     if args.compare:
         compare(args.compare)

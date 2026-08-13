@@ -16,17 +16,17 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from needle import LLMNeedleHaystackTester, ModelProvider  # noqa: E402
-from benchmarks.common import load_model, resolve_offline_proj_path, seed_everything  # noqa: E402
+from benchmarks.common import load_model, output_tag, resolve_offline_proj_path, seed_everything  # noqa: E402
 
 
 class Transformer(ModelProvider):
     def __init__(
         self,
-        model_name: str = "/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct",
+        model_name: str = "/data/Llama-3.1-8B-Instruct",
         method: str = "quantpc",
         # quantpc KV-cache params (--method quantpc)
         k_bits: int = 320,
-        v_bits: int = 256,
+        v_bits: int = 320,
         sink_size: int = 64,
         local_size: int = 256,
         exp_bits: int = 4,
@@ -50,6 +50,7 @@ class Transformer(ModelProvider):
         offline_proj_path: str | None = None,
         whiten: bool = False,
         max_new_tokens: int = 50,
+        online_decoder_refit: str = "none",
         # PolarQuant params (--method polar)
         polar_mode: str = "mixed",
         polar_rbits: int = 3,
@@ -85,6 +86,7 @@ class Transformer(ModelProvider):
             kv_norm=kv_norm,
             residual_evict_size=residual_evict_size,
             offline_v_hadamard=offline_v_hadamard,
+            online_decoder_refit=online_decoder_refit,
             # PolarQuant params (--method polar)
             polar_mode=polar_mode,
             polar_rbits=polar_rbits,
@@ -189,6 +191,7 @@ def run_experiment(
     offline_proj_path: str | None = None,
     whiten: bool = False,
     max_new_tokens: int = 50,
+    online_decoder_refit: str = "none",
     # PolarQuant params (--method polar)
     polar_mode: str = "mixed",
     polar_rbits: int = 3,
@@ -225,7 +228,7 @@ def run_experiment(
         kv_norm=kv_norm,
         residual_evict_size=residual_evict_size,
         offline_v_hadamard=offline_v_hadamard,
-        # PolarQuant params (--method polar)
+        online_decoder_refit=online_decoder_refit,
         polar_mode=polar_mode,
         polar_rbits=polar_rbits,
         polar_tbits=polar_tbits,
@@ -261,21 +264,22 @@ def run_experiment(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run needle-in-a-haystack experiments with quantized KV cache.")
-    parser.add_argument("--model", default="/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct")
+    parser.add_argument("--model", default="/data/Llama-3.1-8B-Instruct")
     parser.add_argument(
         "--method",
         default="quantpc",
         help=(
-            "evaluation method: 'quantpc' / 'kivi' / 'oscar' (quantized KV cache), "
+            "evaluation method: 'quantpc' / 'kivi' / 'oscar' / 'polar' (quantized KV cache), "
             "or a dense baseline attn implementation 'flash_attention_2' / 'sdpa' / 'eager'"
         ),
     )
     parser.add_argument("--lengths", default="64000,80000,100000", help="comma-separated context lengths")
     parser.add_argument("--depths", default="50", help="comma-separated needle depths")
-    parser.add_argument("--output", default="results/niah/results_shared_kv.json")
+    parser.add_argument("--output", default=None,
+                        help="output JSON path (default: results/niah/{model}/{tag}/results.json)")
     # ── quantpc KV-cache params (--method quantpc) ──
-    parser.add_argument("--k-bits", type=int, default=320, help="key projection bits (also KIVI KV bits)")
-    parser.add_argument("--v-bits", type=int, default=256, help="value projection bits (also KIVI KV bits)")
+    parser.add_argument("--k-bits", type=int, default=None, help="QuanPC K projection bits; KIVI defaults to 2")
+    parser.add_argument("--v-bits", type=int, default=None, help="QuanPC V projection bits; KIVI defaults to 2")
     parser.add_argument(
         "--sink-size",
         type=int,
@@ -285,7 +289,7 @@ def main() -> None:
     parser.add_argument(
         "--local-size",
         type=int,
-        default=256,
+        default=320,
         help="number of most-recent (local) tokens kept in full precision",
     )
     parser.add_argument(
@@ -333,13 +337,16 @@ def main() -> None:
     parser.add_argument(
         "--offline",
         action="store_true",
-        help="quantpc: use offline block-32 encoders (default path offline_projection/projections/{model}_k{K}_v{V}_block32_folded.pt)",
+        help="quantpc: use offline encoders (default path offline_projection/projections/{model}_k{K}_v{V}_nowhiten.pt)",
     )
     parser.add_argument(
         "--offline-proj-path",
         default=None,
         help="quantpc: explicit offline encoder .pt (overrides the --offline default path)",
     )
+    parser.add_argument("--online-decoder-refit", default="none",
+                        choices=("none", "k", "v", "both"),
+                        help="quantpc offline only: refit decoder for K, V, or both sides")
     parser.add_argument(
         "--whiten",
         action="store_true",
@@ -349,30 +356,43 @@ def main() -> None:
     parser.add_argument("--max-new-tokens", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42)
     # ── PolarQuant params (--method polar) ──
-    parser.add_argument("--polar-mode", default="mixed", choices=["mixed", "group", "snapkv"], help="PolarQuant attention variant: mixed (K polar + V KIVI-quant) | group (K-only) | snapkv")
-    parser.add_argument("--polar-rbits", type=int, default=3, help="PolarQuant K radius bits (rbits+tbits<=8)")
-    parser.add_argument("--polar-tbits", type=int, default=3, help="PolarQuant K angle bits (rbits+tbits<=8)")
-    parser.add_argument("--polar-vbits", type=int, default=2, help="PolarQuant V bits (mixed only; KIVI kernel supports 2 or 4)")
+    parser.add_argument("--polar-mode", default="mixed", choices=["mixed", "group", "snapkv"])
+    parser.add_argument("--polar-rbits", type=int, default=3)
+    parser.add_argument("--polar-tbits", type=int, default=3)
+    parser.add_argument("--polar-vbits", type=int, default=2)
+    parser.add_argument("--decoder-ridge", type=float, default=1e-2,
+                        help="override the online decoder ridge (default 1e-2; offline PTs are fitted with 1e-3)")
     args = parser.parse_args()
+    if args.k_bits is None:
+        args.k_bits = 2 if args.method == "kivi" else 320
+    if args.v_bits is None:
+        args.v_bits = 2 if args.method == "kivi" else 320
+
+    import quantpc.quanpc_standalone.online as online_mod
+    online_mod.ONLINE_DECODER_RIDGE = float(args.decoder_ridge)
+    print(f"online decoder ridge set to {args.decoder_ridge}", flush=True)
 
     seed_everything(args.seed)
     offline_proj_path = resolve_offline_proj_path(
         args.method, args.offline, args.offline_proj_path,
         model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,
+        whiten=args.whiten,
     )
-    # A folded projection already carries the whitening in its stored pair;
-    # rotating again at runtime would account for the same basis twice.
-    if offline_proj_path is not None and args.whiten:
-        from quantpc.quanpc_standalone.transformers import load_offline_projections
-        if load_offline_projections(offline_proj_path).get("meta", {}).get("whitened"):
-            raise SystemExit(
-                f"{offline_proj_path} already has the whitening folded in; drop --whiten."
-            )
+    output_path = args.output
+    if output_path is None:
+        model_key = Path(args.model.rstrip("/")).name
+        tag = output_tag(
+            args.method, args.k_bits, args.v_bits, args.num_bits,
+            offline=(args.offline or args.offline_proj_path is not None),
+            whiten=args.whiten if args.method == "quantpc" else None,
+            online_decoder_refit=args.online_decoder_refit,
+        )
+        output_path = str(Path("results/niah") / model_key / tag / "results.json")
     run_experiment(
         model_name=args.model,
         lengths=parse_int_list(args.lengths),
         depths=parse_int_list(args.depths),
-        output_path=args.output,
+        output_path=output_path,
         method=args.method,
         # quantpc KV-cache params (--method quantpc)
         k_bits=args.k_bits,
@@ -398,7 +418,7 @@ def main() -> None:
         offline_proj_path=offline_proj_path,
         whiten=args.whiten,
         max_new_tokens=args.max_new_tokens,
-        # PolarQuant params (--method polar)
+        online_decoder_refit=args.online_decoder_refit,
         polar_mode=args.polar_mode,
         polar_rbits=args.polar_rbits,
         polar_tbits=args.polar_tbits,

@@ -29,8 +29,11 @@ The package intentionally contains one implementation:
   learning overlap internally on separate CUDA streams;
 - decode requires GQA 4 and uses the packed CUDA kernels.
 
-There is no fixed-projection, refit, Torch decode, async prepare, block-16, or
-alternate dtype/error-mode path in this package.
+The low-level ``prepare_kv_cache`` API is the online path. The Hugging Face
+integration additionally accepts stored offline encoder/decoder pairs and can
+refit the K and/or V decoder online while keeping the offline encoder.
+Torch-only decode, async prepare, block-16, and alternate dtype/error-mode
+paths are not supported.
 
 ## Package layout
 
@@ -72,9 +75,9 @@ Public prepare options are limited to values that remain useful across runs:
 
 | Option | Default |
 |---|---:|
-| K/V bits | `256:256` |
+| K/V bits | `320:320` |
 | direction sample | `8192` |
-| sink/local | `64 / 1024` |
+| sink/local | `64 / 256` |
 | EAS | `0.01` |
 | zero-RoPE | `20` |
 | exponent bits | `4` |
@@ -129,6 +132,14 @@ Run from the repository root with the environment configured as above:
 python quantpc/test_quanpc_standalone_online.py
 
 python benchmarks/Needle/run_bin.py --method quantpc \
-  --k-bits 320 --v-bits 256 --local-size 256 --zerorope 20 \
+  --k-bits 320 --v-bits 320 --local-size 256 --zerorope 20 \
   --lengths 64000,110000 --depths 50
 ```
+
+For offline evaluation, pass ``--offline`` or an explicit
+``--offline-proj-path``. The default path is
+``offline_projection/projections/{model}_k320_v320_nowhiten.pt`` when the
+model basename is ``Llama-3.1-8B-Instruct``. ``--online-decoder-refit`` may be
+``none``, ``k``, ``v``, or ``both``. Runtime ``--whiten`` is only for online
+projection; it is rejected together with an offline PT because offline
+artifacts already use their fitted basis.

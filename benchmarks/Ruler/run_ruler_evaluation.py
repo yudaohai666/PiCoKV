@@ -55,7 +55,9 @@ def _make_local_read_hotpotqa(module):
     def read_hotpotqa(
         url="http://curtis.ml.cmu.edu/datasets/hotpot/hotpot_dev_distractor_v1.json",
     ):
-        local = os.environ.get("HOTPOTQA_JSON")
+        local = os.environ.get("HOTPOTQA_JSON", str(
+            Path(__file__).resolve().parent / "ruler_qa" / "hotpot_dev_distractor_v1.json"
+        ))
         if local and os.path.exists(local):
             logger.info(f"Loading hotpotqa from local file: {local}")
             with open(local, "r", encoding="utf-8") as f:
@@ -126,7 +128,7 @@ def parse_arguments():
     parser.add_argument(
         "--model",
         type=str,
-        default="/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct",
+        default="/data/Llama-3.1-8B-Instruct",
         help="Path or name of the HF model to evaluate",
     )
 
@@ -141,14 +143,14 @@ def parse_arguments():
         type=str,
         default="quantpc",
         help=(
-            "evaluation method: 'quantpc' / 'kivi' / 'oscar' (quantized KV cache), "
+            "evaluation method: 'quantpc' / 'kivi' / 'oscar' / 'polar' (quantized KV cache), "
             "or a dense baseline attn impl 'flash_attention_2' / 'sdpa' / 'eager'"
         ),
     )
 
     # ── quantpc KV-cache params (--method quantpc) ──
-    parser.add_argument("--k-bits", type=int, default=320, help="key projection bits (also KIVI KV bits)")
-    parser.add_argument("--v-bits", type=int, default=256, help="value projection bits (also KIVI KV bits)")
+    parser.add_argument("--k-bits", type=int, default=None, help="QuanPC K projection bits; KIVI defaults to 2")
+    parser.add_argument("--v-bits", type=int, default=None, help="QuanPC V projection bits; KIVI defaults to 2")
     parser.add_argument("--sink-size", type=int, default=64, help="initial (sink) tokens kept in full precision")
     parser.add_argument("--local-size", type=int, default=256, help="most-recent (local) tokens kept in full precision")
     parser.add_argument(
@@ -180,14 +182,18 @@ def parse_arguments():
     parser.add_argument("--kv-norm", default="1", help="OScaR kv norm (INT2 默认 1)")
     parser.add_argument("--residual-evict-size", type=int, default=256, help="OScaR residual evict size (INT2 默认 256)")
     parser.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
-    parser.add_argument("--offline", action="store_true", help="quantpc: use offline block-32 encoders (default path offline_projection/projections/{model}_k{K}_v{V}_block32_folded.pt)")
-    parser.add_argument("--offline-proj-path", default=None, help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
+    parser.add_argument("--offline", action="store_true", help="quantpc: use offline encoders (default path offline_projection/projections/{model}_k{K}_v{V}_nowhiten.pt)")
     parser.add_argument(
-        "--whiten",
-        action="store_true",
-        help="quantpc: rotate K/V into the query-whitened basis at runtime; a "
-             "folded projection already has this baked into its stored pair",
+        "--online-decoder-refit", default="none",
+        choices=("none", "k", "v", "both"),
+        help="quantpc offline only: online decoder refit side; none (default), "
+             "k, v, or both. The selected side(s) keep offline encoders but "
+             "re-solve their decoders for the current context.",
     )
+    parser.add_argument("--whiten", action="store_true",
+                        help="quantpc: rotate K/V into the whitened bases at runtime; "
+                             "a folded projection already has this in its stored pair")
+    parser.add_argument("--offline-proj-path", default=None, help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
 
     # ── PolarQuant params (--method polar) ──
     parser.add_argument("--polar-mode", default="mixed", choices=["mixed", "group", "snapkv"], help="PolarQuant attention variant: mixed (K polar + V KIVI-quant) | group (K-only) | snapkv")
@@ -225,24 +231,75 @@ def parse_arguments():
     parser.add_argument("--write_out", action="store_true", default=True)
 
     # Chat template configuration
-    parser.add_argument("--apply_chat_template", action="store_true", default=False)
+    parser.add_argument(
+        "--apply_chat_template",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="apply the tokenizer chat template (enabled by default)",
+    )
     parser.add_argument("--fewshot_as_multiturn", action="store_true", default=False)
 
     # Tokenizer options
     parser.add_argument("--add_bos_token", action="store_true")
     parser.add_argument("--prefix_token_id", type=int, default=None)
 
-    return parser.parse_args()
+    parser.add_argument("--decoder-ridge", type=float, default=1e-2,
+                        help="override the online block-32 decoder ridge "
+                             "(default 1e-2; offline PTs are fitted with 1e-3). On highly repetitive "
+                             "contexts C^T C is near-singular and the solve "
+                             "returns decoder entries ~1e4 that corrupt the "
+                             "residual stream; this measures the recovery "
+                             "without editing the shipped constant.")
+
+    args = parser.parse_args()
+    if args.k_bits is None:
+        args.k_bits = 2 if args.method == "kivi" else 320
+    if args.v_bits is None:
+        args.v_bits = 2 if args.method == "kivi" else 320
+    return args
+
+
+def run_tag(args):
+    """Return a reproducible tag for this evaluation configuration."""
+    offline = args.offline or args.offline_proj_path is not None
+    whiten = args.whiten
+    if offline and args.offline_proj_path:
+        # A folded projection carries its whitening in the stored pair.
+        from quantpc.quanpc_standalone.transformers import load_offline_projections
+        meta = load_offline_projections(args.offline_proj_path).get("meta", {})
+        whiten = bool(meta.get("whitened"))
+    if args.method == "quantpc":
+        mode = "offline" if offline else "online"
+        tag = (
+            f"quantpc_{mode}_k{args.k_bits}_v{args.v_bits}_"
+            f"{'whiten' if whiten else 'nowhiten'}"
+        )
+        if offline:
+            refit_suffix = {
+                "k": "krefit",
+                "v": "vrefit",
+                "both": "refit",
+            }.get(args.online_decoder_refit)
+            if refit_suffix:
+                tag += f"_{refit_suffix}"
+        if float(args.decoder_ridge) != 1e-2:
+            tag += f"_ridge{float(args.decoder_ridge):g}"
+        if args.exp_bits != 4:
+            tag += f"_exp{args.exp_bits}"
+        if args.zerorope != 20:
+            tag += f"_zr{args.zerorope}"
+        if float(args.eas) != 0.01:
+            tag += f"_eas{float(args.eas):g}"
+        return tag
+    return output_tag(args.method, args.k_bits, args.v_bits, args.num_bits)
 
 
 def get_output_path(args):
-    """Auto-generate an output path keyed by model name and method."""
+    """Auto-generate one output directory for the complete configuration."""
     if args.output_path:
         return args.output_path
     model_key = Path(args.model).name
-    tag = output_tag(args.method, args.k_bits, args.v_bits, args.num_bits,
-                     offline=(args.offline or args.offline_proj_path is not None))
-    return f"results/ruler/{model_key}_{tag}/"
+    return f"results/ruler/{model_key}/{run_tag(args)}/"
 
 
 def create_ruler_model(model, tokenizer, kv_cache_factory, args):
@@ -265,11 +322,7 @@ def create_ruler_model(model, tokenizer, kv_cache_factory, args):
 
 
 def _base_len(metric_key):
-    """Return the leading sequence-length int of an lm_eval metric key, or None.
-
-    RULER metric keys look like "16384,none" or "16384_stderr,none"; the length
-    is the leading integer before the first ``,`` / ``_``.
-    """
+    """Return the leading sequence-length integer from an lm_eval metric key."""
     head = metric_key.split(",")[0].split("_")[0]
     try:
         return int(head)
@@ -278,69 +331,52 @@ def _base_len(metric_key):
 
 
 def _merge_length_results(per_length):
-    """Merge single-length simple_evaluate outputs into one results dict.
-
-    Each per-length call only yields real metric values for its own length (all
-    other lengths aggregate to -1), so for every task we keep exactly the metric
-    keys whose leading length equals the length that call was run at. ``config``
-    is taken from the first call; ``samples`` are concatenated across lengths so
-    the predictions .jsonl still spans every length.
-    """
+    """Merge per-length results while retaining only each call's real metrics."""
     merged_results, merged_samples, config = {}, {}, {}
     for length, res in per_length:
         if not config:
             config = res.get("config", {})
         for task, metrics in res.get("results", {}).items():
-            tgt = merged_results.setdefault(task, {})
-            for mk, mv in metrics.items():
-                if _base_len(mk) == length:
-                    tgt[mk] = mv
-        for task, samps in res.get("samples", {}).items():
-            merged_samples.setdefault(task, []).extend(samps)
-    return {"results": merged_results, "config": config, "samples": merged_samples}
+            target = merged_results.setdefault(task, {})
+            for metric_key, metric_value in metrics.items():
+                if _base_len(metric_key) == length:
+                    target[metric_key] = metric_value
+        for task, samples in res.get("samples", {}).items():
+            merged_samples.setdefault(task, []).extend(samples)
+    return {
+        "results": merged_results,
+        "config": config,
+        "samples": merged_samples,
+    }
 
 
 def run_evaluation(ruler_model, args, output_path):
-    """Run RULER evaluation via lm_eval.
-
-    lm_eval concatenates every sequence length into a single length-ascending doc
-    list per task, and ``--limit N`` truncates that combined list from the front,
-    so one global limit lands entirely in the shortest length. To make ``--limit``
-    mean N samples PER length, evaluate one length at a time (each call regenerates
-    only that length's synthetic docs, so the limit applies within it) and merge
-    the per-length metrics back into one results dict.
-    """
+    """Run each requested length serially, then merge the results."""
     tasks = [task.strip() for task in args.tasks.split(",")]
-    max_seq_lengths = [int(x.strip()) for x in args.max_seq_lengths.split(",")]
+    lengths = [int(x.strip()) for x in args.max_seq_lengths.split(",")]
 
-    logger.info(f"Evaluating tasks: {tasks} with sequence lengths: {max_seq_lengths}")
+    logger.info(f"Evaluating tasks: {tasks} with sequence lengths: {lengths}")
 
-    max_seq_length_needed = max(max_seq_lengths)
-    if args.max_length < max_seq_length_needed:
+    if args.max_length < max(lengths):
         logger.warning(
-            f"Model max_length ({args.max_length}) < longest sequence "
-            f"({max_seq_length_needed})"
+            f"Model max_length ({args.max_length}) < longest sequence ({max(lengths)})"
         )
 
     model_args_str = f"pretrained={args.model},max_length={args.max_length}"
-
     os.makedirs(output_path, exist_ok=True)
-
     logger.info("Starting RULER evaluation...")
     if args.apply_chat_template:
         logger.info("Chat template enabled")
-    if args.limit:
-        logger.info(f"Per-length sample limit: {args.limit} (evaluated one length at a time)")
 
     per_length = []
-    for length in max_seq_lengths:
-        logger.info(f"=== RULER length {length} (limit={args.limit} samples/length) ===")
+    for length in lengths:
+        logger.info(f"=== RULER length {length} (limit={args.limit} per task) ===")
         metadata = {
             "max_seq_lengths": [length],
             "pretrained": args.model,
             "tokenizer": args.model,
         }
-        res = evaluator.simple_evaluate(
+        result = evaluator.simple_evaluate(
             model=ruler_model,
             tasks=tasks,
             num_fewshot=args.num_fewshot,
@@ -352,35 +388,31 @@ def run_evaluation(ruler_model, args, output_path):
             model_args=model_args_str,
             apply_chat_template=args.apply_chat_template,
             fewshot_as_multiturn=args.fewshot_as_multiturn,
-            # Override lm_eval's default seeds (0 / 1234) so args.seed applies
-            # consistently across python/numpy/torch and the fewshot sampler.
             random_seed=args.seed,
             numpy_random_seed=args.seed,
             torch_random_seed=args.seed,
             fewshot_random_seed=args.seed,
         )
-        per_length.append((length, res))
-
+        per_length.append((length, result))
     return _merge_length_results(per_length)
 
 
 def save_results(results, args, output_path):
     """Save evaluation results to files."""
-    model_key = Path(args.model).name
-    tag = output_tag(args.method, args.k_bits, args.v_bits, args.num_bits,
-                     offline=(args.offline or args.offline_proj_path is not None))
-
     results_lite = {
         "results": results.get("results", {}),
         "config": results.get("config", {}),
+        # lm_eval's own config records only the model and max_length, so a run's
+        # method settings were unrecoverable from its results. Keep them here.
+        "run_config": vars(args),
     }
-    results_file = os.path.join(output_path, f"results_{model_key}_{tag}.json")
+    results_file = os.path.join(output_path, "results.json")
     with open(results_file, "w", encoding="utf-8") as f:
         json.dump(results_lite, f, indent=2, ensure_ascii=False)
     logger.info(f"Results saved to: {results_file}")
 
     if "samples" in results:
-        jsonl_file = os.path.join(output_path, f"predictions_{model_key}_{tag}.jsonl")
+        jsonl_file = os.path.join(output_path, "predictions.jsonl")
         with open(jsonl_file, "w", encoding="utf-8") as f:
             for task_name, task_samples in results["samples"].items():
                 for sample in task_samples:
@@ -422,6 +454,14 @@ def main():
     args = parse_arguments()
     seed_everything(args.seed)
 
+    if args.decoder_ridge is not None:
+        # The solve reads this as a module global, so rebinding it leaves the
+        # shipped constant alone while changing what this run fits.
+        import quantpc.quanpc_standalone.online as online_mod
+
+        online_mod.ONLINE_DECODER_RIDGE = float(args.decoder_ridge)
+        logger.info(f"online decoder ridge overridden to {args.decoder_ridge}")
+
     # Use local hotpotqa file (HOTPOTQA_JSON) instead of the flaky CMU URL.
     patch_ruler_hotpotqa_local()
 
@@ -431,8 +471,7 @@ def main():
     if args.method == "quantpc":
         logger.info("Backend: CUDA (quantpc.quanpc_standalone)")
         logger.info(f"KV cache: k_bits={args.k_bits}, v_bits={args.v_bits}, "
-                    f"exp_bits={args.exp_bits}, eas={args.eas}, zerorope={args.zerorope}, "
-                    f"whiten={args.whiten}")
+                    f"exp_bits={args.exp_bits}, eas={args.eas}, zerorope={args.zerorope}")
     logger.info(f"Tasks: {args.tasks}")
     if args.limit:
         logger.info(f"Sample limit: {args.limit}")
@@ -441,15 +480,8 @@ def main():
         offline_proj_path = resolve_offline_proj_path(
             args.method, args.offline, args.offline_proj_path,
             model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,
+            whiten=args.whiten,
         )
-        # A folded projection already carries the whitening in its stored pair;
-        # rotating again at runtime would account for the same basis twice.
-        if offline_proj_path is not None and args.whiten:
-            from quantpc.quanpc_standalone.transformers import load_offline_projections
-            if load_offline_projections(offline_proj_path).get("meta", {}).get("whitened"):
-                raise SystemExit(
-                    f"{offline_proj_path} already has the whitening folded in; drop --whiten."
-                )
         model, tokenizer, kv_cache_factory = load_model(
             args.model,
             method=args.method,
@@ -464,8 +496,9 @@ def main():
             use_pruning=args.use_pruning,
             prune_mode=args.prune_mode,
             log_eps=args.log_eps,
-            whiten=args.whiten,
             offline_proj_path=offline_proj_path,
+            online_decoder_refit=args.online_decoder_refit,
+            whiten=args.whiten,
             # KIVI params (--method kivi)
             group_size=args.group_size,
             residual_length=args.residual_length,
@@ -486,15 +519,14 @@ def main():
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
+        # Baseline methods yield kv_cache_factory=None -> model's default cache.
+        ruler_model = create_ruler_model(model, tokenizer, kv_cache_factory, args)
+
         output_path = get_output_path(args)
         os.makedirs(output_path, exist_ok=True)
         logger.info(f"Output path: {output_path}")
 
-        # Baseline methods yield kv_cache_factory=None -> model's default cache.
-        ruler_model = create_ruler_model(model, tokenizer, kv_cache_factory, args)
-
         results = run_evaluation(ruler_model, args, output_path)
-
         save_results(results, args, output_path)
         print_results_summary(results)
 
@@ -510,7 +542,3 @@ def main():
 
 if __name__ == "__main__":
     exit(main())
-
-
-
-

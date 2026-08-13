@@ -55,22 +55,31 @@ def resolve_offline_proj_path(
     model_name: str,
     k_bits: int,
     v_bits: int,
+    whiten: bool = False,
 ) -> Optional[str]:
-    """Return the effective offline block-32 encoder .pt path, or None for online.
+    """Return the effective offline encoder .pt path, or None for online.
 
     Offline is requested when ``--offline`` is set or an explicit path is given
     (quantpc only). With no explicit path, the default is derived from the model
-    tag and bits: ``offline_projection/projections/{model_tag}_k{k}_v{v}_block32_folded.pt``
-    (the folded encoder+decoder+whitening artifact). Raises a clear error when
-    the resolved file is missing.
+    tag and bits: ``offline_projection/projections/{model_tag}_k{k}_v{v}_nowhiten.pt``. Raises
+    a clear error when the resolved file is missing. Offline projections already
+    contain the complete fitted basis, so runtime whitening is intentionally
+    rejected rather than combining incompatible bases.
     """
     if method != "quantpc":
         return None
     if not offline and offline_proj_path is None:
         return None
+    if whiten:
+        raise ValueError(
+            "offline projection and runtime --whiten cannot be combined: "
+            "offline PTs use the model basis, while whitened PTs already fold "
+            "the whitening into encoder/decoder. Use offline without --whiten "
+            "or online with --whiten."
+        )
     model_tag = Path(model_name.rstrip("/")).name
     path = offline_proj_path or str(
-        _REPO_ROOT / "offline_projection" / "projections" / f"{model_tag}_k{k_bits}_v{v_bits}_block32_folded.pt"
+        _REPO_ROOT / "offline_projection" / "projections" / f"{model_tag}_k{k_bits}_v{v_bits}_nowhiten.pt"
     )
     if not Path(path).exists():
         raise FileNotFoundError(
@@ -98,11 +107,14 @@ def output_tag(
     num_bits: int = 2,
     *,
     offline: bool = False,
+    whiten: bool | None = None,
+    online_decoder_refit: str = "none",
 ) -> str:
     """Directory/file tag keyed by method + KV bits, shared across runners.
 
-    For quantpc, ``offline`` appends ``_offline`` so online and offline runs at
-    the same bits do not overwrite each other.
+    Passing ``whiten`` switches quantpc to the full naming --
+    ``{online|offline}_k{K}_v{V}_{whiten|nowhiten}``. The local window is fixed
+    at 256 across the current experiments, so it is intentionally omitted.
     """
     if method == "kivi":
         return f"kivi_k{k_bits}_v{v_bits}"
@@ -110,6 +122,13 @@ def output_tag(
         return f"oscar_int{num_bits}"
     if method != "quantpc":
         return method
+    if whiten is not None:
+        mode = "offline" if offline else "online"
+        tag = f"{mode}_k{k_bits}_v{v_bits}_{'whiten' if whiten else 'nowhiten'}"
+        refit_suffix = {"none": "", "k": "_krefit", "v": "_vrefit", "both": "_refit"}
+        if online_decoder_refit not in refit_suffix:
+            raise ValueError(f"unknown online_decoder_refit: {online_decoder_refit}")
+        return tag + refit_suffix[online_decoder_refit]
     tag = f"quantpc_k{k_bits}_v{v_bits}"
     if offline:
         tag += "_offline"
@@ -281,14 +300,14 @@ def _load_quantpc_model(
     log_eps: float,
     whiten: bool = False,
     offline_proj_path: Optional[str] = None,
+    online_decoder_refit: str = "none",
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
     """Load a HF model patched with the quanpc_standalone online-projection path.
 
     The project ships a single production standalone path (quanpc_standalone): a
-    CUDA-only online-projection decode with fixed 8-bit projected queries. The old
-    torch reference backend, refit decoder, and tunable projected_query_bits were
-    removed. ``make_cache`` returns a fresh ``StandaloneLlamaCache`` per call (the
-    model must have been patched via ``modify_llama_for_standalone``).
+    CUDA-only online-projection decode with fixed 8-bit projected queries.
+    ``make_cache`` returns a fresh ``StandaloneLlamaCache`` per call (the model
+    must have been patched via ``modify_llama_for_standalone``).
 
     When ``offline_proj_path`` is given, the stored block-32 pair is loaded
     once and threaded into every cache so prefill skips the online Householder QR
@@ -317,10 +336,23 @@ def _load_quantpc_model(
     key_encoders = value_encoders = None
     key_decoders = value_decoders = None
     if offline_proj_path is not None:
+        if whiten:
+            raise ValueError(
+                "offline projection and runtime whitening cannot be combined; "
+                "use a folded offline PT without --whiten, or use online whitening."
+            )
         _projs = load_offline_projections(offline_proj_path)
-        # An offline projection is used whole: its decoder was fitted against the
-        # codes its own encoder produces, so the two only make sense together.
-        for side in ("key", "value"):
+        # The offline projection contains both encoders and decoders.  Refit is
+        # controlled globally by side: the selected side(s) keep the offline
+        # encoder but solve the decoder online for the current context.
+        refit_sides = {
+            "none": (), "k": ("key",), "v": ("value",),
+            "both": ("key", "value"),
+        }[online_decoder_refit]
+        stored_sides = tuple(
+            side for side in ("key", "value") if side not in refit_sides
+        )
+        for side in stored_sides:
             if f"{side}_decoder" not in _projs:
                 raise ValueError(
                     f"{offline_proj_path} stores encoders only; rebuild it with "
@@ -328,15 +360,19 @@ def _load_quantpc_model(
                 )
         key_encoders = _projs["key_encoder"]
         value_encoders = _projs["value_encoder"]
-        key_decoders = _projs["key_decoder"]
-        value_decoders = _projs["value_decoder"]
+        if "key" in stored_sides:
+            key_decoders = _projs["key_decoder"]
+        if "value" in stored_sides:
+            value_decoders = _projs["value_decoder"]
+        print(
+            f"online decoder refit sides: {refit_sides or '(none, fully offline decoder)'}",
+            flush=True,
+        )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    # With a single visible GPU (CUDA_VISIBLE_DEVICES pins one device),
-    # device_map="auto" lets accelerate offload layers to CPU under transient
-    # memory pressure -- e.g. many jobs loading at once -- silently dropping the
-    # model to CPU (516MiB VRAM, ~40x slower decode). Pin the whole model to that
-    # GPU; keep "auto" only for genuine multi-GPU sharding. Mirrors _load_baseline_model.
+    # With a single visible GPU, device_map="auto" can offload layers to CPU
+    # under transient memory pressure. Pin the whole model to that GPU; keep
+    # "auto" only for genuine multi-GPU sharding.
     if torch.cuda.is_available() and torch.cuda.device_count() <= 1:
         device_map = {"": 0}
     else:
@@ -386,25 +422,20 @@ def _load_polar_model(
     ``past_key_values=None``. So ``make_cache`` is ``None`` (the runner must NOT
     override ``past_key_values``), and we monkeypatch ``model.generate`` with a thin
     HF-compatible adapter. Config comes from the runner's CLI flags
-    (--polar-mode / --polar-rbits / --polar-tbits / --polar-vbits), threaded through
-    ``load_model`` just like the quantpc/kivi/oscar flags.
+    (``--polar-mode / --polar-rbits / --polar-tbits / --polar-vbits``).
 
     NOTE: the accuracy runners feed one prompt at a time (PolarQuant's decode skips
     padding-mask handling and tracks a single scalar kv_seq_len); the Efficiency
     runners use equal-length synthetic inputs, so batch>1 is safe there.
     """
-    # Both KIVI and PolarQuant ship a top-level `models` package. KIVI's has an
-    # __init__.py (a regular package), which would shadow PolarQuant's namespace
-    # `models` regardless of sys.path order. So for the Mixed path we import KIVI's
-    # value kernels FIRST (while src/KIVI is on the path, populating sys.modules for
-    # `quant.*` + `kivi_gemv`), then DROP src/KIVI so only PolarQuant provides
-    # `models` when we import the polar model. src/KIVI/quant stays on the path so
-    # kivi_gemv keeps resolving. One method per process in the runners, so this is safe.
+    # Both KIVI and PolarQuant ship a top-level ``models`` package. KIVI's has an
+    # __init__.py and would shadow PolarQuant's namespace, so import KIVI kernels
+    # first, then remove its package root before importing PolarQuant's model.
     if polar_mode == "mixed":
         for p in (str(KIVI_SRC), str(KIVI_SRC / "quant")):
             if p not in sys.path:
                 sys.path.insert(0, p)
-        import quant.new_pack  # noqa: F401  (cached; used lazily by the mixed attn)
+        import quant.new_pack  # noqa: F401
         import quant.matmul  # noqa: F401
         if str(KIVI_SRC) in sys.path:
             sys.path.remove(str(KIVI_SRC))
@@ -444,15 +475,14 @@ def _load_polar_model(
         **_ignored,
     ):
         cfg = gen_cfg
-        if eos_token_id is not None:  # e.g. LongBench samsum passes a custom eos list
+        if eos_token_id is not None:
             cfg = copy.deepcopy(gen_cfg)
             cfg.eos_token_id = eos_token_id
         gen_ids = polar_generate(
             model, input_ids, attention_mask, cfg,
             do_sample=do_sample, max_new_tokens=max_new_tokens,
         )
-        # PolarQuant returns ONLY the new tokens; HF callers expect prompt+continuation
-        # and slice output[context_length:] / output.sequences[:, ctx:].
+        # PolarQuant returns only new tokens; HF callers expect prompt + continuation.
         full = torch.cat([input_ids, gen_ids], dim=-1)
         if return_dict_in_generate:
             from transformers.generation.utils import GenerateDecoderOnlyOutput
@@ -475,8 +505,8 @@ def _load_baseline_model(
     """
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     # With a single visible GPU, device_map="auto" can offload a tiny buffer to
-    # CPU, which breaks flash_attention_2 (its kernel is CUDA-only). Pin the whole
-    # model to that GPU; keep "auto" only for genuine multi-GPU sharding.
+    # CPU, which breaks flash_attention_2 (its kernel is CUDA-only). Pin the
+    # whole model to that GPU; keep "auto" only for genuine multi-GPU sharding.
     if torch.cuda.is_available() and torch.cuda.device_count() <= 1:
         device_map = {"": 0}
     else:
@@ -497,13 +527,13 @@ def load_model(
     model_name: str,
     method: str = "quantpc",
     *,
-    k_bits: int = 128,
-    v_bits: int = 256,
+    k_bits: Optional[int] = None,
+    v_bits: Optional[int] = None,
     sink_size: int = 64,
     local_size: int = 256,
     exp_bits: int = 4,
     eas: float = 0.01,
-    zerorope: int = 30,
+    zerorope: int = 20,
     use_pruning: bool = True,
     prune_mode: int = 3,
     log_eps: float = -10.0,
@@ -521,6 +551,7 @@ def load_model(
     polar_rbits: int = 3,
     polar_tbits: int = 3,
     polar_vbits: int = 2,
+    online_decoder_refit: str = "none",
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
     """Load a HF model+tokenizer and return ``(model, tokenizer, make_cache)``.
 
@@ -539,12 +570,16 @@ def load_model(
                                  (OScaR builds its quantized cache internally).
       * ``polar``             -> ``_load_polar_model`` (src/PolarQuant);
                                  ``polar_mode`` / ``polar_rbits`` / ``polar_tbits`` /
-                                 ``polar_vbits`` set the polar KV quantization.
-                                 ``make_cache`` is ``None`` (PolarQuant builds its own
-                                 tuple KV cache and drives its own ``generate``).
+                                 ``polar_vbits`` set the PolarQuant configuration.
+                                 ``make_cache`` is ``None`` (PolarQuant owns its cache).
       * flash_attention_2 / sdpa / eager -> dense full-precision baseline;
                                  ``make_cache`` is ``None`` (default KV cache).
     """
+    if k_bits is None:
+        k_bits = 2 if method == "kivi" else 320
+    if v_bits is None:
+        v_bits = 2 if method == "kivi" else 320
+
     if method == "kivi":
         return _load_kivi_model(
             model_name,
@@ -581,6 +616,7 @@ def load_model(
             log_eps=log_eps,
             whiten=whiten,
             offline_proj_path=offline_proj_path,
+            online_decoder_refit=online_decoder_refit,
         )
 
     if method == "polar":

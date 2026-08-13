@@ -42,11 +42,11 @@ REMOVED_DECODE_OPTIONS = {"backend", "new_key", "new_value", "exp_bits"}
 def main() -> None:
     config = StandaloneConfig()
     if config.prepare_kwargs() != {
-        "key_bits": 256,
-        "value_bits": 256,
+        "key_bits": 320,
+        "value_bits": 320,
         "direction_sample_size": 8192,
         "sink_size": 64,
-        "local_size": 1024,
+        "local_size": 256,
         "eas": 0.01,
         "zerorope": 20,
         "exp_bits": 4,

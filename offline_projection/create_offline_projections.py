@@ -88,14 +88,15 @@ from transformers import AutoModelForCausalLM  # noqa: E402
 
 FOLDED_FORMAT = "quanpc_standalone_block32_folded_v1"
 DEFAULT_K_BITS = 320
-DEFAULT_V_BITS = 256
+DEFAULT_V_BITS = 320
 # Ridge on the normalized query Gram before the square root.  The online
 # find_orth_proj gets this for free and by accident: it builds the Gram in
 # float32, where the smallest eigenvalues of an ill-conditioned layer are below
 # the representable range and end up implicitly regularized.  At float64 that
 # safety net is gone, and inverting a 1e6-condition Gram exactly is what makes
-# whitening lose on layer 0.  Here it is explicit and tunable.
-DEFAULT_WHITEN_RIDGE = 1e-3
+# whitening lose on layer 0. Keep it fixed so whitening artifacts remain
+# comparable; it is an internal numerical-stability constant, not a sweep knob.
+WHITEN_RIDGE = 1e-3
 DEFAULT_DECODER_ITERS = 5
 
 
@@ -283,7 +284,7 @@ def check_fold(states, encoder, decoder, folded_encoder, folded_decoder,
     return rotated_error, folded_error
 
 
-def folded_meta(args, k_bits, v_bits, zerorope, whiten_layers):
+def folded_meta(args, k_bits, v_bits, zerorope, whitened):
     return {
         "format": FOLDED_FORMAT,
         "group_bits": ONLINE_GROUP_BITS,
@@ -294,28 +295,21 @@ def folded_meta(args, k_bits, v_bits, zerorope, whiten_layers):
         "sink_size": args.sink_size,
         "local_size": args.local_size,
         "decoder_iters": args.decoder_iters,
-        # Must follow --whiten_layers: with `none` every layer ships W = I, so
-        # the stored pair is the plain encoder/decoder and the runtime guard
-        # against double-rotating must not fire on it.
-        "whitened": bool(whiten_layers),
-        "whiten_ridge": args.whiten_ridge,
-        "whiten_layers": sorted(whiten_layers),
-        "folded": True,
+        # Whitening, when enabled, is applied to every layer and folded into
+        # the stored encoder/decoder pair. The factors are not serialized.
+        "whitened": bool(whitened),
+        "whiten_ridge": WHITEN_RIDGE,
         "calibration": {
             "datasets": args.datasets,
             "length_config": args.length_config,
             "collect_stride": args.collect_stride,
             "learn_tokens": args.block32_learn_tokens,
         },
-        # EAS selects on the residual norm, which in the folded formulation is
-        # the model-basis ||R'|| rather than the whitened ||R' W||.  Different
-        # tokens get dense retention than the rotate-at-runtime path would pick.
-        "eas_error_basis": "model",
     }
 
 
 def load_state(args, num_layers, num_kv_heads, head_dim, k_bits, v_bits,
-               zerorope, whiten_layers):
+               zerorope, whitened):
     shapes = {
         "key_encoder": (num_layers, num_kv_heads, k_bits, head_dim),
         "value_encoder": (num_layers, num_kv_heads, v_bits, head_dim),
@@ -325,13 +319,7 @@ def load_state(args, num_layers, num_kv_heads, head_dim, k_bits, v_bits,
         "value_encoder": torch.zeros(shapes["value_encoder"], dtype=torch.bfloat16),
         "key_decoder": torch.zeros(shapes["key_encoder"], dtype=torch.bfloat16),
         "value_decoder": torch.zeros(shapes["value_encoder"], dtype=torch.bfloat16),
-        "key_whitening": torch.zeros(
-            num_layers, num_kv_heads, head_dim, head_dim, dtype=torch.float32
-        ),
-        "value_whitening": torch.zeros(
-            num_layers, num_kv_heads, head_dim, head_dim, dtype=torch.float32
-        ),
-        "meta": folded_meta(args, k_bits, v_bits, zerorope, whiten_layers),
+        "meta": folded_meta(args, k_bits, v_bits, zerorope, whitened),
     }
     progress = {
         "key_done": torch.zeros(num_layers, num_kv_heads, dtype=torch.bool),
@@ -347,9 +335,6 @@ def load_state(args, num_layers, num_kv_heads, head_dim, k_bits, v_bits,
             print(f"existing {args.output_path} incompatible; starting over", flush=True)
             return empty, progress
         empty[field] = stored[field]
-    for field in ("key_whitening", "value_whitening"):
-        if field in stored:
-            empty[field] = stored[field]
     saved = stored.get("progress")
     if saved is not None:
         progress["key_done"] = saved["key_done"]
@@ -369,8 +354,6 @@ def save_state(args, state, progress):
             "value_encoder": state["value_encoder"],
             "key_decoder": state["key_decoder"],
             "value_decoder": state["value_decoder"],
-            "key_whitening": state["key_whitening"],
-            "value_whitening": state["value_whitening"],
             "meta": state["meta"],
             "progress": progress,
         },
@@ -385,26 +368,23 @@ def fit_layer(args, state, progress, layer_idx, sample_count, device,
     num_heads = layer_states["key"].shape[0]
 
     if whiten:
-        forward, inverse = whitening_from_gram(gram, args.whiten_ridge)
+        forward, inverse = whitening_from_gram(gram, WHITEN_RIDGE)
         value_forward, value_inverse = value_whitening_factors(
             args.model_name, layer_idx, num_heads,
-            state["key_encoder"].shape[-1], args.whiten_ridge, device,
+            state["key_encoder"].shape[-1], WHITEN_RIDGE, device,
         )
         condition = float(
             (torch.linalg.svdvals(gram)[..., 0]
              / torch.linalg.svdvals(gram)[..., -1].clamp_min(1e-30)).mean()
         )
         print(f"layer {layer_idx} whitening: cond(Q^T Q)={condition:.3e} "
-              f"ridge={args.whiten_ridge}", flush=True)
+              f"ridge={WHITEN_RIDGE}", flush=True)
     else:
         eye = torch.eye(state["key_encoder"].shape[-1], device=device, dtype=torch.float64)
         forward = eye.unsqueeze(0).expand(num_heads, -1, -1).contiguous()
         inverse = forward.clone()
         value_forward, value_inverse = forward, inverse
         print(f"layer {layer_idx} whitening: disabled (identity)", flush=True)
-    state["key_whitening"][layer_idx] = forward.float().cpu()
-    state["value_whitening"][layer_idx] = value_forward.float().cpu()
-
     for head_idx in tqdm(range(num_heads), desc=f"layer {layer_idx} heads"):
         for kind, bits, rope, done_key, enc_field, dec_field in (
             ("key", k_bits, zerorope, "key_done", "key_encoder", "key_decoder"),
@@ -469,7 +449,7 @@ def fit_layer(args, state, progress, layer_idx, sample_count, device,
 
 
 def run(args, samples, layers, num_layers, num_kv_heads, head_dim,
-        k_bits, v_bits, zerorope, whiten_layers):
+        k_bits, v_bits, zerorope, whitened):
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
     device = torch.device(
         args.projection_device
@@ -478,7 +458,7 @@ def run(args, samples, layers, num_layers, num_kv_heads, head_dim,
     )
     state, progress = load_state(
         args, num_layers, num_kv_heads, head_dim, k_bits, v_bits,
-        zerorope, whiten_layers,
+        zerorope, whitened,
     )
 
     pending = []
@@ -523,7 +503,7 @@ def run(args, samples, layers, num_layers, num_kv_heads, head_dim,
         for layer_idx in layer_group:
             fit_layer(
                 args, state, progress, layer_idx, len(samples), device,
-                k_bits, v_bits, zerorope, layer_idx in whiten_layers,
+                k_bits, v_bits, zerorope, whitened,
             )
             done = (
                 bool(progress["key_done"][layer_idx].all())
@@ -534,6 +514,17 @@ def run(args, samples, layers, num_layers, num_kv_heads, head_dim,
 
     save_state(args, state, progress)
     print("saved", args.output_path, flush=True)
+
+
+def parse_bool(value):
+    value = str(value).strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(
+        f"expected true/false, got {value!r}"
+    )
 
 
 def main():
@@ -549,9 +540,8 @@ def main():
     parser.add_argument("--device_map", default="auto", choices=["auto", "none"])
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--layers", default=None)
-    parser.add_argument("--whiten_layers", default="all",
-                        help="'all', 'none', or a layer list/range to whiten")
-    parser.add_argument("--whiten_ridge", type=float, default=DEFAULT_WHITEN_RIDGE)
+    parser.add_argument("--whiten", type=parse_bool, default=False,
+                        help="whiten and fold all layers (true/false; default false)")
     parser.add_argument("--collect_layers_per_forward", type=int, default=16)
     parser.add_argument("--collect_stride", type=int, default=8,
                         help="keep every Nth collected token; block-32 learning "
@@ -567,7 +557,21 @@ def main():
     parser.add_argument("--block32-learn-tokens", dest="block32_learn_tokens",
                         type=int, default=DEFAULT_BLOCK32_LEARN_TOKENS)
     parser.add_argument("--verbose_fit", action="store_true")
+    parser.add_argument("--decoder_ridge", type=float, default=1e-3,
+                        help="block-32 decoder ridge for this fit (default 1e-3). "
+                             "Recorded in the artifact meta.")
     args = parser.parse_args()
+
+    if args.decoder_ridge is not None:
+        # Both this module and quanpc_standalone.online read the constant as a
+        # module global; learn_pair goes through the latter for its initial
+        # encoders, so both bindings have to move together.
+        import quantpc.quanpc_standalone.online as online_mod
+
+        global ONLINE_DECODER_RIDGE
+        ONLINE_DECODER_RIDGE = float(args.decoder_ridge)
+        online_mod.ONLINE_DECODER_RIDGE = float(args.decoder_ridge)
+        print(f"block-32 decoder ridge overridden to {args.decoder_ridge}", flush=True)
 
     # The collector reads sink/local off its own module globals: the attention
     # hook it installs has no argument channel.
@@ -584,23 +588,17 @@ def main():
     head_dim = config.hidden_size // config.num_attention_heads
     layers = parse_layers(args.layers, num_layers)
 
-    if args.whiten_layers.strip() == "all":
-        whiten_layers = set(range(num_layers))
-    elif args.whiten_layers.strip() in ("none", ""):
-        whiten_layers = set()
-    else:
-        whiten_layers = set(parse_layers(args.whiten_layers, num_layers))
-
     if args.output_path is None:
         model_tag = Path(str(args.model_name).rstrip("/")).name
+        whiten_tag = "whiten" if args.whiten else "nowhiten"
         args.output_path = str(
             BASE / "projections"
-            / f"{model_tag}_k{args.k_bits}_v{args.v_bits}_block32_folded.pt"
+            / f"{model_tag}_k{args.k_bits}_v{args.v_bits}_{whiten_tag}.pt"
         )
 
     print("model", args.model_name, flush=True)
     print("layers", format_layer_group(layers), flush=True)
-    print("whiten layers", format_layer_group(sorted(whiten_layers)), flush=True)
+    print("whiten", "all layers" if args.whiten else "disabled", flush=True)
     print("k_bits", args.k_bits, "v_bits", args.v_bits,
           "zerorope", args.zerorope, flush=True)
     print("output", args.output_path, flush=True)
@@ -617,7 +615,7 @@ def main():
     print("samples", len(samples), "length_config", args.length_config, flush=True)
 
     run(args, samples, layers, num_layers, num_kv_heads, head_dim,
-        args.k_bits, args.v_bits, args.zerorope, whiten_layers)
+        args.k_bits, args.v_bits, args.zerorope, args.whiten)
 
 
 if __name__ == "__main__":

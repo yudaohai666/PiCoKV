@@ -137,7 +137,7 @@ def parse_int_list(value: str) -> list[int]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default="/data/zxh/models/Llama-3.1-8B-Instruct")
+    parser.add_argument("--model", default="/data/Llama-3.1-8B-Instruct")
     parser.add_argument("--lengths", default="64000,110000")
     parser.add_argument("--depths", default="50")
     parser.add_argument("--cells", default=None,
@@ -146,7 +146,7 @@ def main() -> None:
                              "cells can be rechecked without the full sweep")
     parser.add_argument("--whiten", action="store_true")
     parser.add_argument("--k-bits", type=int, default=320)
-    parser.add_argument("--v-bits", type=int, default=256)
+    parser.add_argument("--v-bits", type=int, default=320)
     parser.add_argument("--direction-sample-size", type=int, default=8192)
     parser.add_argument("--sink-size", type=int, default=64)
     parser.add_argument("--local-size", type=int, default=256)
@@ -194,13 +194,13 @@ def main() -> None:
     )
     offline: dict = {}
     if args.offline_proj_path is not None:
-        stored = load_offline_projections(args.offline_proj_path)
-        if stored.get("meta", {}).get("whitened") and args.whiten:
+        if args.whiten:
             raise SystemExit(
-                f"{args.offline_proj_path} already has the whitening folded into "
-                "its encoder/decoder; --whiten would rotate states whose basis is "
-                "already accounted for. Drop --whiten."
+                "offline projection and runtime --whiten cannot be combined; "
+                "use a folded offline PT without --whiten, or omit the offline "
+                "projection when testing online whitening."
             )
+        stored = load_offline_projections(args.offline_proj_path)
         # An offline projection is used whole: its decoder was fitted against
         # the codes its own encoder produces, so the two only make sense together.
         for side in ("key", "value"):

@@ -190,18 +190,18 @@ def main(args):
         'magicpig': 'MagicPIG',
         'bpc': 'BinaryPC',
         'bpc_offline': 'BinaryPC w/ OPC',
-        'k320online': 'QuanPC k320/v256 (online)',
-        'k320offdec': 'QuanPC k320/v256 (offline decoder)',
+        'k320online': 'QuanPC k320/v320 (online)',
+        'k320offdec': 'QuanPC k320/v320 (offline decoder)',
         # All three projections offline -- whitening, encoder, decoder -- with
         # W^-1 D^T folded into one stored matrix; plus the local-window ablation.
-        'k320folded': 'QuanPC k320/v256 (all-offline, folded W)',
-        'k320foldedlocal256': 'QuanPC k320/v256 (all-offline, local 256)',
-        'k320onlinelocal256': 'QuanPC k320/v256 (online, local 256)',
+        'k320folded': 'QuanPC k320/v320 (all-offline, folded W)',
+        'k320foldedlocal256': 'QuanPC k320/v320 (all-offline, local 256)',
+        'k320onlinelocal256': 'QuanPC k320/v320 (online, local 256)',
         'k256folded': 'QuanPC k256/v256 (all-offline, folded W)',
-        'k320offlinenowhiten': 'QuanPC k320/v256 (all-offline, no whitening, local 256)',
+        'k320offlinenowhiten': 'QuanPC k320/v320 (all-offline, no whitening, local 256)',
         'k256offlinenowhiten': 'QuanPC k256/v256 (all-offline, no whitening, local 256)',
         'k256onlinewhiten': 'QuanPC k256/v256 (online + whitening)',
-        'k320onlinewhiten': 'QuanPC k320/v256 (online + whitening)',
+        'k320onlinewhiten': 'QuanPC k320/v320 (online + whitening)',
         'k256online': 'QuanPC k256/v256 (online)',
         'k256offdec': 'QuanPC k256/v256 (offline decoder)',
     }
@@ -251,7 +251,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="meta-llama/Meta-Llama-3.1-8B-Instruct", help="model name of model path")
+    parser.add_argument("--model", type=str, default="/data/Llama-3.1-8B-Instruct", help="model name or local model path")
     parser.add_argument("--save_dir", default="outputs/needle_results_vis", type=str, help="Path to save the output")
     parser.add_argument("--eval_path", default="", type=str, help="Path to save the output")
     parser.add_argument("--pdf", action='store_true', help="save as .pdf")

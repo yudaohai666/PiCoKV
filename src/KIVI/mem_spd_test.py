@@ -14,8 +14,8 @@ RESIDUAL_LENGTH = 32
 BATCH_SIZE = 200
 PATH_TO_YOUR_SAVE_DIR = './cached_models'
 
-# model_name_or_path = '/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct'
-model_name_or_path = '/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-2-7b-chat-hf'
+# model_name_or_path = '/data/Llama-3.1-8B-Instruct'
+model_name_or_path = '/data/Llama-3.1-8B-Instruct'
 
 config = LlamaConfig.from_pretrained(model_name_or_path)
 config.k_bits = K_BITS # current support 2/4 bit for KV Cache

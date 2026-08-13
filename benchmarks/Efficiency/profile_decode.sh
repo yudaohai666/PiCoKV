@@ -9,7 +9,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}"
 
 GPU="${GPU:-6}"
-MODEL="/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct"
+MODEL="${MODEL:-/data/Llama-3.1-8B-Instruct}"
 PROF_DIR="results/efficiency/prof"
 mkdir -p "${PROF_DIR}"
 
@@ -24,8 +24,8 @@ ROWS="${ROWS:-30}"          # key_averages table rows
 METHOD="${METHOD:-quantpc}"
 
 # quantpc KV-cache params (aligned with run_efficiency.py defaults).
-K_BITS="${K_BITS:-256}"
-V_BITS="${V_BITS:-256}"
+K_BITS="${K_BITS:-320}"
+V_BITS="${V_BITS:-320}"
 SINK="${SINK:-64}"
 LOCAL="${LOCAL:-256}"
 EXP_BITS="${EXP_BITS:-4}"
@@ -33,7 +33,7 @@ EAS="${EAS:-0.01}"
 ZEROROPE="${ZEROROPE:-20}"
 
 # quantpc offline block-32 encoders: USE_OFFLINE=1 skips the online QR at prefill
-# (default path offline_projection/{model}_k{K}_v{V}_block32.pt). OFFLINE_PROJ_PATH
+# (default path offline_projection/projections/{model}_k{K}_v{V}_nowhiten.pt). OFFLINE_PROJ_PATH
 USE_OFFLINE="${USE_OFFLINE:-0}"
 OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
 

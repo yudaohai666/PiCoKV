@@ -91,7 +91,7 @@ def _report(prof, args, stage, extra):
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Profile the decode stage of a KV-cache method.")
-    p.add_argument("--model", default="/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct")
+    p.add_argument("--model", default="/data/Llama-3.1-8B-Instruct")
     p.add_argument("--method", default="quantpc", help="quantpc | kivi | oscar | flash_attention_2 | sdpa | eager")
     p.add_argument("--stage", default="decode", choices=["decode", "prefill", "both"],
                    help="which stage to profile: decode (default) | prefill | both")
@@ -106,8 +106,8 @@ def main() -> None:
     p.add_argument("--record-shapes", action="store_true", help="record op input shapes (adds overhead)")
     p.add_argument("--trace", default=None, help="export a chrome trace to this path")
     # ── quantpc KV-cache params (--method quantpc) ──
-    p.add_argument("--k-bits", type=int, default=320, help="key projection bits (also KIVI KV bits)")
-    p.add_argument("--v-bits", type=int, default=256, help="value projection bits (also KIVI KV bits)")
+    p.add_argument("--k-bits", type=int, default=None, help="QuanPC K projection bits; KIVI defaults to 2")
+    p.add_argument("--v-bits", type=int, default=None, help="QuanPC V projection bits; KIVI defaults to 2")
     p.add_argument("--sink-size", type=int, default=64, help="initial (sink) tokens kept in full precision")
     p.add_argument("--local-size", type=int, default=256, help="most-recent (local) tokens kept in full precision")
     p.add_argument("--exp-bits", type=int, default=4)
@@ -118,7 +118,7 @@ def main() -> None:
     p.add_argument("--prune-mode", type=int, default=3)
     p.add_argument("--log-eps", type=float, default=-10.0)
     p.add_argument("--offline", action="store_true",
-                   help="quantpc: use offline block-32 encoders (skip online QR at prefill); path defaults to offline_projection/{model}_k{K}_v{V}_block32.pt")
+                   help="quantpc: use offline encoders (skip online QR at prefill); path defaults to offline_projection/projections/{model}_k{K}_v{V}_nowhiten.pt")
     p.add_argument("--offline-proj-path", default=None,
                    help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
     p.set_defaults(use_pruning=True)
@@ -140,11 +140,16 @@ def main() -> None:
     p.add_argument("--polar-tbits", type=int, default=3, help="PolarQuant K angle bits (rbits+tbits<=8)")
     p.add_argument("--polar-vbits", type=int, default=2, help="PolarQuant V bits (mixed only; KIVI kernel supports 2 or 4)")
     args = p.parse_args()
+    if args.k_bits is None:
+        args.k_bits = 2 if args.method == "kivi" else 320
+    if args.v_bits is None:
+        args.v_bits = 2 if args.method == "kivi" else 320
 
     seed_everything(42)
     offline_proj_path = resolve_offline_proj_path(
         args.method, args.offline, args.offline_proj_path,
         model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,
+        whiten=False,
     )
     model, _tok, make_cache = load_model(
         args.model,
