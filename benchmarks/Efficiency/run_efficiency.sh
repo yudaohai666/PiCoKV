@@ -29,6 +29,7 @@ POLAR_RBITS="${POLAR_RBITS:-3}"; POLAR_TBITS="${POLAR_TBITS:-3}"; POLAR_VBITS="$
 # (default path offline_projection/projections/{model}_k{K}_v{V}_nowhiten.pt). OFFLINE_PROJ_PATH
 USE_OFFLINE="${USE_OFFLINE:-0}"
 OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
+ONLINE_DECODER_REFIT="${ONLINE_DECODER_REFIT:-none}"
 OFFLINE_ARGS=()
 if [ "${USE_OFFLINE}" = "1" ] || [ -n "${OFFLINE_PROJ_PATH}" ]; then
   OFFLINE_ARGS=(--offline)
@@ -38,6 +39,13 @@ fi
 OFFLINE_TAG=""
 if [ ${#OFFLINE_ARGS[@]} -gt 0 ]; then
   OFFLINE_TAG="_offline"
+fi
+# quantpc offline only: refit the baked K/V decoder(s) online (keeps fixed encoder).
+REFIT_ARGS=()
+REFIT_TAG=""
+if [ "${ONLINE_DECODER_REFIT}" != "none" ]; then
+  REFIT_ARGS=(--online-decoder-refit "${ONLINE_DECODER_REFIT}")
+  REFIT_TAG="_refit${ONLINE_DECODER_REFIT}"
 fi
 
 # run_one METHOD TAG RUN_ARGS...
@@ -58,7 +66,7 @@ run_one() {
 
 
 # quantpc (CUDA backend quantpc.quanpc)
-run_one quantpc "quantpc_k320_v320${OFFLINE_TAG}" --k-bits 320 --v-bits 320 "${OFFLINE_ARGS[@]}"
+run_one quantpc "quantpc_k320_v320${OFFLINE_TAG}${REFIT_TAG}" --k-bits 320 --v-bits 320 "${OFFLINE_ARGS[@]}" "${REFIT_ARGS[@]}"
 
 # oscar INT2 recipe. Requires oscar_cuda built (bash src/OScaR-KV-Quant/build_oscar_cuda.sh).
 # group_size MUST be 32: the int2 V-param interleaved packer hardcodes 32-wide groups

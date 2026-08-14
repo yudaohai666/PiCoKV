@@ -36,6 +36,7 @@ ZEROROPE="${ZEROROPE:-20}"
 # (default path offline_projection/projections/{model}_k{K}_v{V}_nowhiten.pt). OFFLINE_PROJ_PATH
 USE_OFFLINE="${USE_OFFLINE:-0}"
 OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
+ONLINE_DECODER_REFIT="${ONLINE_DECODER_REFIT:-none}"
 
 # KIVI params (2/4-bit KV).
 KIVI_K="${KIVI_K:-2}"
@@ -64,6 +65,7 @@ case "${METHOD}" in
       METHOD_ARGS+=(--offline)
       [ -n "${OFFLINE_PROJ_PATH}" ] && METHOD_ARGS+=(--offline-proj-path "${OFFLINE_PROJ_PATH}")
     fi
+    [ "${ONLINE_DECODER_REFIT}" != "none" ] && METHOD_ARGS+=(--online-decoder-refit "${ONLINE_DECODER_REFIT}")
     ;;
   kivi)
     METHOD_ARGS=(--k-bits "${KIVI_K}" --v-bits "${KIVI_V}" \

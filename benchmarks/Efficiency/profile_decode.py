@@ -121,6 +121,9 @@ def main() -> None:
                    help="quantpc: use offline encoders (skip online QR at prefill); path defaults to offline_projection/projections/{model}_k{K}_v{V}_nowhiten.pt")
     p.add_argument("--offline-proj-path", default=None,
                    help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
+    p.add_argument("--online-decoder-refit", default="none",
+                   choices=("none", "k", "v", "both"),
+                   help="quantpc offline only: drop the baked K/V decoder(s) and refit online while keeping the fixed offline encoder; none=use baked decoders")
     p.set_defaults(use_pruning=True)
     # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
     p.add_argument("--group-size", type=int, default=32, help="KIVI per-group quant size; OScaR group size (INT2 必须=32)")
@@ -176,6 +179,7 @@ def main() -> None:
         residual_evict_size=args.residual_evict_size,
         offline_v_hadamard=args.offline_v_hadamard,
         offline_proj_path=offline_proj_path,
+        online_decoder_refit=args.online_decoder_refit,
         # PolarQuant params (--method polar)
         polar_mode=args.polar_mode,
         polar_rbits=args.polar_rbits,
