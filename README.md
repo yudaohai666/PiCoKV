@@ -8,28 +8,120 @@ encoder and decoder are folded into a single stored pair.
 ## Environment Setup
 
 The project uses [uv](https://docs.astral.sh/uv/) for dependency management
-(`pyproject.toml` + `uv.lock`, Python `>=3.12`). Create the environment with:
+(`pyproject.toml` + `uv.lock`, Python `>=3.12`).
+
+### Quick start (existing environment)
+
+A prebuilt environment already exists at `.venv/` (Python 3.12.3). Just activate
+it:
 
 ```bash
-uv sync
+source .venv/bin/activate
 ```
 
-This installs all pinned dependencies (torch 2.9.1, transformers 4.53.0,
-flash-attn, lm-eval, etc.) into `.venv/`. Run commands via `uv run <cmd>` or
-activate the venv with `source .venv/bin/activate`.
+### Install from scratch
 
-CUDA is required for the fast decode/prefill kernels; the CUDA extensions under
-`quantpc/quanpc_cuda_extension/` and `quantpc/quanpc_prefill_cuda_extension/`
-build on first use.
+1. Install `uv` (skip if already available — check with `uv --version`):
+
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+
+2. Create the virtualenv and install all pinned dependencies into `.venv/`:
+
+   ```bash
+   uv sync
+   ```
+
+   This resolves from `uv.lock` and installs torch 2.6.0 (cu124),
+   transformers 4.53.2, accelerate 1.14.0, datasets 5.0.1, and
+   flash-attn 2.7.4.post1. `torch`/`torchaudio`/`torchvision` come from the
+   `pytorch-cu124` index configured in `pyproject.toml`, so you need a working
+   **CUDA 12.4** toolchain (`nvcc`, a compatible `gcc`) on `PATH` — flash-attn
+   and the local CUDA extensions compile against it.
+
+3. The Ruler and InfiniteBench runners additionally need `lm-eval`, which is
+   **not** part of `uv sync`. Install it separately when running those:
+
+   ```bash
+   uv pip install lm-eval==0.4.12
+   ```
+
+4. Activate the environment (or prefix commands with `uv run`):
+
+   ```bash
+   source .venv/bin/activate
+   ```
+
+CUDA 12.4 is required for the fast decode/prefill kernels; the CUDA extensions
+under `quantpc/quanpc_cuda_extension/` and
+`quantpc/quanpc_prefill_cuda_extension/` build on first use.
+
+### Key package install commands
+
+If you are not using `uv sync`, install the important pinned packages directly:
+
+```bash
+uv pip install \
+  torch==2.6.0+cu124 torchaudio==2.6.0+cu124 torchvision==0.21.0+cu124 \
+  --index-url https://download.pytorch.org/whl/cu124
+
+uv pip install \
+  transformers==4.53.2 \
+  flash-attn==2.7.4.post1 \
+  lm-eval==0.4.12 \
+  accelerate==1.14.0 \
+  datasets==5.0.1 \
+  huggingface-hub==0.36.2 \
+  tokenizers==0.21.4 \
+  numpy==2.5.2
+```
+
+Plain `pip install ...` works the same if you are inside an activated venv.
+
+### Baseline method setup (kivi / oscar / polar)
+
+The `quantpc` and dense baselines (`flash_attention_2` / `sdpa` / `eager`) work
+out of the box. The KV-quant baselines need their CUDA kernels built into the
+same `.venv/` first (each script activates `.venv` and builds `--no-build-isolation`
+against the pinned torch 2.6.0+cu124, so it will not downgrade torch/transformers):
+
+- **kivi** and **polar** — build the KIVI `kivi_gemv` kernel and verify:
+
+  ```bash
+  bash src/KIVI/setup_env_verify.sh
+  ```
+
+- **oscar** — build the `oscar_cuda` extension in place:
+
+  ```bash
+  bash src/OScaR-KV-Quant/build_oscar_cuda.sh
+  ```
+
+Both require a CUDA 12.4 toolchain on `PATH` (`nvcc`, `CUDA_HOME`, e.g.
+`/usr/local/cuda`). Skip these if you only run `quantpc`.
 
 ## Core package: `quantpc.quanpc_standalone`
 
-Projections are learned **online** from the current prefill K/V (block-32
-CholeskyQR / Householder subspace quantization with a ridge-regularized
-decoder). There is no separate `learn_projection` step and no fixed-projection,
-refit, torch-decode, block-16, or async-prepare path. Decode requires bf16 CUDA
-and GQA=4 (`QH/KVH == 4`, `D == 128`), code bits in
-`{128,192,256,320,384,448,512}`, and `exp_bits` in `{1,2,4,8}`.
+QuanPC supports **two projection paths**, both using block-32 CholeskyQR /
+Householder subspace quantization with a ridge-regularized decoder:
+
+- **Online** (`StandaloneConfig()` defaults, no projection args): projections are
+  fit from the current prefill K/V inside `prepare_kv_cache`. Optional runtime
+  whitening via `--whiten`, and optional decoder refit via `online_decoder_refit`
+  (`k`/`v`/`kv`/`none`).
+- **Offline**: load a stored `.pt` whose whitening + encoder + decoder are folded
+  into a single pair (`load_offline_projections`, `transformers.py:51`), then pass
+  them into `prepare_kv_cache` (`prepare.py:190-241`). The offline decoder can
+  still be refit online. The benchmark launchers default to this path
+  (`USE_OFFLINE=1`, `ONLINE_DECODER_REFIT=v`).
+
+Offline and runtime whitening cannot be combined: a folded offline PT already
+bakes whitening in, so use it without `--whiten`; use `--whiten` only on the
+online path.
+
+Decode requires bf16 CUDA and GQA=4 (`QH/KVH == 4`, `D == 128`), code bits in
+`{128,192,256,320,384,448,512}`, and `exp_bits` in `{1,2,4,8}` (default 4).
 
 See `quantpc/README.md` for the full package reference.
 
@@ -102,16 +194,29 @@ CUDA decode path.
 
 Active core (`quantpc/`):
 
-- `quantpc/quanpc_standalone/`: online-projection prepare/decode API + HF Llama adapter.
+- `quantpc/quanpc_standalone/`: online/offline projection prepare/decode API + HF Llama adapter.
 - `quantpc/quanpc_cuda_extension/`: single-token decode CUDA kernels.
 - `quantpc/quanpc_prefill_cuda_extension/`: cache-packing / gather CUDA kernels.
 - `quantpc/README.md`, `quantpc/test_quanpc_standalone_online.py`
   (+ `needle.py`, `PaulGrahamEssays/` for the self-contained corpus).
 
+Offline projections (`offline_projection/`):
+
+- `create_offline_projections.py` (+ `.sh`): builds the folded whitening +
+  encoder + decoder `.pt` pairs from `data/` (proof-pile / pg19 / codeparrot).
+- `projections/`: stored PTs, named `{model}_k{K}_v{V}_{whiten|nowhiten}.pt`
+  (on disk: `k320_v320`, `k320_v256`, `k256_v256`, each in whiten/nowhiten).
+
+Baselines (`src/`): `KIVI/`, `OScaR-KV-Quant/`, `PolarQuant/`, plus `lmeval.py`.
+`quantpc_legacy/` holds the superseded extension and is not used by benchmarks.
+
 Benchmarks (`benchmarks/`):
-`benchmarks/common.py::load_model(method="quantpc")` patches the model
-via `modify_llama_for_standalone` and injects a fresh `StandaloneLlamaCache`
-per call. The Efficiency / Needle / Longbench / Ruler runners all go through it.
+`benchmarks/common.py::load_model(method=...)` builds the model for each method.
+Supported methods: `quantpc`, `kivi`, `oscar`, `polar`, and the dense baselines
+`flash_attention_2` / `sdpa` / `eager`. For `quantpc` it patches the model via
+`modify_llama_for_standalone` and injects a fresh `StandaloneLlamaCache` per call.
+The Efficiency / Needle / Longbench / Ruler / InfiniteBench runners all go
+through it.
 
 ## Common Checks
 
@@ -130,8 +235,8 @@ python quantpc/test_quanpc_standalone_online.py
 ```
 
 NIAH. `benchmarks/Needle/run_bin.py` is the shared entry point for every
-method (quantpc / kivi / oscar / dense baselines) and writes the flat format
-`show_image_paper.py` plots:
+method (quantpc / kivi / oscar / polar / dense baselines) and writes the flat
+format `show_image_paper.py` plots:
 
 ```bash
 python benchmarks/Needle/run_bin.py --method quantpc \
@@ -151,7 +256,7 @@ python quantpc/run_standalone_niah.py \
   --output-json results/niah/timed_runs/online_k320_v320_nowhiten.json
 ```
 
-See `results/niah/README.md` for what each output holds.
+See `results/niah/` for the stored outputs of these runs.
 
 Efficiency benchmark (quantpc vs dense/KIVI baselines):
 
@@ -160,12 +265,31 @@ python benchmarks/Efficiency/run_efficiency.py \
   --method quantpc --k-bits 320 --v-bits 320 --zerorope 20
 ```
 
+Ruler / InfiniteBench (require `lm-eval`, see Environment Setup). Prefer the
+`.sh` launchers, which auto-name the output tag from the config:
+
+```bash
+bash benchmarks/Ruler/run_ruler.sh
+bash benchmarks/InfiniteBench/run_infinitebench.sh
+```
+
+Each launcher exposes a `METHODS=(...)` list near the top (comment methods in
+or out, or force one with `METHOD=quantpc`) and shares the same tunables:
+`K_BITS`/`V_BITS` (320), `SINK` (64), `LOCAL` (256), `EXP_BITS` (4),
+`EAS` (0.01), `ZEROROPE` (20), `USE_OFFLINE` (1), `WHITEN` (0),
+`ONLINE_DECODER_REFIT` (v), `DECODER_RIDGE` (1e-2). The resolved quantpc tag is
+`quantpc_{mode}_k{K}_v{V}_{whiten}[_krefit|_vrefit|_refit]`. Note the default
+`MODEL` path differs per launcher (`/data/Llama-3.1-8B-Instruct` for
+Ruler/InfiniteBench/Longbench/Needle vs the full share-storage path for
+Efficiency) — override `MODEL=...` as needed.
+
 For QuanPC, the standard configuration is K/V `320/320`, `sink_size=64`,
 `local_size=256`, `eas=0.01`, and `zerorope=20`. Runtime whitening is an online
 option. Offline projections already contain their fitted encoder/decoder pair;
-the benchmark launchers keep `USE_OFFLINE=0` by default and, when set to `1`,
-load `offline_projection/projections/{model}_k320_v320_nowhiten.pt`. A missing
-default PT is reported as an explicit `FileNotFoundError`.
+the benchmark launchers default to `USE_OFFLINE=1` and load
+`offline_projection/projections/{model}_k320_v320_nowhiten.pt` (set
+`USE_OFFLINE=0` for the online path). A missing default PT is reported as an
+explicit `FileNotFoundError`.
 
 Offline and runtime whitening cannot be combined: use a folded offline PT
 without `--whiten`, or use the online path with `--whiten`.
