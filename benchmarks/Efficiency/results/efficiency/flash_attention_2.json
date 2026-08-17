@@ -5,8 +5,8 @@
   "batch_size": 1,
   "decode_tokens": 64,
   "config": {
-    "k_bits": 256,
-    "v_bits": 256,
+    "k_bits": 320,
+    "v_bits": 320,
     "group_size": 32,
     "residual_length": 32,
     "exp_bits": 4,
@@ -16,9 +16,9 @@
   "results": {
     "131072": {
       "prompt_len": 131072,
-      "prefill_ms": 16949.159,
-      "decode_ms_per_token": 47.0587,
-      "decode_toks_per_s": 21.25,
+      "prefill_ms": 17176.996,
+      "decode_ms_per_token": 46.6159,
+      "decode_toks_per_s": 21.45,
       "prefill_peak_gb": null,
       "decode_peak_gb": null
     }

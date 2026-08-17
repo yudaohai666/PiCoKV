@@ -293,8 +293,9 @@ def parse_args(argv=None):
 
 def main() -> None:
     args = parse_args()
-    import quantpc.quanpc_standalone.online as online_mod
-    online_mod.ONLINE_DECODER_RIDGE = float(args.decoder_ridge)
+    if args.method == "quantpc":
+        import quantpc.quanpc_standalone.online as online_mod
+        online_mod.ONLINE_DECODER_RIDGE = float(args.decoder_ridge)
     seed_everything(args.seed)
 
     model2maxlen = json.load(open(CONFIG_DIR / "model2maxlen.json"))

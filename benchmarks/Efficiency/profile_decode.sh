@@ -1,7 +1,7 @@
 #!/bin/bash
-# Decode-stage torch.profiler analysis: quantpc / kivi / oscar / dense baselines.
+# Decode-stage torch.profiler analysis: quantpc / kivi / oscar / polar / dense.
 # Prefill once, time the decode steps, export key_averages table + chrome trace.
-# Switch method via env: METHOD=kivi bash profile_decode.sh
+# Select methods via the METHODS list below (METHOD=kivi forces a single one).
 # Output: results/efficiency/prof/<method>_<length>.json (chrome trace)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,86 +10,100 @@ export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}"
 
 GPU="${GPU:-6}"
 MODEL="${MODEL:-/data/Llama-3.1-8B-Instruct}"
+MODEL_TAG="$(basename "${MODEL%/}")"
 PROF_DIR="results/efficiency/prof"
 mkdir -p "${PROF_DIR}"
 
-# Profiling params (aligned with run_efficiency.py).
+# ── benchmark runtime params (aligned with run_efficiency.py) ──
 LENGTH="${LENGTH:-32768}"   # prefill length
-BATCH="${BATCH:-1}"         # prefill/decode batch size (polar: safe >1, inputs are equal-length)
-WARMUP="${WARMUP:-2}"       # untimed decode steps before profiling (= --warmup)
-ACTIVE="${ACTIVE:-64}"      # profiled decode steps (= --decode-tokens)
+BATCH="${BATCH:-1}"         # prefill/decode batch size
+WARMUP="${WARMUP:-2}"       # untimed decode steps before profiling
+ACTIVE="${ACTIVE:-64}"      # profiled decode steps
 ROWS="${ROWS:-30}"          # key_averages table rows
 
-# Method: quantpc | kivi | oscar | polar | flash_attention_2 | sdpa | eager
-METHOD="${METHOD:-quantpc}"
+# ── methods to run (comment out to skip; METHOD=oscar forces a single one) ──
+METHODS=(
+  quantpc
+  # kivi
+  # oscar
+  # polar
+  # flash_attention_2
+  # sdpa
+  # eager
+)
+[ -n "${METHOD:-}" ] && METHODS=("${METHOD}")
 
-# quantpc KV-cache params (aligned with run_efficiency.py defaults).
-K_BITS="${K_BITS:-320}"
-V_BITS="${V_BITS:-320}"
-SINK="${SINK:-64}"
-LOCAL="${LOCAL:-256}"
-EXP_BITS="${EXP_BITS:-4}"
-EAS="${EAS:-0.01}"
-ZEROROPE="${ZEROROPE:-20}"
-
-# quantpc offline block-32 encoders: USE_OFFLINE=1 skips the online QR at prefill
-# (default path offline_projection/projections/{model}_k{K}_v{V}_nowhiten.pt). OFFLINE_PROJ_PATH
-USE_OFFLINE="${USE_OFFLINE:-0}"
+# ── per-method defaults (identical across all benchmark launchers) ──
+# quantpc; default = offline + nowhiten + vrefit
+K_BITS="${K_BITS:-320}"; V_BITS="${V_BITS:-320}"
+SINK="${SINK:-64}"; LOCAL="${LOCAL:-256}"
+EXP_BITS="${EXP_BITS:-4}"; EAS="${EAS:-0.01}"; ZEROROPE="${ZEROROPE:-20}"
+USE_OFFLINE="${USE_OFFLINE:-1}"
+WHITEN="${WHITEN:-0}"
+ONLINE_DECODER_REFIT="${ONLINE_DECODER_REFIT:-v}"
+DECODER_RIDGE="${DECODER_RIDGE:-1e-2}"
 OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
-ONLINE_DECODER_REFIT="${ONLINE_DECODER_REFIT:-none}"
+# kivi (2/4-bit KV)
+KIVI_K="${KIVI_K:-2}"; KIVI_V="${KIVI_V:-2}"; KIVI_GROUP="${KIVI_GROUP:-32}"; KIVI_RESIDUAL="${KIVI_RESIDUAL:-128}"
+# oscar INT2 recipe (group MUST be 32; int2 V-param packer hardcodes 32-wide groups)
+OSCAR_NUM_BITS="${OSCAR_NUM_BITS:-2}"; OSCAR_QUANT_MODE="${OSCAR_QUANT_MODE:-k-channel}"; OSCAR_GROUP="${OSCAR_GROUP:-32}"
+OSCAR_KV_ROTATION="${OSCAR_KV_ROTATION:-hadamard}"; OSCAR_KV_NORM="${OSCAR_KV_NORM:-1}"; OSCAR_EVICT="${OSCAR_EVICT:-256}"; OSCAR_OFFLINE_V_HAD="${OSCAR_OFFLINE_V_HAD:-1}"
+# polar (src/PolarQuant)
+POLAR_MODE="${POLAR_MODE:-mixed}"; POLAR_RBITS="${POLAR_RBITS:-3}"; POLAR_TBITS="${POLAR_TBITS:-3}"; POLAR_VBITS="${POLAR_VBITS:-2}"
 
-# KIVI params (2/4-bit KV).
-KIVI_K="${KIVI_K:-2}"
-KIVI_V="${KIVI_V:-2}"
-KIVI_GROUP="${KIVI_GROUP:-32}"
-KIVI_RESIDUAL="${KIVI_RESIDUAL:-128}"
+# Build METHOD_ARGS[] and TAG for a method. Needs REPO_ROOT, MODEL_TAG + the
+# per-method defaults above. quantpc TAG matches run_ruler/run_infinitebench's
+# python run_tag(): quantpc_{mode}_k{K}_v{V}_{whiten}[_krefit|_vrefit|_refit].
+build_method_args() {
+  METHOD_ARGS=(); TAG="$1"
+  case "$1" in
+    quantpc)
+      METHOD_ARGS=(--k-bits "${K_BITS}" --v-bits "${V_BITS}" --sink-size "${SINK}" --local-size "${LOCAL}"
+        --exp-bits "${EXP_BITS}" --eas "${EAS}" --zerorope "${ZEROROPE}"
+        --decoder-ridge "${DECODER_RIDGE}" --online-decoder-refit "${ONLINE_DECODER_REFIT}")
+      local mode proj whiten_tag
+      if [ "${USE_OFFLINE}" = "1" ] || [ -n "${OFFLINE_PROJ_PATH}" ]; then
+        mode="offline"; METHOD_ARGS+=(--offline); proj="${OFFLINE_PROJ_PATH}"
+        # offline + whiten -> the folded _whiten.pt (no runtime --whiten flag)
+        if [ -z "${proj}" ] && [ "${WHITEN}" = "1" ]; then
+          proj="${REPO_ROOT}/offline_projection/projections/${MODEL_TAG}_k${K_BITS}_v${V_BITS}_whiten.pt"
+        fi
+        [ -n "${proj}" ] && METHOD_ARGS+=(--offline-proj-path "${proj}")
+      else
+        mode="online"; [ "${WHITEN}" = "1" ] && METHOD_ARGS+=(--whiten)
+      fi
+      [ "${WHITEN}" = "1" ] && whiten_tag="whiten" || whiten_tag="nowhiten"
+      TAG="quantpc_${mode}_k${K_BITS}_v${V_BITS}_${whiten_tag}"
+      # refit suffix applies only to the offline path.
+      if [ "${mode}" = "offline" ]; then
+        case "${ONLINE_DECODER_REFIT}" in k) TAG+="_krefit" ;; v) TAG+="_vrefit" ;; both) TAG+="_refit" ;; esac
+      fi
+      ;;
+    kivi)
+      METHOD_ARGS=(--k-bits "${KIVI_K}" --v-bits "${KIVI_V}" --group-size "${KIVI_GROUP}" --residual-length "${KIVI_RESIDUAL}")
+      TAG="kivi_k${KIVI_K}_v${KIVI_V}"
+      ;;
+    oscar)
+      METHOD_ARGS=(--num-bits "${OSCAR_NUM_BITS}" --quant-mode "${OSCAR_QUANT_MODE}" --group-size "${OSCAR_GROUP}")
+      [ "${OSCAR_KV_ROTATION}" != "none" ] && METHOD_ARGS+=(--kv-rotation "${OSCAR_KV_ROTATION}")
+      [ "${OSCAR_KV_NORM}" != "0" ]       && METHOD_ARGS+=(--kv-norm "${OSCAR_KV_NORM}")
+      [ -n "${OSCAR_EVICT}" ]             && METHOD_ARGS+=(--residual-evict-size "${OSCAR_EVICT}")
+      [ "${OSCAR_OFFLINE_V_HAD}" = "1" ]  && METHOD_ARGS+=(--offline-v-hadamard)
+      TAG="oscar_int${OSCAR_NUM_BITS}"
+      ;;
+    polar)
+      METHOD_ARGS=(--polar-mode "${POLAR_MODE}" --polar-rbits "${POLAR_RBITS}" --polar-tbits "${POLAR_TBITS}" --polar-vbits "${POLAR_VBITS}")
+      TAG="polar_${POLAR_MODE}_${POLAR_RBITS}${POLAR_TBITS}${POLAR_VBITS}"
+      ;;
+  esac
+}
 
-# OScaR INT2 recipe (group_size MUST be 32, else int2 V-param packer writes OOB).
-OSCAR_NUM_BITS="${OSCAR_NUM_BITS:-2}"
-OSCAR_QUANT_MODE="${OSCAR_QUANT_MODE:-k-channel}"
-OSCAR_GROUP="${OSCAR_GROUP:-32}"
-OSCAR_KV_ROTATION="${OSCAR_KV_ROTATION:-hadamard}"
-OSCAR_KV_NORM="${OSCAR_KV_NORM:-1}"
-OSCAR_EVICT="${OSCAR_EVICT:-256}"
-OSCAR_OFFLINE_V_HAD="${OSCAR_OFFLINE_V_HAD:-1}"
-
-# PolarQuant (src/PolarQuant). Passed to profile_decode.py as --polar-* flags.
-POLAR_MODE="${POLAR_MODE:-mixed}"
-POLAR_RBITS="${POLAR_RBITS:-3}"; POLAR_TBITS="${POLAR_TBITS:-3}"; POLAR_VBITS="${POLAR_VBITS:-2}"
-
-case "${METHOD}" in
-  quantpc)
-    METHOD_ARGS=(--k-bits "${K_BITS}" --v-bits "${V_BITS}" --sink-size "${SINK}" --local-size "${LOCAL}" \
-                 --exp-bits "${EXP_BITS}" --eas "${EAS}" --zerorope "${ZEROROPE}")
-    if [ "${USE_OFFLINE}" = "1" ] || [ -n "${OFFLINE_PROJ_PATH}" ]; then
-      METHOD_ARGS+=(--offline)
-      [ -n "${OFFLINE_PROJ_PATH}" ] && METHOD_ARGS+=(--offline-proj-path "${OFFLINE_PROJ_PATH}")
-    fi
-    [ "${ONLINE_DECODER_REFIT}" != "none" ] && METHOD_ARGS+=(--online-decoder-refit "${ONLINE_DECODER_REFIT}")
-    ;;
-  kivi)
-    METHOD_ARGS=(--k-bits "${KIVI_K}" --v-bits "${KIVI_V}" \
-                 --group-size "${KIVI_GROUP}" --residual-length "${KIVI_RESIDUAL}")
-    ;;
-  oscar)
-    METHOD_ARGS=(--num-bits "${OSCAR_NUM_BITS}" --quant-mode "${OSCAR_QUANT_MODE}" --group-size "${OSCAR_GROUP}")
-    [ "${OSCAR_KV_ROTATION}" != "none" ] && METHOD_ARGS+=(--kv-rotation "${OSCAR_KV_ROTATION}")
-    [ "${OSCAR_KV_NORM}" != "0" ]       && METHOD_ARGS+=(--kv-norm "${OSCAR_KV_NORM}")
-    [ -n "${OSCAR_EVICT}" ]             && METHOD_ARGS+=(--residual-evict-size "${OSCAR_EVICT}")
-    [ "${OSCAR_OFFLINE_V_HAD}" = "1" ]  && METHOD_ARGS+=(--offline-v-hadamard)
-    ;;
-  polar)
-    METHOD_ARGS=(--polar-mode "${POLAR_MODE}" --polar-rbits "${POLAR_RBITS}" \
-                 --polar-tbits "${POLAR_TBITS}" --polar-vbits "${POLAR_VBITS}")
-    ;;
-  *)
-    METHOD_ARGS=()
-    ;;
-esac
-
-TRACE="${PROF_DIR}/${METHOD}_${LENGTH}.json"
-echo "=== Profiling decode: method=${METHOD} length=${LENGTH} -> ${TRACE} ==="
-CUDA_VISIBLE_DEVICES=${GPU} python "${SCRIPT_DIR}/profile_decode.py" \
-  --model "${MODEL}" --method "${METHOD}" \
-  --length "${LENGTH}" --batch "${BATCH}" --warmup "${WARMUP}" --active "${ACTIVE}" --rows "${ROWS}" \
-  --trace "${TRACE}" "${METHOD_ARGS[@]}"
+for method in "${METHODS[@]}"; do
+  build_method_args "${method}"
+  TRACE="${PROF_DIR}/${method}_${LENGTH}.json"
+  echo "=== Profiling decode: method=${method} length=${LENGTH} -> ${TRACE} ==="
+  CUDA_VISIBLE_DEVICES=${GPU} python "${SCRIPT_DIR}/profile_decode.py" \
+    --model "${MODEL}" --method "${method}" \
+    --length "${LENGTH}" --batch "${BATCH}" --warmup "${WARMUP}" --active "${ACTIVE}" --rows "${ROWS}" \
+    --trace "${TRACE}" "${METHOD_ARGS[@]}"
+done

@@ -15,8 +15,8 @@ export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export PATH="$CUDA_HOME/bin:$PATH"
 
 # runtime deps (do NOT install KIVI root pkg: it would downgrade torch/transformers)
-uv pip install -U setuptools wheel ninja
-uv pip install datasets sentencepiece protobuf accelerate
+uv pip install  setuptools wheel ninja
+uv pip install datasets sentencepiece protobuf accelerate triton==3.3.0
 
 # CUDA kernel kivi_gemv (--no-build-isolation: build against venv torch)
 cd "$SCRIPT_DIR/quant"

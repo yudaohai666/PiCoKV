@@ -368,9 +368,10 @@ def main() -> None:
     if args.v_bits is None:
         args.v_bits = 2 if args.method == "kivi" else 320
 
-    import quantpc.quanpc_standalone.online as online_mod
-    online_mod.ONLINE_DECODER_RIDGE = float(args.decoder_ridge)
-    print(f"online decoder ridge set to {args.decoder_ridge}", flush=True)
+    if args.method == "quantpc":
+        import quantpc.quanpc_standalone.online as online_mod
+        online_mod.ONLINE_DECODER_RIDGE = float(args.decoder_ridge)
+        print(f"online decoder ridge set to {args.decoder_ridge}", flush=True)
 
     seed_everything(args.seed)
     offline_proj_path = resolve_offline_proj_path(

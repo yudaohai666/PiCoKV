@@ -454,7 +454,7 @@ def main():
     args = parse_arguments()
     seed_everything(args.seed)
 
-    if args.decoder_ridge is not None:
+    if args.method == "quantpc":
         # The solve reads this as a module global, so rebinding it leaves the
         # shipped constant alone while changing what this run fits.
         import quantpc.quanpc_standalone.online as online_mod

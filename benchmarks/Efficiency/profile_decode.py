@@ -124,6 +124,11 @@ def main() -> None:
     p.add_argument("--online-decoder-refit", default="none",
                    choices=("none", "k", "v", "both"),
                    help="quantpc offline only: drop the baked K/V decoder(s) and refit online while keeping the fixed offline encoder; none=use baked decoders")
+    p.add_argument("--whiten", action="store_true",
+                   help="quantpc: rotate K/V into the query-whitened basis at runtime; a "
+                        "folded projection already has this baked into its stored pair")
+    p.add_argument("--decoder-ridge", type=float, default=1e-2,
+                   help="override the online decoder ridge (default 1e-2; offline PTs are fitted with 1e-3)")
     p.set_defaults(use_pruning=True)
     # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
     p.add_argument("--group-size", type=int, default=32, help="KIVI per-group quant size; OScaR group size (INT2 必须=32)")
@@ -149,10 +154,14 @@ def main() -> None:
         args.v_bits = 2 if args.method == "kivi" else 320
 
     seed_everything(42)
+    if args.method == "quantpc":
+        import quantpc.quanpc_standalone.online as online_mod
+        online_mod.ONLINE_DECODER_RIDGE = float(args.decoder_ridge)
+        print(f"online decoder ridge set to {args.decoder_ridge}", flush=True)
     offline_proj_path = resolve_offline_proj_path(
         args.method, args.offline, args.offline_proj_path,
         model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,
-        whiten=False,
+        whiten=args.whiten,
     )
     model, _tok, make_cache = load_model(
         args.model,
@@ -179,6 +188,7 @@ def main() -> None:
         residual_evict_size=args.residual_evict_size,
         offline_v_hadamard=args.offline_v_hadamard,
         offline_proj_path=offline_proj_path,
+        whiten=args.whiten,
         online_decoder_refit=args.online_decoder_refit,
         # PolarQuant params (--method polar)
         polar_mode=args.polar_mode,

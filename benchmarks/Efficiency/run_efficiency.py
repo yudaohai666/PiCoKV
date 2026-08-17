@@ -261,7 +261,7 @@ def run(args) -> None:
     offline_proj_path = resolve_offline_proj_path(
         args.method, args.offline, args.offline_proj_path,
         model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,
-        whiten=False,
+        whiten=args.whiten,
     )
     model, _tokenizer, make_cache = load_model(
         args.model,
@@ -277,6 +277,7 @@ def run(args) -> None:
         use_pruning=args.use_pruning,
         prune_mode=args.prune_mode,
         log_eps=args.log_eps,
+        whiten=args.whiten,
         offline_proj_path=offline_proj_path,
         online_decoder_refit=args.online_decoder_refit,
         # KIVI params (--method kivi)
@@ -417,16 +418,25 @@ def main() -> None:
     parser.add_argument("--online-decoder-refit", default="none",
                         choices=("none", "k", "v", "both"),
                         help="quantpc offline only: drop the baked K/V decoder(s) and refit online while keeping the fixed offline encoder; none=use baked decoders")
+    parser.add_argument("--whiten", action="store_true",
+                        help="quantpc online only: rotate K/V into the query-whitened basis at runtime (cannot be combined with --offline)")
     # ── PolarQuant params (--method polar) ──
     parser.add_argument("--polar-mode", default="mixed", choices=["mixed", "group", "snapkv"], help="PolarQuant attention variant: mixed (K polar + V KIVI-quant) | group (K-only) | snapkv")
     parser.add_argument("--polar-rbits", type=int, default=3, help="PolarQuant K radius bits (rbits+tbits<=8)")
     parser.add_argument("--polar-tbits", type=int, default=3, help="PolarQuant K angle bits (rbits+tbits<=8)")
     parser.add_argument("--polar-vbits", type=int, default=2, help="PolarQuant V bits (mixed only; KIVI kernel supports 2 or 4)")
+    parser.add_argument("--decoder-ridge", type=float, default=1e-2,
+                        help="override the online decoder ridge (default 1e-2; offline PTs are fitted with 1e-3)")
     args = parser.parse_args()
     if args.k_bits is None:
         args.k_bits = 2 if args.method == "kivi" else 320
     if args.v_bits is None:
         args.v_bits = 2 if args.method == "kivi" else 320
+
+    if args.method == "quantpc":
+        import quantpc.quanpc_standalone.online as online_mod
+        online_mod.ONLINE_DECODER_RIDGE = float(args.decoder_ridge)
+        print(f"online decoder ridge set to {args.decoder_ridge}", flush=True)
 
     if args.compare:
         compare(args.compare)
