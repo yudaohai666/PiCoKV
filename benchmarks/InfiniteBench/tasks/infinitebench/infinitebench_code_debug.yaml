@@ -6,5 +6,5 @@ doc_to_text: !function utils.doc_to_text_code_debug
 generation_kwargs:
   do_sample: false
   temperature: 0.0
-  max_gen_toks: 5
+  max_gen_toks: 40
   until: ["\n"]

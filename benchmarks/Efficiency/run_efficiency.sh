@@ -18,16 +18,16 @@ mkdir -p "${RESULT_DIR}"
 LENGTHS="${LENGTHS:-131072}"
 DECODE_TOKENS="${DECODE_TOKENS:-64}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
-WARMUP="${WARMUP:-1}"
-REPEATS="${REPEATS:-3}"
+WARMUP="${WARMUP:-2}"
+REPEATS="${REPEATS:-4}"
 
 # ── methods to run (comment out to skip; METHOD=oscar forces a single one) ──
 METHODS=(
-  flash_attention_2
+  # flash_attention_2
   quantpc
-  kivi
-  oscar
-  polar
+  # kivi
+  # oscar
+  # polar
   # sdpa
   # eager
 )

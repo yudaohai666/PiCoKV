@@ -7,5 +7,5 @@ doc_to_text: "{{context}}\n\n{{input}}"
 generation_kwargs:
   do_sample: false
   temperature: 0.0
-  max_gen_toks: 12
+  max_gen_toks: 40
   until: ["\n"]

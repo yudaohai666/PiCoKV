@@ -14,11 +14,11 @@ MODEL="${MODEL:-/data/Llama-3.1-8B-Instruct}"
 MODEL_TAG="$(basename "${MODEL%/}")"
 
 # ── benchmark runtime params ──
-MAX_SEQ_LENGTHS="${MAX_SEQ_LENGTHS:-32768,65536}"
+MAX_SEQ_LENGTHS="${MAX_SEQ_LENGTHS:-8192,16384,32768,65536,131072}"
 MAX_LENGTH="${MAX_LENGTH:-131072}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 MAX_GEN_TOKS="${MAX_GEN_TOKS:-128}"
-LIMIT="${LIMIT:-100}"
+LIMIT="${LIMIT:-200}"
 TASKS="${TASKS:-niah_single_1,niah_single_2,niah_single_3,niah_multikey_1,niah_multikey_2,niah_multikey_3,niah_multiquery,niah_multivalue,ruler_vt,ruler_cwe,ruler_fwe,ruler_qa_squad,ruler_qa_hotpot}"
 APPLY_CHAT_TEMPLATE="${APPLY_CHAT_TEMPLATE:-1}"
 

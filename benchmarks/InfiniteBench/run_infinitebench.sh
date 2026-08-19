@@ -19,7 +19,7 @@ BATCH_SIZE="${BATCH_SIZE:-1}"
 # 1200 is longbook_sum_en's ceiling; other tasks cap themselves via task yamls.
 MAX_GEN_TOKS="${MAX_GEN_TOKS:-1200}"
 # LIMIT is empty by default (full test set); set to e.g. 20 for a smoke run.
-LIMIT="${LIMIT:-}"
+LIMIT="${LIMIT:-200}"
 TASKS="${TASKS:-infinitebench_passkey,infinitebench_kv_retrieval,infinitebench_number_string,infinitebench_code_run,infinitebench_code_debug,infinitebench_math_find,infinitebench_longdialogue_qa_en,infinitebench_longbook_qa_en,infinitebench_longbook_sum_en,infinitebench_longbook_choice_en,infinitebench_longbook_qa_chn}"
 APPLY_CHAT_TEMPLATE="${APPLY_CHAT_TEMPLATE:-1}"
 
