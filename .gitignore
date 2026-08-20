@@ -39,3 +39,4 @@ offline_projection/data/pg19.json
 # stripped of their own .git so they never become nested repositories -- the
 # commit they came from is recorded in 3rd/<name>.version instead.
 3rd/
+/benchmarks/**/launch*.sh
