@@ -102,6 +102,7 @@ class Transformer(ModelProvider):
             prompt,
             tokenize=True,
             add_generation_prompt=True,
+            enable_thinking=False,
             return_tensors="pt",
             return_dict=False,
         ).to(self.model.device)

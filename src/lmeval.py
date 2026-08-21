@@ -148,6 +148,7 @@ class MyModel(TemplateLM):
                     tokenize=False,
                     add_generation_prompt=add_generation_prompt,
                     continue_final_message=not add_generation_prompt,  # must match HFLM behavior
+                    enable_thinking=False,
                 )
             except Exception as e:
                 print(f"Warning: Failed to apply chat template: {e}")

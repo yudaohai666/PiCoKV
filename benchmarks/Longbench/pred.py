@@ -134,6 +134,7 @@ def build_input(model: QuantPCModel, prompt: str, dataset: str, device):
             messages,
             tokenize=True,
             add_generation_prompt=True,
+            enable_thinking=False,
             return_tensors="pt",
         ).to(device)
         return {"input_ids": input_ids}

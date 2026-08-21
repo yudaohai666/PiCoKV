@@ -1,11 +1,12 @@
 #!/bin/bash
+set -euo pipefail
 # NIAH (needle-in-a-haystack): quantpc / kivi / oscar / polar / dense, then visualize.
 # Select methods via the METHODS list below (METHOD=kivi forces a single one).
-# Output: results/niah/<MODEL>/<TAG>/results.json ; images in results/niah/vis/
+# Output: results/niah/<MODEL>/<TAG>/results.json ; images in results/niah/vis/<MODEL>/
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}"
+export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
 GPU="${GPU:-0}"
 MODEL="${MODEL:-/data/Llama-3.1-8B-Instruct}"

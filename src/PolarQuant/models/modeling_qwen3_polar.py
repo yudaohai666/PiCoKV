@@ -21,6 +21,7 @@ from models.modeling_llama_polar import (
     LlamaPolarModel,
     LlamaPolarDecoderLayer,
     LlamaSnapKVAttention,
+    generate,
 )
 
 

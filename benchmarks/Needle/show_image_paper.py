@@ -26,8 +26,13 @@ def main(args):
     path = args.eval_path
     save_dir = args.save_dir
 
-    # Parse dir name like Llama-3.1-8B-Instruct_bpc -> model + method
-    dir_name = path.split('/')[-1]
+    # Parse the current layout:
+    #   results/niah/<model>/<method>/results.json
+    # In this layout the parent directory is the model and the leaf directory
+    # is the method tag. Keep the legacy flat-layout parser below as fallback.
+    path = os.path.normpath(path)
+    dir_name = os.path.basename(path)
+    parent_name = os.path.basename(os.path.dirname(path))
     dir_name_lower = dir_name.lower()
 
     # Preferred split: --model already names the model, so strip that prefix and
@@ -36,7 +41,10 @@ def main(args):
     # (k320foldedlocal256) and drops fields like the local-window size from the
     # title.  Legacy directory names still fall through to them.
     model_tag = args.model.rstrip('/').split('/')[-1]
-    if dir_name.startswith(model_tag + '_'):
+    if parent_name == model_tag:
+        model = model_tag
+        method = dir_name.lower()
+    elif dir_name.startswith(model_tag + '_'):
         model = model_tag
         method = dir_name[len(model_tag) + 1:].lower()
     elif dir_name_lower.endswith('_offline'):
@@ -67,13 +75,12 @@ def main(args):
             model = args.model.split('/')[-1]
             method = "unknown"
     
-    save_dir = f"{save_dir}/{model}"
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
+    save_dir = os.path.join(save_dir, model)
+    os.makedirs(save_dir, exist_ok=True)
     if args.pdf:
-        save_path = f"{save_dir}/{dir_name}.pdf"
+        save_path = os.path.join(save_dir, f"{dir_name}.pdf")
     else:
-        save_path = f"{save_dir}/{dir_name}.png"
+        save_path = os.path.join(save_dir, f"{dir_name}.png")
 
     data = []
 
@@ -210,25 +217,35 @@ def main(args):
     # build the title from them instead of adding a name_map row per config --
     # that is how earlier plots ended up titled "(online)" for a local-256 run.
     structured = re.fullmatch(
-        r'(online|offline)_k(\d+)_v(\d+)_local(\d+)_(whiten|nowhiten)',
+        r'(?:quantpc_)?(online|offline)_k(\d+)_v(\d+)'
+        r'(?:_local(\d+))?_(whiten|nowhiten)'
+        r'(?:_(krefit|vrefit|refit))?',
         method, re.IGNORECASE,
     )
     if structured:
-        mode, k, v, local, whiten = structured.groups()
+        mode, k, v, local, whiten, refit = structured.groups()
+        local_text = f", local {local}" if local else ""
+        refit_names = {
+            "krefit": "K decoder refit",
+            "vrefit": "V decoder refit",
+            "refit": "K+V decoder refit",
+        }
+        refit_text = f", {refit_names[refit.lower()]}" if refit else ""
         method_title = (
-            f"QuanPC k{k}/v{v} ({mode.lower()}, local {local}, "
-            f"{'whitened' if whiten.lower() == 'whiten' else 'no whitening'})"
+            f"QuanPC k{k}/v{v} ({mode.lower()}{local_text}, "
+            f"{'whitened' if whiten.lower() == 'whiten' else 'no whitening'}"
+            f"{refit_text})"
         )
     # Match method names with budget suffix, e.g. snapkv-2048
     elif re.match(r'([^-]+)-(\d+)', method, re.IGNORECASE):
         method_name = re.match(r'([^-]+)-(\d+)', method, re.IGNORECASE).group(1)
         method_title = name_map.get(method_name.lower(), method_name.capitalize())
     else:
-        method_title = name_map.get(method.lower(), method.capitalize())
+        method_title = name_map.get(method.lower(), method.replace('_', ' ').title())
 
-    # Escape spaces for LaTeX math mode
-    method_title_latex = method_title.replace(" ", r"\ ")
-    title_str = rf"$\bf{{{method_title_latex}}}$ Average Score : {df['Score'].mean():.2f}"
+    # Use regular text instead of math mode: method tags contain underscores,
+    # which Matplotlib would otherwise render as subscript expressions.
+    title_str = f"{method_title} Average Score : {df['Score'].mean():.2f}"
 
 
     plt.title(title_str,fontproperties=prop_16)
