@@ -25,9 +25,10 @@ from quantpc.model_config import load_model_config
 BASELINE_ATTN = {"flash_attention_2", "sdpa", "eager"}
 
 # The KIVI reference implementation lives under src/KIVI with its own
-# `models.*` / `quant.*` import roots, so that directory must be on sys.path
-# before importing LlamaForCausalLM_KIVI / MistralForCausalLM_KIVI.
+# `models.*` / `quant.*` import roots.  Its CUDA extension is imported as a
+# top-level `kivi_gemv`, so both the KIVI root and quant directory are needed.
 KIVI_SRC = Path(__file__).resolve().parents[1] / "src" / "KIVI"
+KIVI_QUANT_SRC = KIVI_SRC / "quant"
 
 # OScaR's HF modeling files (evaluation/{llama,qwen3}.py) + the `oscar` package
 # live in the copied tree under src/OScaR-KV-Quant. Build the oscar_cuda CUDA
@@ -151,10 +152,14 @@ def _load_kivi_model(
     by its custom attention forward), so ``make_cache`` is ``None`` and the
     runner must NOT override ``past_key_values`` on ``generate``.
     """
-    if str(KIVI_SRC) not in sys.path:
-        sys.path.insert(0, str(KIVI_SRC))
+    for p in (str(KIVI_SRC), str(KIVI_QUANT_SRC)):
+        if p not in sys.path:
+            sys.path.insert(0, p)
 
-    config = AutoConfig.from_pretrained(model_name)
+    # Use the shared loader so Qwen3 receives the same YaRN/max-position
+    # override as the QuantPC and dense paths.  Llama/Mistral configs are
+    # unchanged by load_model_config.
+    config = load_model_config(model_name)
     config.k_bits = k_bits
     config.v_bits = v_bits
     config.group_size = group_size
@@ -162,7 +167,12 @@ def _load_kivi_model(
     config.use_flash = True  # KIVI attention is only implemented for flash-attn.
 
     model_type = getattr(config, "model_type", "llama")
-    if model_type == "mistral":
+    if model_type == "qwen3":
+        # The copied KIVI implementation reads this legacy Llama attribute
+        # directly; Qwen3Config does not define it.
+        config.pretraining_tp = 1
+        from models.qwen3_kivi import Qwen3ForCausalLM_KIVI as KIVIModel
+    elif model_type == "mistral":
         from models.mistral_kivi import MistralForCausalLM_KIVI as KIVIModel
     else:
         from models.llama_kivi import LlamaForCausalLM_KIVI as KIVIModel
@@ -208,7 +218,7 @@ def _load_oscar_model(
         if p not in sys.path:
             sys.path.insert(0, p)
 
-    config = load_model_config(model_name, trust_remote_code=True)
+    config = load_model_config(model_name)
     model_type = getattr(config, "model_type", None)
     if model_type == "qwen3":
         from qwen3 import Qwen3ForCausalLM as OscarModel
@@ -450,12 +460,21 @@ def _load_polar_model(
     if str(POLAR_SRC) not in sys.path:
         sys.path.insert(0, str(POLAR_SRC))
 
-    from models.modeling_llama_polar import (  # noqa: E402
-        LlamaPolarForCausalLM,
-        generate as polar_generate,
-    )
+    config = load_model_config(model_name)
+    model_type = getattr(config, "model_type", None)
+    if model_type == "qwen3":
+        from models.modeling_qwen3_polar import (  # noqa: E402
+            Qwen3PolarForCausalLM as PolarModel,
+            generate as polar_generate,
+        )
+    elif model_type == "llama":
+        from models.modeling_llama_polar import (  # noqa: E402
+            LlamaPolarForCausalLM as PolarModel,
+            generate as polar_generate,
+        )
+    else:
+        raise ValueError(f"PolarQuant supports model_type qwen3/llama; got {model_type!r}.")
 
-    config = AutoConfig.from_pretrained(model_name)
     config.polar_mode = polar_mode
     config.polar_rbits = rbits
     config.polar_tbits = tbits
@@ -465,7 +484,7 @@ def _load_polar_model(
     gen_cfg = GenerationConfig.from_pretrained(model_name)
 
     # kernel4group and the KIVI value kernels are fp16-only; do NOT use bf16.
-    model = LlamaPolarForCausalLM.from_pretrained(
+    model = PolarModel.from_pretrained(
         model_name, config=config, torch_dtype=torch.float16,
     )
     if torch.cuda.is_available():
