@@ -13,11 +13,13 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from needle import LLMNeedleHaystackTester, ModelProvider
+from quantpc.model_config import load_model_config
 from quantpc.quanpc_standalone import StandaloneConfig
 from quantpc.quanpc_standalone.transformers import (
     StandaloneLlamaCache,
     load_offline_projections,
     modify_llama_for_standalone,
+    modify_qwen3_for_standalone,
 )
 
 
@@ -37,17 +39,21 @@ class StandaloneTransformer(ModelProvider):
         self.config = config
         offline = offline or {}
         self.tokenizer = AutoTokenizer.from_pretrained(args.model)
+        model_config = load_model_config(args.model)
         self.model = AutoModelForCausalLM.from_pretrained(
             args.model,
+            config=model_config,
             device_map="auto",
             torch_dtype=torch.bfloat16,
             attn_implementation="sdpa",
         )
         self.model.eval()
-        modify_llama_for_standalone(
-            self.model,
-            mlp_chunk_size=args.mlp_chunk_size,
+        modify_fn = (
+            modify_qwen3_for_standalone
+            if getattr(model_config, "model_type", None) == "qwen3"
+            else modify_llama_for_standalone
         )
+        modify_fn(self.model, mlp_chunk_size=args.mlp_chunk_size)
         self.offline = offline
         self.last_actual_tokens = 0
         self.last_cache_stats: dict[str, object] = {}

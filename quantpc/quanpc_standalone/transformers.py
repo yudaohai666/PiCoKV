@@ -1,7 +1,7 @@
-"""Optional Hugging Face Llama integration for the standalone API.
+"""Optional Hugging Face Llama/Qwen3 integration for the standalone API.
 
 The core package does not monkey-patch models on import.  Call
-``modify_llama_for_standalone`` explicitly, then pass a
+the model-specific ``modify_*_for_standalone`` explicitly, then pass a
 ``StandaloneLlamaCache`` to ``model.generate``.
 """
 
@@ -521,9 +521,121 @@ def modify_llama_for_standalone(model, *, mlp_chunk_size: int = 8192) -> None:
         module.forward = partial(modified_forward, module)
 
 
+def modify_qwen3_for_standalone(model, *, mlp_chunk_size: int = 8192) -> None:
+    """Install the standalone adapter on Qwen3, including Q/K RMSNorm."""
+    from transformers.models.qwen3.modeling_qwen3 import (
+        Qwen3Attention,
+        Qwen3MLP,
+        apply_rotary_pos_emb as qwen3_apply_rotary_pos_emb,
+    )
+
+    for module in model.modules():
+        if isinstance(module, Qwen3MLP):
+            module.forward = partial(
+                _chunked_llama_mlp_forward,
+                module,
+                chunk_size=int(mlp_chunk_size),
+            )
+
+    for module in model.modules():
+        if not isinstance(module, Qwen3Attention):
+            continue
+
+        def modified_forward(
+            self,
+            hidden_states: torch.Tensor,
+            position_embeddings: tuple[torch.Tensor, torch.Tensor],
+            attention_mask: Optional[torch.Tensor],
+            past_key_value: Optional[Cache] = None,
+            cache_position: Optional[torch.LongTensor] = None,
+            **kwargs,
+        ):
+            input_shape = hidden_states.shape[:-1]
+            hidden_shape = (*input_shape, -1, self.head_dim)
+            query_states = self.q_norm(
+                self.q_proj(hidden_states).view(hidden_shape)
+            ).transpose(1, 2)
+            key_states = self.k_norm(
+                self.k_proj(hidden_states).view(hidden_shape)
+            ).transpose(1, 2)
+            value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+            cos, sin = position_embeddings
+            query_states, key_states = qwen3_apply_rotary_pos_emb(
+                query_states,
+                key_states,
+                cos,
+                sin,
+            )
+
+            query_length = int(query_states.shape[-2])
+            if isinstance(past_key_value, StandaloneLlamaCache):
+                if query_length > 1:
+                    past_key_value.fit_whitening(
+                        self.layer_idx,
+                        query_states,
+                        self.o_proj.weight,
+                        int(key_states.shape[1]),
+                        self.head_dim,
+                    )
+                    past_key_value.prepare(
+                        self.layer_idx,
+                        key_states.contiguous(),
+                        value_states.contiguous(),
+                    )
+                    attn_output = _exact_prefill_attention(
+                        query_states,
+                        key_states,
+                        value_states,
+                        attention_mask,
+                    )
+                else:
+                    whitening = past_key_value.whitening(self.layer_idx)
+                    if whitening is not None:
+                        batch, kv_heads = key_states.shape[0], key_states.shape[1]
+                        head_dim = key_states.shape[-1]
+                        grouped_query = query_states.reshape(
+                            batch,
+                            kv_heads,
+                            -1,
+                            head_dim,
+                        )
+                        query_states = whiten_states(
+                            grouped_query,
+                            whitening.key_inverse,
+                        ).reshape(batch, -1, query_length, head_dim)
+                        key_states = whiten_states(key_states, whitening.key)
+                        value_states = whiten_states(value_states, whitening.value)
+                    attn_output = past_key_value.decode(
+                        self.layer_idx,
+                        query_states.contiguous(),
+                        key_states.contiguous(),
+                        value_states.contiguous(),
+                    )
+                    if whitening is not None:
+                        batch, head_dim = attn_output.shape[0], attn_output.shape[-1]
+                        kv_heads = key_states.shape[1]
+                        attn_output = whiten_states(
+                            attn_output.reshape(batch, kv_heads, -1, head_dim),
+                            whitening.value_inverse,
+                        ).reshape(batch, -1, query_length, head_dim)
+            else:
+                attn_output = _exact_prefill_attention(
+                    query_states,
+                    key_states,
+                    value_states,
+                    attention_mask,
+                )
+
+            attn_output = attn_output.transpose(1, 2).contiguous()
+            attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+            return self.o_proj(attn_output), None
+
+        module.forward = partial(modified_forward, module)
+
 __all__ = [
     "OFFLINE_ENCODER_FORMAT",
     "StandaloneLlamaCache",
     "load_offline_projections",
     "modify_llama_for_standalone",
+    "modify_qwen3_for_standalone",
 ]

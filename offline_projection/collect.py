@@ -299,6 +299,10 @@ def modify_for_collect(model):
     block-32 quantizes in raw post-RoPE space (no query rotation), so
     calibration must capture K/V there.
     """
+    if getattr(getattr(model, "config", None), "model_type", "llama") == "qwen3":
+        modify_qwen3_for_collect(model)
+        return
+
     for module in model.modules():
         if isinstance(module, LlamaMLP):
             module.forward = partial(modified_mlp_forward, module)
@@ -323,6 +327,54 @@ def modify_for_collect(model):
             value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
             cos, sin = position_embeddings
             query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+            collect_query(self.layer_idx, query_states, key_states.shape[1])
+            collect_kv(self.layer_idx, key_states, value_states)
+            attn_output = eager_attention_forward(query_states, key_states, value_states)
+            attn_output = attn_output.transpose(1, 2).contiguous()
+            attn_output = attn_output.reshape(*input_shape, -1).contiguous()
+            return self.o_proj(attn_output), None
+
+        module.forward = partial(modified_forward, module)
+
+
+def modify_qwen3_for_collect(model):
+    """Patch Qwen3 attention/MLP to capture post-RMSNorm, post-RoPE K/V."""
+    from transformers.models.qwen3.modeling_qwen3 import (
+        Qwen3Attention,
+        Qwen3MLP,
+        apply_rotary_pos_emb as qwen3_apply_rotary_pos_emb,
+    )
+
+    for module in model.modules():
+        if isinstance(module, Qwen3MLP):
+            module.forward = partial(modified_mlp_forward, module)
+
+    for module in model.modules():
+        if not isinstance(module, Qwen3Attention):
+            continue
+
+        def modified_forward(
+            self,
+            hidden_states,
+            position_embeddings,
+            attention_mask=None,
+            past_key_value=None,
+            cache_position=None,
+            **kwargs,
+        ):
+            input_shape = hidden_states.shape[:-1]
+            hidden_shape = (*input_shape, -1, self.head_dim)
+            query_states = self.q_norm(
+                self.q_proj(hidden_states).view(hidden_shape)
+            ).transpose(1, 2)
+            key_states = self.k_norm(
+                self.k_proj(hidden_states).view(hidden_shape)
+            ).transpose(1, 2)
+            value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+            cos, sin = position_embeddings
+            query_states, key_states = qwen3_apply_rotary_pos_emb(
+                query_states, key_states, cos, sin
+            )
             collect_query(self.layer_idx, query_states, key_states.shape[1])
             collect_kv(self.layer_idx, key_states, value_states)
             attn_output = eager_attention_forward(query_states, key_states, value_states)
@@ -416,10 +468,6 @@ def _subsample_rows(tokens, max_rows):
     positions = torch.arange(max_rows, device=tokens.device, dtype=torch.int64)
     indices = (positions * (n_rows - 1) + (max_rows - 1) // 2) // (max_rows - 1)
     return tokens.index_select(0, indices)
-
-
-
-
 
 
 

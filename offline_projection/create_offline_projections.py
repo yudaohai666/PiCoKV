@@ -39,7 +39,7 @@ from pathlib import Path
 
 import torch
 from tqdm import tqdm
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoTokenizer
 
 BASE = Path(__file__).resolve().parent
 ROOT = BASE.parent
@@ -80,6 +80,7 @@ from quantpc.quanpc_standalone.constants import (  # noqa: E402
     ONLINE_GROUP_BITS,
 )
 from quantpc.quanpc_standalone.whiten import value_whitening_source  # noqa: E402
+from quantpc.model_config import load_model_config  # noqa: E402
 from quantpc.quanpc_standalone.online import (  # noqa: E402
     _strict_binary_sign_,
     quantize_block32_online,
@@ -486,6 +487,7 @@ def run(args, samples, layers, num_layers, num_kv_heads, head_dim,
                   format_layer_group(needs_collect), flush=True)
             model = AutoModelForCausalLM.from_pretrained(
                 args.model_name,
+                config=load_model_config(args.model_name),
                 device_map=None if args.device_map == "none" else args.device_map,
                 torch_dtype=torch.bfloat16,
             )
@@ -582,10 +584,12 @@ def main():
     set_collect_stride(args.collect_stride)
     set_collect_query_grams(True)
 
-    config = AutoConfig.from_pretrained(args.model_name)
+    config = load_model_config(args.model_name)
     num_layers = config.num_hidden_layers
     num_kv_heads = getattr(config, "num_key_value_heads", config.num_attention_heads)
-    head_dim = config.hidden_size // config.num_attention_heads
+    head_dim = getattr(
+        config, "head_dim", config.hidden_size // config.num_attention_heads
+    )
     layers = parse_layers(args.layers, num_layers)
 
     if args.output_path is None:

@@ -18,6 +18,8 @@ from transformers import (
     PreTrainedTokenizerBase,
 )
 
+from quantpc.model_config import load_model_config
+
 # Dense-baseline attn implementations selectable via --method. Anything not in
 # this set and not "quantpc"/"kivi"/"oscar" is rejected by load_model.
 BASELINE_ATTN = {"flash_attention_2", "sdpa", "eager"}
@@ -206,7 +208,7 @@ def _load_oscar_model(
         if p not in sys.path:
             sys.path.insert(0, p)
 
-    config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+    config = load_model_config(model_name, trust_remote_code=True)
     model_type = getattr(config, "model_type", None)
     if model_type == "qwen3":
         from qwen3 import Qwen3ForCausalLM as OscarModel
@@ -307,7 +309,7 @@ def _load_quantpc_model(
     The project ships a single production standalone path (quanpc_standalone): a
     CUDA-only online-projection decode with fixed 8-bit projected queries.
     ``make_cache`` returns a fresh ``StandaloneLlamaCache`` per call (the model
-    must have been patched via ``modify_llama_for_standalone``).
+    must have been patched via the model-specific standalone adapter).
 
     When ``offline_proj_path`` is given, the stored block-32 pair is loaded
     once and threaded into every cache so prefill skips the online Householder QR
@@ -317,6 +319,7 @@ def _load_quantpc_model(
         StandaloneLlamaCache,
         load_offline_projections,
         modify_llama_for_standalone,
+        modify_qwen3_for_standalone,
     )
 
     standalone_config = StandaloneConfig(
@@ -377,14 +380,19 @@ def _load_quantpc_model(
         device_map = {"": 0}
     else:
         device_map = _auto_device_map()
+    config = load_model_config(model_name)
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
+        config=config,
         device_map=device_map,
         torch_dtype="bfloat16",
     )
     if device_map is None and torch.cuda.is_available():
         model = model.to("cuda")
-    modify_llama_for_standalone(model)
+    if getattr(config, "model_type", None) == "qwen3":
+        modify_qwen3_for_standalone(model)
+    else:
+        modify_llama_for_standalone(model)
     model.eval()
 
     def make_cache():
@@ -511,8 +519,10 @@ def _load_baseline_model(
         device_map = {"": 0}
     else:
         device_map = _auto_device_map()
+    config = load_model_config(model_name)
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
+        config=config,
         device_map=device_map,
         torch_dtype="bfloat16",
         attn_implementation=attn_implementation,

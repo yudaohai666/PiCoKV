@@ -1,4 +1,51 @@
 #!/bin/bash
+# ============================== STAGE ==============================
+# STAGE=collect : only run calibration and save per-layer KV/query-gram shards.
+# STAGE=fit     : reuse existing shards and only fit/save projection matrices.
+# STAGE=all     : run both stages above; this is the default and corresponds to
+#                 "both" collect and fit stages.
+#
+# The usual workflow is STAGE=all for a fresh model, then STAGE=fit when the
+# same collected shards are reused to build another WHITEN/K_BITS/V_BITS pair.
+# =====================================================================
+#
+# ============================ EXAMPLE: QWEN3 ============================
+# Qwen3-8B, build a non-whitened projection.
+#   cd /home/zxh/zxh/QuantPC &&
+#   . .venv/bin/activate &&
+#   MODEL_NAME=/home/zxh/zxh/models/Qwen3-8B \
+#   GPUS=0,1 \
+#   STAGE=all \
+#   WHITEN=false \
+#   COLLECT_LAYERS_PER_FORWARD=36 \
+#   bash offline_projection/create_offline_projections.sh
+# ========================================================================
+#
+# ============================ EXAMPLE: LLAMA ============================
+# Llama-3.1-8B-Instruct, build a non-whitened projection.
+#   cd /home/zxh/zxh/QuantPC &&
+#   . .venv/bin/activate &&
+#   MODEL_NAME=/data/zxh/models/Llama-3.1-8B-Instruct \
+#   GPUS=0,1 \
+#   STAGE=all \
+#   WHITEN=false \
+#   bash offline_projection/create_offline_projections.sh
+# ========================================================================
+#
+# The example above runs both collect and fit for the non-whitened
+# variant. To build the corresponding whitened variant from the same shards,
+# keep TMP_STATE_DIR unchanged and run the script again with STAGE=fit and
+# WHITEN=true.
+#
+# WHITEN=true  computes whitening bases from the calibration data, learns the
+#              encoder/decoder in that basis, and folds them into the saved
+#              projection pair. The output ends with `_whiten.pt`.
+# WHITEN=false (or omitting WHITEN) uses the original model basis directly and
+#              saves a `_nowhiten.pt` projection. The same collect shards can
+#              be reused to build both variants; only the fit stage differs.
+# Both outputs are folded offline projections. At evaluation time, pass the
+# projection with --offline-proj-path and do not also pass --whiten.
+#
 # Build all three offline matrices in one pass: whitening, encoder, decoder.
 # Output: {MODEL_TAG}_k{K}_v{V}_{whiten|nowhiten}.pt under OUTPUT_DIR, in format
 # quanpc_standalone_block32_folded_v1 -- encoders and decoders with whitening,
