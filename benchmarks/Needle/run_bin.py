@@ -290,7 +290,7 @@ def main() -> None:
     parser.add_argument(
         "--local-size",
         type=int,
-        default=320,
+        default=256,
         help="number of most-recent (local) tokens kept in full precision",
     )
     parser.add_argument(
