@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import os
 import sys
+import importlib.util
+from pathlib import Path
 try:
     import torch
     from torch.utils.cpp_extension import load
@@ -16,6 +18,39 @@ except ModuleNotFoundError:
     load = None
 
 _EXTENSION = None
+
+
+def _prebuilt_path() -> Path:
+    """Return the optional install-time build directory."""
+    configured = os.environ.get("QUANPC_PREBUILT_DIR")
+    if configured:
+        return Path(configured)
+    return Path(__file__).resolve().parents[2] / "build" / "quantpc_extensions"
+
+
+def _load_prebuilt_extension():
+    """Load the install-time .so without invoking torch's JIT builder."""
+    if os.environ.get("QUANPC_DISABLE_PREBUILT") == "1":
+        return None
+    root = _prebuilt_path()
+    candidates = sorted(root.glob("_quanpc_cuda*.so"))
+    if not candidates:
+        return None
+    module_name = "_quanpc_cuda"
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(module_name, candidates[0])
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load prebuilt QuanPC extension: {candidates[0]}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
 
 
 def _require_torch():
@@ -41,6 +76,11 @@ def _ensure_build_tool_path() -> None:
 def load_quanpc_extension(verbose: bool = False):
     global _EXTENSION
     if _EXTENSION is not None:
+        return _EXTENSION
+
+    prebuilt = _load_prebuilt_extension()
+    if prebuilt is not None:
+        _EXTENSION = prebuilt
         return _EXTENSION
 
     _require_torch()

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import os
 import random
 import sys
 from pathlib import Path
@@ -404,6 +405,21 @@ def _load_quantpc_model(
     else:
         modify_llama_for_standalone(model)
     model.eval()
+
+    # Load both precompiled QuantPC extensions while the model is being made
+    # ready.  This keeps request-time prefill/decode free of extension JIT or
+    # shared-object loading.  The loaders still fall back to the historical
+    # torch.utils.cpp_extension.load path when install-time artifacts are absent.
+    if (
+        torch.cuda.is_available()
+        and os.environ.get("QUANPC_PRELOAD_EXTENSIONS", "1") != "0"
+    ):
+        from quantpc.quanpc_cuda_extension.quanpc_cuda import load_quanpc_extension
+        from quantpc.quanpc_prefill_cuda_extension.quanpc_prefill_cuda import (
+            load_quanpc_prefill_extension,
+        )
+        load_quanpc_prefill_extension()
+        load_quanpc_extension()
 
     def make_cache():
         return StandaloneLlamaCache(
