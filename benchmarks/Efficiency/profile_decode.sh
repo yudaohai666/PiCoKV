@@ -7,6 +7,13 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}"
+# Fragmentation, not live memory: the block-32 online solve churns a 126 MiB
+# fp32 copy of its +-1 code matrix per group across two CUDA streams, and the
+# default allocator opens fresh segments for that size class instead of reusing
+# them. Measured on Qwen3-8B at 131k: nvidia-smi peak 35 -> 32 GB with
+# max_memory_allocated unchanged. Must precede torch's allocator init, so it
+# cannot move into python. Keep identical across all benchmark launchers.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 GPU="${GPU:-6}"
 MODEL="${MODEL:-/data/Llama-3.1-8B-Instruct}"
@@ -20,6 +27,9 @@ BATCH="${BATCH:-1}"         # prefill/decode batch size
 WARMUP="${WARMUP:-2}"       # untimed decode steps before profiling
 ACTIVE="${ACTIVE:-64}"      # profiled decode steps
 ROWS="${ROWS:-30}"          # key_averages table rows
+# Override the auto trace file (results/efficiency/prof/{method}_{LENGTH}.json).
+# Needed when the same method is profiled from several processes at once.
+OUTPUT_PATH="${OUTPUT_PATH:-}"
 
 # ── methods to run (comment out to skip; METHOD=oscar forces a single one) ──
 METHODS=(
@@ -38,10 +48,14 @@ METHODS=(
 K_BITS="${K_BITS:-320}"; V_BITS="${V_BITS:-320}"
 SINK="${SINK:-64}"; LOCAL="${LOCAL:-256}"
 EXP_BITS="${EXP_BITS:-4}"; EAS="${EAS:-0.01}"; ZEROROPE="${ZEROROPE:-20}"
-USE_OFFLINE="${USE_OFFLINE:-1}"
+USE_OFFLINE="${USE_OFFLINE:-0}"
 WHITEN="${WHITEN:-0}"
-ONLINE_DECODER_REFIT="${ONLINE_DECODER_REFIT:-v}"
-DECODER_RIDGE="${DECODER_RIDGE:-1e-2}"
+ONLINE_DECODER_REFIT="${ONLINE_DECODER_REFIT:-none}"
+# 1e-3 == constants.ONLINE_DECODER_RIDGE, i.e. the shipped path. Do NOT raise this
+# back to 1e-2: a nominal 1e-2 swamps the -9.3e-4 negative ridge the bf16 gram used
+# to contribute, making it the one setting under which the fp32-gram fix is
+# unmeasurable (16 paired cells: 6 up / 7 down / 3 tie, mean -0.004).
+DECODER_RIDGE="${DECODER_RIDGE:-1e-3}"
 OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
 # kivi (2/4-bit KV)
 KIVI_K="${KIVI_K:-2}"; KIVI_V="${KIVI_V:-2}"; KIVI_GROUP="${KIVI_GROUP:-32}"; KIVI_RESIDUAL="${KIVI_RESIDUAL:-128}"
@@ -100,7 +114,7 @@ build_method_args() {
 
 for method in "${METHODS[@]}"; do
   build_method_args "${method}"
-  TRACE="${PROF_DIR}/${method}_${LENGTH}.json"
+  TRACE="${OUTPUT_PATH:-${PROF_DIR}/${method}_${LENGTH}.json}"
   echo "=== Profiling decode: method=${method} length=${LENGTH} -> ${TRACE} ==="
   CUDA_VISIBLE_DEVICES=${GPU} python "${SCRIPT_DIR}/profile_decode.py" \
     --model "${MODEL}" --method "${method}" \

@@ -240,6 +240,10 @@ def parse_args(argv=None):
     p.add_argument("--save_dir", default="results/longbench", help="base output dir")
     p.add_argument("--output-tag", default=None,
                    help="explicit output subdir name under save_dir/<model>")
+    p.add_argument("--output-path", default=None,
+                   help="explicit output dir, bypassing save_dir/<model>/<tag>. "
+                        "Needed when one method is split across processes, which "
+                        "would otherwise share a save_path.")
     p.add_argument("--seed", type=int, default=42)
     # ── quantpc KV-cache params (--method quantpc) ──
     p.add_argument("--k-bits", type=int, default=None, help="QuanPC K projection bits; KIVI defaults to 2")
@@ -316,7 +320,11 @@ def main() -> None:
         whiten=args.whiten if args.method == "quantpc" else None,
         online_decoder_refit=args.online_decoder_refit,
     )
-    save_path = Path(args.save_dir) / model_key / tag
+    save_path = (
+        Path(args.output_path)
+        if args.output_path
+        else Path(args.save_dir) / model_key / tag
+    )
     save_path.mkdir(parents=True, exist_ok=True)
     print(f"Output dir: {save_path}")
 

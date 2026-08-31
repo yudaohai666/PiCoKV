@@ -245,11 +245,13 @@ def parse_arguments():
 
     parser.add_argument("--decoder-ridge", type=float, default=1e-2,
                         help="override the online block-32 decoder ridge "
-                             "(default 1e-2; offline PTs are fitted with 1e-3). On highly repetitive "
-                             "contexts C^T C is near-singular and the solve "
-                             "returns decoder entries ~1e4 that corrupt the "
-                             "residual stream; this measures the recovery "
-                             "without editing the shipped constant.")
+                             "(default 1e-2; offline PTs are fitted with 1e-3). "
+                             "Since the gram is accumulated in fp32 this knob is "
+                             "no longer load-bearing: 1e-3 and 1e-2 measured "
+                             "identically end-to-end (8 cells, |delta| <= 0.003). "
+                             "The old 'ridge must be >= 3e-3' lower bound was the "
+                             "bf16 gram's rounding floor, not a property of the "
+                             "data.")
 
     args = parser.parse_args()
     if args.k_bits is None:

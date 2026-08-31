@@ -7,6 +7,16 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}"
+# Fragmentation, not live memory: the block-32 online solve churns a 126 MiB
+# fp32 copy of its +-1 code matrix per group across two CUDA streams, and the
+# default allocator opens fresh segments for that size class instead of reusing
+# them. Measured on Qwen3-8B at 131k: nvidia-smi peak 35 -> 32 GB with
+# max_memory_allocated unchanged. Must precede torch's allocator init, so it
+# cannot move into python. Keep identical across all benchmark launchers.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# Safe for the numbers this launcher publishes: run_efficiency.py:66 reports
+# max_memory_allocated, which the allocator mode does not move (measured shift
+# ~1 MiB of 1450), so arms recorded before and after this line stay comparable.
 
 GPU="${GPU:-7}"
 MODEL="${MODEL:-/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct}"
@@ -20,13 +30,17 @@ DECODE_TOKENS="${DECODE_TOKENS:-64}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 WARMUP="${WARMUP:-2}"
 REPEATS="${REPEATS:-4}"
+# Override the auto result file (results/efficiency/{TAG}.json). Needed when one
+# method is split across processes (e.g. one GPU per length): otherwise every
+# process writes the same file. --compare still scans the whole RESULT_DIR.
+OUTPUT_PATH="${OUTPUT_PATH:-}"
 
 # ── methods to run (comment out to skip; METHOD=oscar forces a single one) ──
 METHODS=(
-  # flash_attention_2
+  flash_attention_2
   quantpc
   # kivi
-  # oscar
+  oscar
   # polar
   # sdpa
   # eager
@@ -38,10 +52,14 @@ METHODS=(
 K_BITS="${K_BITS:-320}"; V_BITS="${V_BITS:-320}"
 SINK="${SINK:-64}"; LOCAL="${LOCAL:-256}"
 EXP_BITS="${EXP_BITS:-4}"; EAS="${EAS:-0.01}"; ZEROROPE="${ZEROROPE:-20}"
-USE_OFFLINE="${USE_OFFLINE:-1}"
+USE_OFFLINE="${USE_OFFLINE:-0}"
 WHITEN="${WHITEN:-0}"
-ONLINE_DECODER_REFIT="${ONLINE_DECODER_REFIT:-v}"
-DECODER_RIDGE="${DECODER_RIDGE:-1e-2}"
+ONLINE_DECODER_REFIT="${ONLINE_DECODER_REFIT:-none}"
+# 1e-3 == constants.ONLINE_DECODER_RIDGE, i.e. the shipped path. Do NOT raise this
+# back to 1e-2: a nominal 1e-2 swamps the -9.3e-4 negative ridge the bf16 gram used
+# to contribute, making it the one setting under which the fp32-gram fix is
+# unmeasurable (16 paired cells: 6 up / 7 down / 3 tie, mean -0.004).
+DECODER_RIDGE="${DECODER_RIDGE:-1e-3}"
 OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
 # kivi (2/4-bit KV)
 KIVI_K="${KIVI_K:-2}"; KIVI_V="${KIVI_V:-2}"; KIVI_GROUP="${KIVI_GROUP:-32}"; KIVI_RESIDUAL="${KIVI_RESIDUAL:-128}"
@@ -78,6 +96,19 @@ build_method_args() {
       if [ "${mode}" = "offline" ]; then
         case "${ONLINE_DECODER_REFIT}" in k) TAG+="_krefit" ;; v) TAG+="_vrefit" ;; both) TAG+="_refit" ;; esac
       fi
+      # Knobs that change the result but were missing from the tag. EAS is the
+      # one that bit us on NIAH: two EAS arms shared a directory. Here TAG names
+      # the result *file*, so a second arm would overwrite the first outright.
+      # Suffix only on deviation from the default, matching
+      # run_ruler_evaluation.run_tag(), so existing file names stay valid.
+      # String compare, not numeric: EAS=0.010 would read as non-default here
+      # whereas run_tag()'s float compare would not.
+      [ "${EXP_BITS}" != "4" ]  && TAG+="_exp${EXP_BITS}"
+      [ "${ZEROROPE}" != "20" ] && TAG+="_zr${ZEROROPE}"
+      [ "${EAS}" != "0.01" ]    && TAG+="_eas${EAS}"
+      # A false `[ ]` above leaves the branch's status at 1, which would trip
+      # `set -e` at the call site if this script ever gains it. `:` resets it.
+      :
       ;;
     kivi)
       METHOD_ARGS=(--k-bits "${KIVI_K}" --v-bits "${KIVI_V}" --group-size "${KIVI_GROUP}" --residual-length "${KIVI_RESIDUAL}")
@@ -100,12 +131,13 @@ build_method_args() {
 
 for method in "${METHODS[@]}"; do
   build_method_args "${method}"
-  echo "=== Efficiency: method=${method} -> ${RESULT_DIR}/${TAG}.json ==="
+  out_file="${OUTPUT_PATH:-${RESULT_DIR}/${TAG}.json}"
+  echo "=== Efficiency: method=${method} -> ${out_file} ==="
   CUDA_VISIBLE_DEVICES=${GPU} python "${SCRIPT_DIR}/run_efficiency.py" \
     --model "${MODEL}" --method "${method}" \
     --lengths "${LENGTHS}" --decode-tokens "${DECODE_TOKENS}" \
     --batch-size "${BATCH_SIZE}" --warmup "${WARMUP}" --repeats "${REPEATS}" \
-    --output "${RESULT_DIR}/${TAG}.json" "${METHOD_ARGS[@]}"
+    --output "${out_file}" "${METHOD_ARGS[@]}"
 done
 
 echo "=== Comparison table ==="

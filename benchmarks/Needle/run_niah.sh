@@ -7,18 +7,26 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 GPU="${GPU:-0}"
-MODEL="${MODEL:-/data/Llama-3.1-8B-Instruct}"
+MODEL="${MODEL:-/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Qwen3-8B}"
 MODEL_TAG="$(basename "${MODEL%/}")"
 BASE_RESULT_DIR="results/niah"
 VIS_DIR="${BASE_RESULT_DIR}/vis"
 
 # ── benchmark runtime params ──
 LENGTHS="${LENGTHS:-8192,16384,24576,32768,40960,49152,57344,65536,73728,81920,90112,98304,106496,114688,122880,131072}"
+# LENGTHS="${LENGTHS:-131072}"
+
 DEPTHS="${DEPTHS:-0,11,22,33,44,56,67,78,89,100}"
 # Expected answer (must match show_image_paper.py default).
 EXPECTED_ANSWER="${EXPECTED_ANSWER:-eat a sandwich and sit in Dolores Park on a sunny day.}"
+# Override the auto results dir (results/niah/{MODEL}/{TAG}/). Needed when one
+# method is split across processes (e.g. one GPU per length band): run_bin.py
+# resumes from results.json by (length, depth), so a shared dir would let two
+# processes interleave into one file.
+OUTPUT_PATH="${OUTPUT_PATH:-}"
 
 # ── methods to run (comment out to skip; METHOD=oscar forces a single one) ──
 METHODS=(
@@ -37,10 +45,14 @@ METHODS=(
 K_BITS="${K_BITS:-320}"; V_BITS="${V_BITS:-320}"
 SINK="${SINK:-64}"; LOCAL="${LOCAL:-256}"
 EXP_BITS="${EXP_BITS:-4}"; EAS="${EAS:-0.01}"; ZEROROPE="${ZEROROPE:-20}"
-USE_OFFLINE="${USE_OFFLINE:-1}"
+USE_OFFLINE="${USE_OFFLINE:-0}"
 WHITEN="${WHITEN:-0}"
-ONLINE_DECODER_REFIT="${ONLINE_DECODER_REFIT:-v}"
-DECODER_RIDGE="${DECODER_RIDGE:-1e-2}"
+ONLINE_DECODER_REFIT="${ONLINE_DECODER_REFIT:-none}"
+# 1e-3 == constants.ONLINE_DECODER_RIDGE, i.e. the shipped path. Do NOT raise this
+# back to 1e-2: a nominal 1e-2 swamps the -9.3e-4 negative ridge the bf16 gram used
+# to contribute, making it the one setting under which the fp32-gram fix is
+# unmeasurable (16 paired cells: 6 up / 7 down / 3 tie, mean -0.004).
+DECODER_RIDGE="${DECODER_RIDGE:-1e-3}"
 OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
 # kivi (2/4-bit KV)
 KIVI_K="${KIVI_K:-2}"; KIVI_V="${KIVI_V:-2}"; KIVI_GROUP="${KIVI_GROUP:-32}"; KIVI_RESIDUAL="${KIVI_RESIDUAL:-128}"
@@ -77,6 +89,28 @@ build_method_args() {
       if [ "${mode}" = "offline" ]; then
         case "${ONLINE_DECODER_REFIT}" in k) TAG+="_krefit" ;; v) TAG+="_vrefit" ;; both) TAG+="_refit" ;; esac
       fi
+      # Ridge always goes in the tag. run_ruler_evaluation.run_tag() omits it at
+      # the 1e-2 default, but NIAH is where that bit us: the archived
+      # Qwen3-8B-pre/quantpc_online_k320_v320_nowhiten/ is a ridge-1e-3 run whose
+      # dir name doesn't say so. Ridge is model-dependent and changes the result,
+      # and run_bin.py resumes from results.json by (length, depth) -- a shared
+      # dir silently mixes two ridges into one heatmap.
+      TAG+="_ridge${DECODER_RIDGE}"
+      # Knobs that change the result but were missing from the tag. EAS is the
+      # one that bit us: an EAS=0.01 and an EAS=0.001 run shared a directory, and
+      # since run_bin.py resumes by (length, depth) from that one results.json,
+      # the second arm skipped the cells the first had written instead of
+      # recomputing them -- one heatmap silently made of two configs.
+      # Suffix only on deviation from the default, matching
+      # run_ruler_evaluation.run_tag(), so existing directory names stay valid.
+      # String compare, not numeric: EAS=0.010 would read as non-default here
+      # whereas run_tag()'s float compare would not.
+      [ "${EXP_BITS}" != "4" ]  && TAG+="_exp${EXP_BITS}"
+      [ "${ZEROROPE}" != "20" ] && TAG+="_zr${ZEROROPE}"
+      [ "${EAS}" != "0.01" ]    && TAG+="_eas${EAS}"
+      # A false `[ ]` above leaves the branch's status at 1, which propagates out
+      # of the function and trips `set -e` at the call site. `:` resets it.
+      :
       ;;
     kivi)
       METHOD_ARGS=(--k-bits "${KIVI_K}" --v-bits "${KIVI_V}" --group-size "${KIVI_GROUP}" --residual-length "${KIVI_RESIDUAL}")
@@ -99,13 +133,20 @@ build_method_args() {
 
 for method in "${METHODS[@]}"; do
   build_method_args "${method}"
-  subdir="${BASE_RESULT_DIR}/${MODEL_TAG}/${TAG}"
+  subdir="${OUTPUT_PATH:-${BASE_RESULT_DIR}/${MODEL_TAG}/${TAG}}"
   mkdir -p "${subdir}"
   echo "=== NIAH: method=${method} -> ${subdir}/results.json ==="
   CUDA_VISIBLE_DEVICES=${GPU} python "${SCRIPT_DIR}/run_bin.py" \
     --model "${MODEL}" --method "${method}" \
     --lengths "${LENGTHS}" --depths "${DEPTHS}" \
     --output "${subdir}/results.json" "${METHOD_ARGS[@]}"
+  # A shard's heatmap is meaningless (it holds a subset of LENGTHS), and every
+  # shard would overwrite the same PNG under VIS_DIR. Merge the shard
+  # results.json files into one dir first, then run show_image_paper.py on that.
+  if [ -n "${OUTPUT_PATH}" ]; then
+    echo "=== NIAH: OUTPUT_PATH set -> skipping visualization for this shard ==="
+    continue
+  fi
   python "${SCRIPT_DIR}/show_image_paper.py" \
     --model "${MODEL}" --eval_path "${subdir}" \
     --save_dir "${VIS_DIR}" --expected_answer "${EXPECTED_ANSWER}"

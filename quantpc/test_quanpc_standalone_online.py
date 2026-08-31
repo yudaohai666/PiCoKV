@@ -29,6 +29,8 @@ REMOVED_PREPARE_OPTIONS = {
     "block_size",
     "power_iters",
     "decoder_ridge",
+    "key_ridge",
+    "value_ridge",
     "compute_dtype",
     "matmul_dtype",
     "error_mode",
@@ -113,6 +115,21 @@ def main() -> None:
     )
 
     if torch.cuda.is_available():
+        # online.py builds err with linalg.vector_norm(dtype=fp32) instead of the
+        # materialized residual.float().norm(dim=-1) it replaced, to avoid a
+        # 510 MiB fp32 copy per stream at 131k.  The two are bit-identical today,
+        # but that is a property of the reduction implementation rather than an
+        # API guarantee, and err feeds a topk in prepare._select_eas_indices --
+        # so pin it here instead of letting a torch upgrade quietly reselect EAS
+        # tokens.  Compared through an int32 view because torch.equal returns
+        # False for any tensor holding a NaN, including against itself.
+        for probe_shape in ((8, 4096, 128), (4, 977, 127), (2, 33, 1)):
+            probe = torch.randn(*probe_shape, device="cuda", dtype=torch.bfloat16)
+            fused = torch.linalg.vector_norm(probe, dim=-1, dtype=torch.float32)
+            materialized = probe.float().norm(dim=-1)
+            if not torch.equal(fused.view(torch.int32), materialized.view(torch.int32)):
+                raise AssertionError(f"err norm paths diverged at {probe_shape}")
+
         full_key = torch.randn(
             1,
             1,

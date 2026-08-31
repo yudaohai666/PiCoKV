@@ -56,14 +56,64 @@ def _strict_binary_sign_(scores: torch.Tensor) -> torch.Tensor:
     return scores
 
 
+def _pm_one_gram(codes: torch.Tensor) -> torch.Tensor:
+    """Exact ``codes^T codes`` for strictly +-1 ``codes``, in fp32.
+
+    Unconditional, and not swappable back to bf16: the bf16-output matmul this
+    replaced left the gram numerically indefinite (eig_min -3.4e-3 against a true
+    +3.4e-6) and made the decoder solve diverge to 169x||V||.  The full argument
+    and its measurements are in :mod:`.constants`, above ``ONLINE_DECODER_RIDGE``.
+
+    TF32 is forced on for this one matmul.  That is exact here and nowhere else:
+    +-1 is representable in TF32's 10-bit mantissa without rounding, and TF32
+    accumulates in fp32, so the integer result is bit-identical to fp64
+    (verified: max error 0 vs a float64 reference).  It buys back most of the
+    cost of leaving bf16 -- 0.32 ms vs 1.02 ms for fp32 SIMT and 0.07 ms for the
+    incorrect bf16-output matmul, at L=32k.
+    """
+    previous = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = True
+    try:
+        promoted = codes.float()
+        return torch.matmul(promoted.transpose(-1, -2), promoted)
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = previous
+
+
+def _pm_covariance_step(
+    sample_residual: torch.Tensor,
+    q0: torch.Tensor,
+) -> torch.Tensor:
+    """One covariance power step ``S^T (S q0)`` for the direction search.
+
+    Accumulated in :data:`ONLINE_MATMUL_DTYPE`, so the product's *output* is
+    bf16 -- the same shape of choice that made the decoder gram indefinite (see
+    :func:`_pm_one_gram`).  It is a much weaker case: ``S`` is not integer, so
+    there is no exact value being rounded to a systematically wrong one, and the
+    Householder QR that follows re-orthonormalizes in fp32.  Factored out so the
+    dtype can be swapped and measured rather than argued about.
+    """
+    sampled = sample_residual.to(dtype=ONLINE_MATMUL_DTYPE)
+    y = torch.matmul(sampled, q0.to(dtype=ONLINE_MATMUL_DTYPE))
+    return torch.matmul(sampled.transpose(-1, -2), y)
+
+
 def _solve_decoder_from_matrices(
     codes: torch.Tensor,
     residual: torch.Tensor,
 ) -> torch.Tensor:
-    """Fit the regularized decoder for one block without host synchronization."""
-    length = int(residual.shape[-2])
-    gram = torch.matmul(codes.transpose(-1, -2), codes).float() / float(length)
-    rhs = torch.matmul(codes.transpose(-1, -2), residual).float() / float(length)
+    """Fit the regularized decoder for one block without host synchronization.
+
+    Regularization is :data:`ONLINE_DECODER_RIDGE`, with no per-call override:
+    the offline path already makes the ridge side-selective, because a side that
+    reuses a stored decoder never reaches this solve at all.  The gram comes from
+    :func:`_pm_one_gram` rather than a bf16 matmul: that is what makes the system
+    positive definite, and hence what makes this step a descent step.
+    """
+    length = float(residual.shape[-2])
+    codes_t = codes.transpose(-1, -2)
+    gram = _pm_one_gram(codes) / length
+    rhs = torch.matmul(codes_t, residual).float() / length
     gram.diagonal(dim1=-2, dim2=-1).add_(ONLINE_DECODER_RIDGE)
     solution, _ = torch.linalg.solve_ex(gram, rhs, check_errors=False)
     return solution
@@ -221,10 +271,7 @@ def quantize_block32_online(
         # One covariance power step estimates the dominant residual subspace;
         # Householder QR preserves accuracy after residual groups accumulate.
         if fixed_encoders is None:
-            q = init_q[:, group_idx]
-            sampled = sample_residual.to(dtype=ONLINE_MATMUL_DTYPE)
-            y = torch.matmul(sampled, q.to(dtype=ONLINE_MATMUL_DTYPE))
-            q = torch.matmul(sampled.transpose(-1, -2), y)
+            q = _pm_covariance_step(sample_residual, init_q[:, group_idx])
             encoder = _householder_qr(q).transpose(-1, -2).contiguous()
         else:
             encoder = fixed_encoders[:, group_idx]
@@ -239,7 +286,10 @@ def quantize_block32_online(
         )
         _strict_binary_sign_(group_codes_m)
         if fixed_decoders is None:
-            group_decoder = _solve_decoder_from_matrices(group_codes_m, residual_m)
+            group_decoder = _solve_decoder_from_matrices(
+                group_codes_m,
+                residual_m,
+            )
         else:
             group_decoder = fixed_decoders[:, group_idx]
         decoder_m = group_decoder.to(dtype=ONLINE_MATMUL_DTYPE)
@@ -266,10 +316,25 @@ def quantize_block32_online(
         codes[:, :, start:end] = group_codes_m.to(dtype=torch.int8)
         decoder[:, start:end] = group_decoder.to(dtype=target.dtype)
 
+    # vector_norm fuses the bf16->fp32 upcast into the reduction's load, where
+    # residual.float().norm(dim=-1) first materialized the whole fp32 copy --
+    # 512 MiB at 131k -- only to reduce it away.  Standalone prepare_kv_cache at
+    # L=32768 drops 739.1 -> 618.5 MiB peak allocated.  It does not move the
+    # model-level prefill peak (26.547 GB at 131k, A/B delta 0.000): that is set
+    # by the SwiGLU MLP activations, long after this transient is freed.  So the
+    # reason to keep it is the halved memory traffic, not the peak.
+    # Bit-identical rather than merely close: the upcast is lossless (bf16 is a
+    # truncated fp32) and Tensor.norm with a single dim dispatches to this same
+    # linalg.vector_norm, so the fp32 accumulation sees identical operands.  That
+    # exactness matters because err feeds a topk in prepare._select_eas_indices,
+    # where a 1 ulp drift would silently reselect EAS tokens; the regression test
+    # pins it through an int32 view.
+    token_error = torch.linalg.vector_norm(residual, dim=-1, dtype=torch.float32)
+
     return OnlineQuantizedTensor(
         codes=codes.reshape(batch, heads, length, bits).contiguous(),
         decoder=decoder.reshape(batch, heads, bits, dim).contiguous(),
-        err=residual.float().norm(dim=-1).reshape(batch, heads, length).contiguous(),
+        err=token_error.reshape(batch, heads, length).contiguous(),
         encoders=used_encoders.reshape(batch, heads, bits, dim).contiguous(),
     )
 

@@ -7,6 +7,13 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}"
+# Fragmentation, not live memory: the block-32 online solve churns a 126 MiB
+# fp32 copy of its +-1 code matrix per group across two CUDA streams, and the
+# default allocator opens fresh segments for that size class instead of reusing
+# them. Measured on Qwen3-8B at 131k: nvidia-smi peak 35 -> 32 GB with
+# max_memory_allocated unchanged. Must precede torch's allocator init, so it
+# cannot move into python. Keep identical across all benchmark launchers.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 cd "${REPO_ROOT}"
 
 GPU="${GPU:-3}"
@@ -18,9 +25,13 @@ MAX_SEQ_LENGTHS="${MAX_SEQ_LENGTHS:-8192,16384,32768,65536,131072}"
 MAX_LENGTH="${MAX_LENGTH:-131072}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 MAX_GEN_TOKS="${MAX_GEN_TOKS:-128}"
-LIMIT="${LIMIT:-200}"
+LIMIT="${LIMIT:-100}"
 TASKS="${TASKS:-niah_single_1,niah_single_2,niah_single_3,niah_multikey_1,niah_multikey_2,niah_multikey_3,niah_multiquery,niah_multivalue,ruler_vt,ruler_cwe,ruler_fwe,ruler_qa_squad,ruler_qa_hotpot}"
 APPLY_CHAT_TEMPLATE="${APPLY_CHAT_TEMPLATE:-1}"
+# Override the python runner's auto results dir (results/ruler/{MODEL}/{TAG}/).
+# Needed when the same method is split across processes (e.g. one GPU per
+# sequence length): without it every process writes the same results.json.
+OUTPUT_PATH="${OUTPUT_PATH:-}"
 
 # ── methods to run (comment out to skip; METHOD=oscar forces a single one) ──
 METHODS=(
@@ -35,14 +46,20 @@ METHODS=(
 [ -n "${METHOD:-}" ] && METHODS=("${METHOD}")
 
 # ── per-method defaults (identical across all benchmark launchers) ──
-# quantpc; default = offline + nowhiten + vrefit
+# quantpc; default = online + nowhiten (the path the fp32-gram fix lives on)
 K_BITS="${K_BITS:-320}"; V_BITS="${V_BITS:-320}"
 SINK="${SINK:-64}"; LOCAL="${LOCAL:-256}"
 EXP_BITS="${EXP_BITS:-4}"; EAS="${EAS:-0.01}"; ZEROROPE="${ZEROROPE:-20}"
-USE_OFFLINE="${USE_OFFLINE:-1}"
+USE_OFFLINE="${USE_OFFLINE:-0}"
 WHITEN="${WHITEN:-0}"
-ONLINE_DECODER_REFIT="${ONLINE_DECODER_REFIT:-v}"
-DECODER_RIDGE="${DECODER_RIDGE:-1e-2}"
+ONLINE_DECODER_REFIT="${ONLINE_DECODER_REFIT:-none}"
+# 1e-3 == constants.ONLINE_DECODER_RIDGE, i.e. the shipped path. Do NOT raise this
+# back to 1e-2: a nominal 1e-2 swamps the -9.3e-4 negative ridge the bf16 gram used
+# to contribute, making it the one setting under which the fp32-gram fix is
+# unmeasurable (16 paired cells: 6 up / 7 down / 3 tie, mean -0.004).
+DECODER_RIDGE="${DECODER_RIDGE:-1e-3}"
+# run_ruler_evaluation.run_tag() keys its ridge suffix off 1e-2, so these runs land
+# in .../{TAG}_ridge0.001/ and cannot collide with the older 1e-2 results.
 OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
 # kivi (2/4-bit KV)
 KIVI_K="${KIVI_K:-2}"; KIVI_V="${KIVI_V:-2}"; KIVI_GROUP="${KIVI_GROUP:-32}"; KIVI_RESIDUAL="${KIVI_RESIDUAL:-128}"
@@ -103,6 +120,9 @@ build_method_args() {
 CHAT_ARGS=()
 if [ "${APPLY_CHAT_TEMPLATE}" = "1" ]; then CHAT_ARGS+=(--apply_chat_template); else CHAT_ARGS+=(--no-apply_chat_template); fi
 
+OUT_ARGS=()
+[ -n "${OUTPUT_PATH}" ] && OUT_ARGS+=(--output_path "${OUTPUT_PATH}")
+
 for method in "${METHODS[@]}"; do
   build_method_args "${method}"
   echo "=== RULER: method=${method} (${TAG}) ==="
@@ -111,7 +131,7 @@ for method in "${METHODS[@]}"; do
     --tasks "${TASKS}" --max_seq_lengths "${MAX_SEQ_LENGTHS}" \
     --max_length "${MAX_LENGTH}" --batch_size "${BATCH_SIZE}" \
     --max_gen_toks "${MAX_GEN_TOKS}" --limit "${LIMIT}" \
-    "${CHAT_ARGS[@]}" "${METHOD_ARGS[@]}"
+    "${CHAT_ARGS[@]}" "${OUT_ARGS[@]}" "${METHOD_ARGS[@]}"
 done
 
 echo "All done."
