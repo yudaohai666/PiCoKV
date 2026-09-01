@@ -21,7 +21,7 @@ class StandaloneConfig:
     sink_size: int = 64
     local_size: int = 256
     eas: float = 0.01
-    zerorope: int = 20
+    zerorope: int = 0
     exp_bits: int = 4
     seed: int = 0
 

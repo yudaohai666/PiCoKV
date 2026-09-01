@@ -31,7 +31,7 @@ class Transformer(ModelProvider):
         local_size: int = 256,
         exp_bits: int = 4,
         eas: float = 0.01,
-        zerorope: int = 20,
+        zerorope: int = 0,
         use_pruning: bool = True,
         prune_mode: int = 3,
         log_eps: float = -10.0,
@@ -300,7 +300,7 @@ def main() -> None:
         help="unsigned per-64-token quantization bits for global exp weights; quantization is always enabled",
     )
     parser.add_argument("--eas", type=float, default=0.01)
-    parser.add_argument("--zerorope", type=int, default=20)
+    parser.add_argument("--zerorope", type=int, default=0)
     parser.add_argument(
         "--no-pruning",
         dest="use_pruning",

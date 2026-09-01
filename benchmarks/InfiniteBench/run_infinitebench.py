@@ -89,7 +89,7 @@ def parse_arguments():
     parser.add_argument("--local-size", type=int, default=256)
     parser.add_argument("--exp-bits", type=int, default=4)
     parser.add_argument("--eas", type=float, default=0.01)
-    parser.add_argument("--zerorope", type=int, default=20)
+    parser.add_argument("--zerorope", type=int, default=0)
     parser.add_argument("--no-pruning", dest="use_pruning", action="store_false")
     parser.add_argument("--prune-mode", type=int, default=3)
     parser.add_argument("--log-eps", type=float, default=-10.0)
@@ -425,4 +425,3 @@ def main():
 
 if __name__ == "__main__":
     exit(main())
-

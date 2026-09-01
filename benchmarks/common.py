@@ -578,7 +578,7 @@ def load_model(
     local_size: int = 256,
     exp_bits: int = 4,
     eas: float = 0.01,
-    zerorope: int = 20,
+    zerorope: int = 0,
     use_pruning: bool = True,
     prune_mode: int = 3,
     log_eps: float = -10.0,

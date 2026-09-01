@@ -49,7 +49,7 @@ METHODS=(
 # quantpc; default = online + nowhiten (the path the fp32-gram fix lives on)
 K_BITS="${K_BITS:-320}"; V_BITS="${V_BITS:-320}"
 SINK="${SINK:-64}"; LOCAL="${LOCAL:-256}"
-EXP_BITS="${EXP_BITS:-4}"; EAS="${EAS:-0.01}"; ZEROROPE="${ZEROROPE:-20}"
+EXP_BITS="${EXP_BITS:-4}"; EAS="${EAS:-0.01}"; ZEROROPE="${ZEROROPE:-0}"
 USE_OFFLINE="${USE_OFFLINE:-0}"
 WHITEN="${WHITEN:-0}"
 ONLINE_DECODER_REFIT="${ONLINE_DECODER_REFIT:-none}"

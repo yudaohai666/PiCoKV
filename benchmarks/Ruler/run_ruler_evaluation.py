@@ -160,7 +160,7 @@ def parse_arguments():
         help="unsigned per-64-token quantization bits for global exp weights",
     )
     parser.add_argument("--eas", type=float, default=0.01)
-    parser.add_argument("--zerorope", type=int, default=20)
+    parser.add_argument("--zerorope", type=int, default=0)
     parser.add_argument(
         "--no-pruning",
         dest="use_pruning",

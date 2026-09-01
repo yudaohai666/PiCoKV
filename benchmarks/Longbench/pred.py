@@ -62,7 +62,7 @@ class QuantPCModel:
         local_size: int = 256,
         exp_bits: int = 4,
         eas: float = 0.01,
-        zerorope: int = 20,
+        zerorope: int = 0,
         use_pruning: bool = True,
         prune_mode: int = 3,
         log_eps: float = -10.0,
@@ -252,7 +252,7 @@ def parse_args(argv=None):
     p.add_argument("--local-size", type=int, default=256, help="most-recent (local) tokens kept in full precision")
     p.add_argument("--exp-bits", type=int, default=4)
     p.add_argument("--eas", type=float, default=0.01)
-    p.add_argument("--zerorope", type=int, default=20)
+    p.add_argument("--zerorope", type=int, default=0)
     p.add_argument("--no-pruning", dest="use_pruning", action="store_false",
                    help="disable decode-time global pruning (gqa4 CUDA path); pruning is on by default")
     p.add_argument("--prune-mode", type=int, default=3, help="decode pruning mode (CUDA v1_exp8 path)")

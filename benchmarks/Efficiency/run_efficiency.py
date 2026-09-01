@@ -397,7 +397,7 @@ def main() -> None:
     parser.add_argument("--local-size", type=int, default=256, help="most-recent (local) tokens kept in full precision")
     parser.add_argument("--exp-bits", type=int, default=4)
     parser.add_argument("--eas", type=float, default=0.01)
-    parser.add_argument("--zerorope", type=int, default=20)
+    parser.add_argument("--zerorope", type=int, default=0)
     parser.add_argument("--no-pruning", dest="use_pruning", action="store_false",
                         help="disable decode-time global pruning (gqa4 CUDA path); pruning is on by default")
     parser.add_argument("--prune-mode", type=int, default=3, help="decode pruning mode (CUDA v1_exp8 path)")

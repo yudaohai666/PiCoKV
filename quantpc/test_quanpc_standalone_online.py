@@ -50,7 +50,7 @@ def main() -> None:
         "sink_size": 64,
         "local_size": 256,
         "eas": 0.01,
-        "zerorope": 20,
+        "zerorope": 0,
         "exp_bits": 4,
         "seed": 0,
     }:

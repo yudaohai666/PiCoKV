@@ -129,7 +129,7 @@ def main() -> None:
     parser.add_argument("--k-bits-values", default="320")
     parser.add_argument("--v-bits-values", default="320")
     parser.add_argument("--exp-bits-values", default="1,2,4,8")
-    parser.add_argument("--zerorope-values", default="20")
+    parser.add_argument("--zerorope-values", default="0")
     parser.add_argument("--eas-values", default="0.01")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-new", type=int, default=0, help="0 means no limit")

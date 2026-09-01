@@ -39,7 +39,7 @@ DEFAULT_TMP_DIR = BASE / "offline_states.tmp"
 DEFAULT_MODEL_NAME = "/data/Llama-3.1-8B-Instruct"
 DEFAULT_SINK_SIZE = 64
 DEFAULT_LOCAL_SIZE = 256
-DEFAULT_ZEROROPE = 20
+DEFAULT_ZEROROPE = 0
 # block-32 learning only needs enough rows to resolve a 128-dim subspace, while
 # the coding/residual passes scale with row count. Subsample to bound memory.
 DEFAULT_BLOCK32_LEARN_TOKENS = 1048576
@@ -468,7 +468,6 @@ def _subsample_rows(tokens, max_rows):
     positions = torch.arange(max_rows, device=tokens.device, dtype=torch.int64)
     indices = (positions * (n_rows - 1) + (max_rows - 1) // 2) // (max_rows - 1)
     return tokens.index_select(0, indices)
-
 
 
 
