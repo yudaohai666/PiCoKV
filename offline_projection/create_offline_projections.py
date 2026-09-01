@@ -22,8 +22,8 @@ rotated at decode, and ``key_projection_t`` becomes ``W^-1 D^T`` for free.
 Stages (``--stage``):
   * collect -> dump per-layer post-RoPE K/V shards, each carrying this sample's
                query Gram (~1.5% of the shard, so W costs no extra pass).
-  * fit     -> per layer: sum the Grams into W, learn the encoder on ``K W``,
-               fit the decoder to its fixed point, store the folded pair.
+  * fit     -> per layer: sum the Grams into W, then run one canonical online
+               block-32 pass on ``K W``/V and store the folded pair.
   * all     -> collect then fit, layer group by layer group (default).
 
 Both sides are whitened. They do not share a source: K's comes from the
@@ -98,7 +98,6 @@ DEFAULT_V_BITS = 320
 # whitening lose on layer 0. Keep it fixed so whitening artifacts remain
 # comparable; it is an internal numerical-stability constant, not a sweep knob.
 WHITEN_RIDGE = 1e-3
-DEFAULT_DECODER_ITERS = 5
 
 
 def chain_codes(states, encoders, decoders):
@@ -116,24 +115,6 @@ def chain_codes(states, encoders, decoders):
         collected.append(codes)
         residual -= torch.matmul(codes, decoders[:, start:end])
     return torch.cat(collected, dim=-1)
-
-
-def joint_solve(codes, states):
-    """Ridge-regularized ``argmin_D ||states - codes @ D||_F``."""
-    length = codes.shape[-2]
-    gram = torch.matmul(codes.transpose(-1, -2).float(), codes.float()) / length
-    rhs = torch.matmul(codes.transpose(-1, -2).float(), states.float()) / length
-    gram.diagonal(dim1=-2, dim2=-1).add_(ONLINE_DECODER_RIDGE)
-    solution, _ = torch.linalg.solve_ex(gram, rhs, check_errors=False)
-    return solution.to(states.dtype)
-
-
-def reconstruction_error(states, encoders, decoders):
-    """Relative Frobenius error of the fixed-decoder chain on ``states``."""
-    codes = chain_codes(states, encoders, decoders)
-    approx = torch.matmul(codes, decoders)
-    return float((approx.float() - states.float()).norm() / states.float().norm())
-
 
 
 def whitening_from_gram(gram, ridge):
@@ -226,19 +207,21 @@ def rotate_states(states, forward, chunk=65536):
     return out
 
 
-def learn_pair(states, bits, iters):
-    """Learn encoders on prepared states, then fit decoders to the fixed point."""
+def learn_pair(states, bits):
+    """Run the canonical online block-32 forward once.
+
+    ``quantize_block32_online`` already learns each encoder, solves its
+    ridge-regularized decoder, subtracts that reconstruction, and advances to
+    the next group.  Re-solving from the concatenated codes here would be a
+    different algorithm from the production online path, so offline fitting
+    deliberately has no additional decoder-refit pass.
+    """
     with torch.no_grad():
         block = quantize_block32_online(states, bits)
         encoders = block.encoders[0, 0].unsqueeze(0).contiguous()
         decoders = block.decoder[0, 0].unsqueeze(0).contiguous()
         del block
-        flat = states.reshape(1, states.shape[2], states.shape[3]).contiguous()
-        history = [reconstruction_error(flat, encoders, decoders)]
-        for _ in range(max(0, int(iters))):
-            decoders = joint_solve(chain_codes(flat, encoders, decoders), flat)
-            history.append(reconstruction_error(flat, encoders, decoders))
-    return encoders[0], decoders[0], history
+    return encoders[0], decoders[0]
 
 
 def fold(encoder, decoder, forward, inverse):
@@ -295,7 +278,6 @@ def folded_meta(args, k_bits, v_bits, zerorope, whitened):
         "zerorope": zerorope,
         "sink_size": args.sink_size,
         "local_size": args.local_size,
-        "decoder_iters": args.decoder_iters,
         # Whitening, when enabled, is applied to every layer and folded into
         # the stored encoder/decoder pair. The factors are not serialized.
         "whitened": bool(whitened),
@@ -408,8 +390,8 @@ def fit_layer(args, state, progress, layer_idx, sample_count, device,
                 head_forward = side_forward[head_idx]
                 head_inverse = side_inverse[head_idx]
                 rotated = rotate_states(states, head_forward)
-                encoder, decoder, history = learn_pair(
-                    rotated, bits, args.decoder_iters
+                encoder, decoder = learn_pair(
+                    rotated, bits
                 )
                 del rotated
                 folded_encoder, folded_decoder = fold(
@@ -425,13 +407,9 @@ def fit_layer(args, state, progress, layer_idx, sample_count, device,
                           flush=True)
                 encoder, decoder = folded_encoder, folded_decoder
             else:
-                encoder, decoder, history = learn_pair(
-                    states, bits, args.decoder_iters
+                encoder, decoder = learn_pair(
+                    states, bits
                 )
-
-            if args.verbose_fit and head_idx == 0:
-                print(f"  layer {layer_idx} {kind} calib fit: "
-                      + " -> ".join(f"{h:.4f}" for h in history), flush=True)
 
             state[enc_field][layer_idx, head_idx] = (
                 encoder.float().detach().cpu().to(torch.bfloat16)
@@ -555,10 +533,8 @@ def main():
     parser.add_argument("--k_bits", type=int, default=DEFAULT_K_BITS)
     parser.add_argument("--v_bits", type=int, default=DEFAULT_V_BITS)
     parser.add_argument("--zerorope", type=int, default=DEFAULT_ZEROROPE)
-    parser.add_argument("--decoder_iters", type=int, default=DEFAULT_DECODER_ITERS)
     parser.add_argument("--block32-learn-tokens", dest="block32_learn_tokens",
                         type=int, default=DEFAULT_BLOCK32_LEARN_TOKENS)
-    parser.add_argument("--verbose_fit", action="store_true")
     parser.add_argument("--decoder_ridge", type=float, default=1e-3,
                         help="block-32 decoder ridge for this fit (default 1e-3). "
                              "Recorded in the artifact meta.")

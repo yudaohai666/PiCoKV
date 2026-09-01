@@ -71,10 +71,9 @@ DATASETS=${DATASETS:-codeparrot,pg19,proof-pile}
 LENGTH_CONFIG=${LENGTH_CONFIG:-131072:10,98304:10,65536:10,32768:10}
 K_BITS=${K_BITS:-320}
 V_BITS=${V_BITS:-320}
-ZEROROPE=${ZEROROPE:-20}
+ZEROROPE=${ZEROROPE:-0}
 SINK_SIZE=${SINK_SIZE:-64}
 LOCAL_SIZE=${LOCAL_SIZE:-256}
-DECODER_ITERS=${DECODER_ITERS:-5}
 DECODER_RIDGE=${DECODER_RIDGE:-1e-3}
 WHITEN=${WHITEN:-false}
 # Block-32 learning subsamples to BLOCK32_LEARN_TOKENS anyway, so striding at
@@ -82,6 +81,8 @@ WHITEN=${WHITEN:-false}
 COLLECT_STRIDE=${COLLECT_STRIDE:-8}
 BLOCK32_LEARN_TOKENS=${BLOCK32_LEARN_TOKENS:-1048576}
 # All 32 layers in one forward: two half-passes cost 1.5 forwards per sample.
+# Qwen3-8B has 36 transformer layers; when building its PT, you can set
+# COLLECT_LAYERS_PER_FORWARD=36. Keep the default value 32 unchanged.
 COLLECT_LAYERS_PER_FORWARD=${COLLECT_LAYERS_PER_FORWARD:-32}
 
 STAGE=${STAGE:-all}
@@ -108,11 +109,10 @@ python create_offline_projections.py \
     --k_bits "${K_BITS}" \
     --v_bits "${V_BITS}" \
     --zerorope "${ZEROROPE}" \
-    --decoder_iters "${DECODER_ITERS}" \
     --decoder_ridge "${DECODER_RIDGE}" \
     --whiten "${WHITEN}" \
     --collect_stride "${COLLECT_STRIDE}" \
     --collect_layers_per_forward "${COLLECT_LAYERS_PER_FORWARD}" \
     --block32-learn-tokens "${BLOCK32_LEARN_TOKENS}" \
-    --verbose_fit --keep_tmp \
+    --keep_tmp \
     "$@"
