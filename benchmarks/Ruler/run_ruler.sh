@@ -46,20 +46,17 @@ METHODS=(
 [ -n "${METHOD:-}" ] && METHODS=("${METHOD}")
 
 # ── per-method defaults (identical across all benchmark launchers) ──
-# quantpc; default = online + nowhiten (the path the fp32-gram fix lives on)
+# quantpc; default = online
 K_BITS="${K_BITS:-320}"; V_BITS="${V_BITS:-320}"
 SINK="${SINK:-64}"; LOCAL="${LOCAL:-256}"
 EXP_BITS="${EXP_BITS:-4}"; EAS="${EAS:-0.01}"; ZEROROPE="${ZEROROPE:-0}"
 USE_OFFLINE="${USE_OFFLINE:-0}"
-WHITEN="${WHITEN:-0}"
-ONLINE_DECODER_REFIT="${ONLINE_DECODER_REFIT:-none}"
 # 1e-3 == constants.ONLINE_DECODER_RIDGE, i.e. the shipped path. Do NOT raise this
 # back to 1e-2: a nominal 1e-2 swamps the -9.3e-4 negative ridge the bf16 gram used
 # to contribute, making it the one setting under which the fp32-gram fix is
 # unmeasurable (16 paired cells: 6 up / 7 down / 3 tie, mean -0.004).
 DECODER_RIDGE="${DECODER_RIDGE:-1e-3}"
-# run_ruler_evaluation.run_tag() keys its ridge suffix off 1e-2, so these runs land
-# in .../{TAG}_ridge0.001/ and cannot collide with the older 1e-2 results.
+# Keep the shell default aligned with run_ruler_evaluation.py and offline PTs.
 OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
 # kivi (2/4-bit KV)
 KIVI_K="${KIVI_K:-2}"; KIVI_V="${KIVI_V:-2}"; KIVI_GROUP="${KIVI_GROUP:-32}"; KIVI_RESIDUAL="${KIVI_RESIDUAL:-128}"
@@ -71,7 +68,7 @@ POLAR_MODE="${POLAR_MODE:-mixed}"; POLAR_RBITS="${POLAR_RBITS:-3}"; POLAR_TBITS=
 
 # Build METHOD_ARGS[] and TAG for a method. Needs REPO_ROOT, MODEL_TAG + the
 # per-method defaults above. quantpc TAG matches run_ruler_evaluation.py's python
-# run_tag(): quantpc_{mode}_k{K}_v{V}_{whiten}[_krefit|_vrefit|_refit] (informational
+# run_tag(): quantpc_{mode}_k{K}_v{V} (informational
 # only here -- the python runner auto-writes the results dir).
 build_method_args() {
   METHOD_ARGS=(); TAG="$1"
@@ -79,24 +76,15 @@ build_method_args() {
     quantpc)
       METHOD_ARGS=(--k-bits "${K_BITS}" --v-bits "${V_BITS}" --sink-size "${SINK}" --local-size "${LOCAL}"
         --exp-bits "${EXP_BITS}" --eas "${EAS}" --zerorope "${ZEROROPE}"
-        --decoder-ridge "${DECODER_RIDGE}" --online-decoder-refit "${ONLINE_DECODER_REFIT}")
-      local mode proj whiten_tag
+        --decoder-ridge "${DECODER_RIDGE}")
+      local mode proj
       if [ "${USE_OFFLINE}" = "1" ] || [ -n "${OFFLINE_PROJ_PATH}" ]; then
         mode="offline"; METHOD_ARGS+=(--offline); proj="${OFFLINE_PROJ_PATH}"
-        # offline + whiten -> the folded _whiten.pt (no runtime --whiten flag)
-        if [ -z "${proj}" ] && [ "${WHITEN}" = "1" ]; then
-          proj="${REPO_ROOT}/offline_projection/projections/${MODEL_TAG}_k${K_BITS}_v${V_BITS}_whiten.pt"
-        fi
         [ -n "${proj}" ] && METHOD_ARGS+=(--offline-proj-path "${proj}")
       else
-        mode="online"; [ "${WHITEN}" = "1" ] && METHOD_ARGS+=(--whiten)
+        mode="online"
       fi
-      [ "${WHITEN}" = "1" ] && whiten_tag="whiten" || whiten_tag="nowhiten"
-      TAG="quantpc_${mode}_k${K_BITS}_v${V_BITS}_${whiten_tag}"
-      # refit suffix applies only to the offline path.
-      if [ "${mode}" = "offline" ]; then
-        case "${ONLINE_DECODER_REFIT}" in k) TAG+="_krefit" ;; v) TAG+="_vrefit" ;; both) TAG+="_refit" ;; esac
-      fi
+      TAG="quantpc_${mode}_k${K_BITS}_v${V_BITS}"
       ;;
     kivi)
       METHOD_ARGS=(--k-bits "${KIVI_K}" --v-bits "${KIVI_V}" --group-size "${KIVI_GROUP}" --residual-length "${KIVI_RESIDUAL}")

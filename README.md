@@ -2,8 +2,8 @@
 
 This workspace contains QuanPC quantized KV-cache attention code for
 long-context decoding. The implementation lives under `quantpc/` and supports
-both online projection learning and fully offline projections, whose whitening,
-encoder and decoder are folded into a single stored pair.
+both online projection learning and fully offline projections with stored
+encoder/decoder pairs.
 
 ## Environment Setup
 
@@ -107,18 +107,10 @@ QuanPC supports **two projection paths**, both using block-32 CholeskyQR /
 Householder subspace quantization with a ridge-regularized decoder:
 
 - **Online** (`StandaloneConfig()` defaults, no projection args): projections are
-  fit from the current prefill K/V inside `prepare_kv_cache`. Optional runtime
-  whitening via `--whiten`, and optional decoder refit via `online_decoder_refit`
-  (`k`/`v`/`kv`/`none`).
-- **Offline**: load a stored `.pt` whose whitening + encoder + decoder are folded
-  into a single pair (`load_offline_projections`, `transformers.py:51`), then pass
-  them into `prepare_kv_cache` (`prepare.py:190-241`). The offline decoder can
-  still be refit online. The benchmark launchers default to this path
-  (`USE_OFFLINE=1`, `ONLINE_DECODER_REFIT=v`).
-
-Offline and runtime whitening cannot be combined: a folded offline PT already
-bakes whitening in, so use it without `--whiten`; use `--whiten` only on the
-online path.
+  fit from the current prefill K/V inside `prepare_kv_cache`.
+- **Offline**: load a stored `.pt` containing the complete encoder/decoder pair
+  (`load_offline_projections`, `transformers.py:51`), then pass both into
+  `prepare_kv_cache` (`prepare.py:190-241`).
 
 Decode requires bf16 CUDA and GQA=4 (`QH/KVH == 4`, `D == 128`), code bits in
 `{128,192,256,320,384,448,512}`, and `exp_bits` in `{1,2,4,8}` (default 4).
@@ -202,10 +194,10 @@ Active core (`quantpc/`):
 
 Offline projections (`offline_projection/`):
 
-- `create_offline_projections.py` (+ `.sh`): builds the folded whitening +
+- `create_offline_projections.py` (+ `.sh`): builds the complete offline
   encoder + decoder `.pt` pairs from `data/` (proof-pile / pg19 / codeparrot).
-- `projections/`: stored PTs, named `{model}_k{K}_v{V}_{whiten|nowhiten}.pt`
-  (on disk: `k320_v320`, `k320_v256`, `k256_v256`, each in whiten/nowhiten).
+- `projections/`: stored offline PTs, named
+  `{model}_k{K}_v{V}.pt`.
 
 Baselines (`src/`): `KIVI/`, `OScaR-KV-Quant/`, `PolarQuant/`, plus `lmeval.py`.
 `quantpc_legacy/` holds the superseded extension and is not used by benchmarks.
@@ -242,7 +234,7 @@ format `show_image_paper.py` plots:
 python benchmarks/Needle/run_bin.py --method quantpc \
   --k-bits 320 --v-bits 320 --local-size 256 --zerorope 20 \
   --lengths 64000,110000 --depths 50 \
-  --output results/niah/Llama-3.1-8B-Instruct_online_k320_v320_nowhiten/results.json
+  --output results/niah/Llama-3.1-8B-Instruct_online_k320_v320/results.json
 ```
 
 `quantpc/run_standalone_niah.py` runs the same sweep for quantpc alone but also
@@ -253,7 +245,7 @@ numbers come from:
 python quantpc/run_standalone_niah.py \
   --k-bits 320 --v-bits 320 --local-size 256 \
   --lengths 64000,110000 --depths 50 \
-  --output-json results/niah/timed_runs/online_k320_v320_nowhiten.json
+  --output-json results/niah/timed_runs/online_k320_v320.json
 ```
 
 See `results/niah/` for the stored outputs of these runs.
@@ -276,23 +268,18 @@ bash benchmarks/InfiniteBench/run_infinitebench.sh
 Each launcher exposes a `METHODS=(...)` list near the top (comment methods in
 or out, or force one with `METHOD=quantpc`) and shares the same tunables:
 `K_BITS`/`V_BITS` (320), `SINK` (64), `LOCAL` (256), `EXP_BITS` (4),
-`EAS` (0.01), `ZEROROPE` (20), `USE_OFFLINE` (1), `WHITEN` (0),
-`ONLINE_DECODER_REFIT` (v), `DECODER_RIDGE` (1e-2). The resolved quantpc tag is
-`quantpc_{mode}_k{K}_v{V}_{whiten}[_krefit|_vrefit|_refit]`. Note the default
+`EAS` (0.01), `ZEROROPE` (20), `USE_OFFLINE` (0), and `DECODER_RIDGE` (1e-3).
+The resolved quantpc tag is `quantpc_{mode}_k{K}_v{V}`. Note the default
 `MODEL` path differs per launcher (`/data/Llama-3.1-8B-Instruct` for
 Ruler/InfiniteBench/Longbench/Needle vs the full share-storage path for
 Efficiency) — override `MODEL=...` as needed.
 
 For QuanPC, the standard configuration is K/V `320/320`, `sink_size=64`,
-`local_size=256`, `eas=0.01`, and `zerorope=20`. Runtime whitening is an online
-option. Offline projections already contain their fitted encoder/decoder pair;
-the benchmark launchers default to `USE_OFFLINE=1` and load
-`offline_projection/projections/{model}_k320_v320_nowhiten.pt` (set
+`local_size=256`, `eas=0.01`, and `zerorope=20`. Offline projections contain
+their complete fitted encoder/decoder pair; the benchmark launchers load
+`offline_projection/projections/{model}_k320_v320.pt` (set
 `USE_OFFLINE=0` for the online path). A missing default PT is reported as an
 explicit `FileNotFoundError`.
-
-Offline and runtime whitening cannot be combined: use a folded offline PT
-without `--whiten`, or use the online path with `--whiten`.
 
 LongBench 的数据目录不设机器相关默认值。直接运行 `pred.py` 时必须显式传入
 `--data-dir /path/to/longbench/data`；使用 `run_longbench.sh` 时通过环境变量

@@ -182,18 +182,8 @@ def parse_arguments():
     parser.add_argument("--kv-norm", default="1", help="OScaR kv norm (INT2 默认 1)")
     parser.add_argument("--residual-evict-size", type=int, default=256, help="OScaR residual evict size (INT2 默认 256)")
     parser.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
-    parser.add_argument("--offline", action="store_true", help="quantpc: use offline encoders (default path offline_projection/projections/{model}_k{K}_v{V}_nowhiten.pt)")
-    parser.add_argument(
-        "--online-decoder-refit", default="none",
-        choices=("none", "k", "v", "both"),
-        help="quantpc offline only: online decoder refit side; none (default), "
-             "k, v, or both. The selected side(s) keep offline encoders but "
-             "re-solve their decoders for the current context.",
-    )
-    parser.add_argument("--whiten", action="store_true",
-                        help="quantpc: rotate K/V into the whitened bases at runtime; "
-                             "a folded projection already has this in its stored pair")
-    parser.add_argument("--offline-proj-path", default=None, help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
+    parser.add_argument("--offline", action="store_true", help="quantpc: use the complete offline encoder/decoder pair (default path offline_projection/projections/{model}_k{K}_v{V}.pt)")
+    parser.add_argument("--offline-proj-path", default=None, help="quantpc: explicit offline encoder/decoder pair .pt (overrides the --offline default path)")
 
     # ── PolarQuant params (--method polar) ──
     parser.add_argument("--polar-mode", default="mixed", choices=["mixed", "group", "snapkv"], help="PolarQuant attention variant: mixed (K polar + V KIVI-quant) | group (K-only) | snapkv")
@@ -243,9 +233,9 @@ def parse_arguments():
     parser.add_argument("--add_bos_token", action="store_true")
     parser.add_argument("--prefix_token_id", type=int, default=None)
 
-    parser.add_argument("--decoder-ridge", type=float, default=1e-2,
+    parser.add_argument("--decoder-ridge", type=float, default=1e-3,
                         help="override the online block-32 decoder ridge "
-                             "(default 1e-2; offline PTs are fitted with 1e-3). "
+                             "(default 1e-3; offline PTs are fitted with 1e-3). "
                              "Since the gram is accumulated in fp32 this knob is "
                              "no longer load-bearing: 1e-3 and 1e-2 measured "
                              "identically end-to-end (8 cells, |delta| <= 0.003). "
@@ -264,27 +254,10 @@ def parse_arguments():
 def run_tag(args):
     """Return a reproducible tag for this evaluation configuration."""
     offline = args.offline or args.offline_proj_path is not None
-    whiten = args.whiten
-    if offline and args.offline_proj_path:
-        # A folded projection carries its whitening in the stored pair.
-        from quantpc.quanpc_standalone.transformers import load_offline_projections
-        meta = load_offline_projections(args.offline_proj_path).get("meta", {})
-        whiten = bool(meta.get("whitened"))
     if args.method == "quantpc":
         mode = "offline" if offline else "online"
-        tag = (
-            f"quantpc_{mode}_k{args.k_bits}_v{args.v_bits}_"
-            f"{'whiten' if whiten else 'nowhiten'}"
-        )
-        if offline:
-            refit_suffix = {
-                "k": "krefit",
-                "v": "vrefit",
-                "both": "refit",
-            }.get(args.online_decoder_refit)
-            if refit_suffix:
-                tag += f"_{refit_suffix}"
-        if float(args.decoder_ridge) != 1e-2:
+        tag = f"quantpc_{mode}_k{args.k_bits}_v{args.v_bits}"
+        if float(args.decoder_ridge) != 1e-3:
             tag += f"_ridge{float(args.decoder_ridge):g}"
         if args.exp_bits != 4:
             tag += f"_exp{args.exp_bits}"
@@ -482,7 +455,6 @@ def main():
         offline_proj_path = resolve_offline_proj_path(
             args.method, args.offline, args.offline_proj_path,
             model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,
-            whiten=args.whiten,
         )
         model, tokenizer, kv_cache_factory = load_model(
             args.model,
@@ -499,8 +471,6 @@ def main():
             prune_mode=args.prune_mode,
             log_eps=args.log_eps,
             offline_proj_path=offline_proj_path,
-            online_decoder_refit=args.online_decoder_refit,
-            whiten=args.whiten,
             # KIVI params (--method kivi)
             group_size=args.group_size,
             residual_length=args.residual_length,

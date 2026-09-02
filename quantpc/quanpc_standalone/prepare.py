@@ -13,7 +13,6 @@ import torch
 from .cache import PreparedKVCache
 from .constants import SUPPORTED_CODE_BITS, SUPPORTED_EXP_BITS
 from .online import quantize_block32_online
-from .whiten import whiten_states
 
 try:
     from quantpc.quanpc_prefill_cuda_extension.quanpc_prefill_cuda import (
@@ -187,8 +186,6 @@ def prepare_kv_cache(
     value_encoders: Optional[torch.Tensor] = None,
     key_decoders: Optional[torch.Tensor] = None,
     value_decoders: Optional[torch.Tensor] = None,
-    key_whitening: Optional[torch.Tensor] = None,
-    value_whitening: Optional[torch.Tensor] = None,
 ) -> PreparedKVCache:
     """Learn online K/V projections and build a packed CUDA cache.
 
@@ -197,24 +194,20 @@ def prepare_kv_cache(
     stream joins both before packing, EAS selection, and retained-cache
     gathering.  The function does not synchronize the host.
 
-    ``key_encoders``/``value_encoders`` select the offline-projection path for
-    that side: the stored ``[KVH, bits, D]`` (or ``[B, KVH, bits, D]``)
-    directions replace online direction learning while the decoder is still
-    solved from this context's states.
+    ``key_encoders``/``value_encoders`` and their matching decoders select the
+    fully offline path for that side. The stored ``[KVH, bits, D]`` (or
+    ``[B, KVH, bits, D]``) encoder/decoder pair replaces online fitting.
 
-    Adding ``key_decoders``/``value_decoders`` drops that solve too, reusing a
-    decoder fitted offline against the same encoders.
-
-    ``key_whitening``/``value_whitening`` are the symmetric ``[.., D, D]``
-    factors from :mod:`.whiten`.  Whitening is applied here rather than by the
-    caller because ``zerorope`` masks RoPE frequency pairs *by coordinate*: it
-    is only meaningful in the model's basis, so it must run before the rotation.
     """
     _validate_prepare_inputs(full_key, full_value, eas, direction_sample_size)
     _require_prefill_cuda()
     key_bits = _validate_code_bits("key_bits", key_bits)
     value_bits = _validate_code_bits("value_bits", value_bits)
     exp_bits = _validate_exp_bits(exp_bits)
+    if (key_encoders is None) != (key_decoders is None):
+        raise ValueError("key encoders and decoders must be supplied together")
+    if (value_encoders is None) != (value_decoders is None):
+        raise ValueError("value encoders and decoders must be supplied together")
 
     # Split exact dense windows from the global segment learned/compressed here.
     global_start, global_len = _global_span(
@@ -229,16 +222,6 @@ def prepare_kv_cache(
         :,
         global_start : global_start + global_len,
     ].contiguous()
-
-    # Rotate into the whitened bases only after zerorope has masked the RoPE
-    # pairs.  The dense sink/local/EAS windows are gathered from full_key/value
-    # below, so they must be rotated too or decode would mix two bases.
-    if key_whitening is not None:
-        key_global = whiten_states(key_global, key_whitening).contiguous()
-        full_key = whiten_states(full_key, key_whitening).contiguous()
-    if value_whitening is not None:
-        value_global = whiten_states(value_global, value_whitening).contiguous()
-        full_value = whiten_states(full_value, value_whitening).contiguous()
 
     # This internal K/V overlap is part of the measured fast path.  It is not
     # the removed async-prepare/prefill overlap API.

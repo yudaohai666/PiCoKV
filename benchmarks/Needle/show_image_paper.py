@@ -38,8 +38,8 @@ def main(args):
     # Preferred split: --model already names the model, so strip that prefix and
     # let the method keep its underscores.  The rsplit heuristics below can only
     # recover one trailing token, which forces run tags to be crammed together
-    # (k320foldedlocal256) and drops fields like the local-window size from the
-    # title.  Legacy directory names still fall through to them.
+    # legacy tags and drops fields like the local-window size from the title.
+    # Legacy directory names still fall through to them.
     model_tag = args.model.rstrip('/').split('/')[-1]
     if parent_name == model_tag:
         model = model_tag
@@ -198,19 +198,10 @@ def main(args):
         'bpc': 'BinaryPC',
         'bpc_offline': 'BinaryPC w/ OPC',
         'k320online': 'QuanPC k320/v320 (online)',
-        'k320offdec': 'QuanPC k320/v320 (offline decoder)',
-        # All three projections offline -- whitening, encoder, decoder -- with
-        # W^-1 D^T folded into one stored matrix; plus the local-window ablation.
-        'k320folded': 'QuanPC k320/v320 (all-offline, folded W)',
-        'k320foldedlocal256': 'QuanPC k320/v320 (all-offline, local 256)',
         'k320onlinelocal256': 'QuanPC k320/v320 (online, local 256)',
-        'k256folded': 'QuanPC k256/v256 (all-offline, folded W)',
-        'k320offlinenowhiten': 'QuanPC k320/v320 (all-offline, no whitening, local 256)',
-        'k256offlinenowhiten': 'QuanPC k256/v256 (all-offline, no whitening, local 256)',
-        'k256onlinewhiten': 'QuanPC k256/v256 (online + whitening)',
-        'k320onlinewhiten': 'QuanPC k320/v320 (online + whitening)',
+        'k320offline': 'QuanPC k320/v320 (all-offline, local 256)',
+        'k256offline': 'QuanPC k256/v256 (all-offline, local 256)',
         'k256online': 'QuanPC k256/v256 (online)',
-        'k256offdec': 'QuanPC k256/v256 (offline decoder)',
     }
 
     # Structured QuanPC run tags carry every field that distinguishes a sweep, so
@@ -218,23 +209,14 @@ def main(args):
     # that is how earlier plots ended up titled "(online)" for a local-256 run.
     structured = re.fullmatch(
         r'(?:quantpc_)?(online|offline)_k(\d+)_v(\d+)'
-        r'(?:_local(\d+))?_(whiten|nowhiten)'
-        r'(?:_(krefit|vrefit|refit))?',
+        r'(?:_local(\d+))?',
         method, re.IGNORECASE,
     )
     if structured:
-        mode, k, v, local, whiten, refit = structured.groups()
+        mode, k, v, local = structured.groups()
         local_text = f", local {local}" if local else ""
-        refit_names = {
-            "krefit": "K decoder refit",
-            "vrefit": "V decoder refit",
-            "refit": "K+V decoder refit",
-        }
-        refit_text = f", {refit_names[refit.lower()]}" if refit else ""
         method_title = (
-            f"QuanPC k{k}/v{v} ({mode.lower()}{local_text}, "
-            f"{'whitened' if whiten.lower() == 'whiten' else 'no whitening'}"
-            f"{refit_text})"
+            f"QuanPC k{k}/v{v} ({mode.lower()}{local_text})"
         )
     # Match method names with budget suffix, e.g. snapkv-2048
     elif re.match(r'([^-]+)-(\d+)', method, re.IGNORECASE):

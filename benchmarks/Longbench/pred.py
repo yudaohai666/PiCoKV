@@ -66,7 +66,6 @@ class QuantPCModel:
         use_pruning: bool = True,
         prune_mode: int = 3,
         log_eps: float = -10.0,
-        whiten: bool = False,
         # KIVI params (--method kivi)
         group_size: int = 32,
         residual_length: int = 32,
@@ -79,7 +78,6 @@ class QuantPCModel:
         offline_v_hadamard: bool = True,
         # quantpc offline block-32 encoders (--method quantpc)
         offline_proj_path: str | None = None,
-        online_decoder_refit: str = "none",
         # PolarQuant params (--method polar)
         polar_mode: str = "mixed",
         polar_rbits: int = 3,
@@ -101,7 +99,6 @@ class QuantPCModel:
             use_pruning=use_pruning,
             prune_mode=prune_mode,
             log_eps=log_eps,
-            whiten=whiten,
             offline_proj_path=offline_proj_path,
             # KIVI params (--method kivi)
             group_size=group_size,
@@ -113,7 +110,6 @@ class QuantPCModel:
             kv_norm=kv_norm,
             residual_evict_size=residual_evict_size,
             offline_v_hadamard=offline_v_hadamard,
-            online_decoder_refit=online_decoder_refit,
             # PolarQuant params (--method polar)
             polar_mode=polar_mode,
             polar_rbits=polar_rbits,
@@ -263,8 +259,6 @@ def parse_args(argv=None):
                    help="comma-separated dataset subset (default: config file list)")
     p.add_argument("--data-dir", required=True,
                    help="directory holding the unzipped LongBench *.jsonl files")
-    p.add_argument("--whiten", action="store_true",
-                   help="quantpc: rotate K/V into the query- and o_proj-whitened bases")
     p.set_defaults(use_pruning=True)
     # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
     p.add_argument("--group-size", type=int, default=32, help="KIVI per-group quant size; OScaR group size (INT2 必须=32)")
@@ -276,12 +270,10 @@ def parse_args(argv=None):
     p.add_argument("--kv-norm", default="1", help="OScaR kv norm (INT2 默认 1)")
     p.add_argument("--residual-evict-size", type=int, default=256, help="OScaR residual evict size (INT2 默认 256)")
     p.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
-    p.add_argument("--offline", action="store_true", help="quantpc: use offline encoders (default path offline_projection/projections/{model}_k{K}_v{V}_nowhiten.pt)")
-    p.add_argument("--online-decoder-refit", default="none", choices=("none", "k", "v", "both"),
-                   help="quantpc offline only: refit decoder for K, V, or both sides")
-    p.add_argument("--offline-proj-path", default=None, help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
-    p.add_argument("--decoder-ridge", type=float, default=1e-2,
-                   help="override the online decoder ridge (default 1e-2; offline PTs are fitted with 1e-3)")
+    p.add_argument("--offline", action="store_true", help="quantpc: use the complete offline encoder/decoder pair (default path offline_projection/projections/{model}_k{K}_v{V}.pt)")
+    p.add_argument("--offline-proj-path", default=None, help="quantpc: explicit offline encoder/decoder pair .pt (overrides the --offline default path)")
+    p.add_argument("--decoder-ridge", type=float, default=1e-3,
+                   help="override the online decoder ridge (default 1e-3; offline PTs are fitted with 1e-3)")
     # ── PolarQuant params (--method polar) ──
     p.add_argument("--polar-mode", default="mixed", choices=["mixed", "group", "snapkv"],
                    help="PolarQuant attention variant")
@@ -317,8 +309,6 @@ def main() -> None:
     tag = args.output_tag or output_tag(
         args.method, args.k_bits, args.v_bits, args.num_bits,
         offline=(args.offline or args.offline_proj_path is not None),
-        whiten=args.whiten if args.method == "quantpc" else None,
-        online_decoder_refit=args.online_decoder_refit,
     )
     save_path = (
         Path(args.output_path)
@@ -331,7 +321,6 @@ def main() -> None:
     offline_proj_path = resolve_offline_proj_path(
         args.method, args.offline, args.offline_proj_path,
         model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,
-        whiten=args.whiten,
     )
     model = QuantPCModel(
         args.model,
@@ -347,7 +336,6 @@ def main() -> None:
         use_pruning=args.use_pruning,
         prune_mode=args.prune_mode,
         log_eps=args.log_eps,
-        whiten=args.whiten,
         # KIVI params (--method kivi)
         group_size=args.group_size,
         residual_length=args.residual_length,
@@ -359,7 +347,6 @@ def main() -> None:
         residual_evict_size=args.residual_evict_size,
         offline_v_hadamard=args.offline_v_hadamard,
         offline_proj_path=offline_proj_path,
-        online_decoder_refit=args.online_decoder_refit,
         polar_mode=args.polar_mode,
         polar_rbits=args.polar_rbits,
         polar_tbits=args.polar_tbits,

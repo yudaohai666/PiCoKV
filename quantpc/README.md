@@ -30,8 +30,8 @@ The package intentionally contains one implementation:
 - decode requires GQA 4 and uses the packed CUDA kernels.
 
 The low-level ``prepare_kv_cache`` API is the online path. The Hugging Face
-integration additionally accepts stored offline encoder/decoder pairs and can
-refit the K and/or V decoder online while keeping the offline encoder.
+integration additionally accepts stored offline encoder/decoder pairs and uses
+both matrices during cache preparation.
 Torch-only decode, async prepare, block-16, and alternate dtype/error-mode
 paths are not supported.
 
@@ -138,8 +138,6 @@ python benchmarks/Needle/run_bin.py --method quantpc \
 
 For offline evaluation, pass ``--offline`` or an explicit
 ``--offline-proj-path``. The default path is
-``offline_projection/projections/{model}_k320_v320_nowhiten.pt`` when the
-model basename is ``Llama-3.1-8B-Instruct``. ``--online-decoder-refit`` may be
-``none``, ``k``, ``v``, or ``both``. Runtime ``--whiten`` is only for online
-projection; it is rejected together with an offline PT because offline
-artifacts already use their fitted basis.
+``offline_projection/projections/{model}_k320_v320.pt`` when the
+model basename is ``Llama-3.1-8B-Instruct``. Offline projections always contain
+both the encoder and decoder.

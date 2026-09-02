@@ -188,14 +188,11 @@ def quantize_block32_online(
     initialization, one covariance power iteration with Householder QR, bf16
     tensor-core matmuls, a ``1e-3`` decoder ridge, and residual error for EAS.
 
-    Passing ``encoders`` reuses stored directions instead of learning them
-    (offline path): CholeskyQR init, covariance power iteration, and Householder
-    QR are skipped.
-
-    Passing ``decoders`` additionally reuses a stored decoder, skipping the
-    per-group least-squares solve entirely. Stored decoders are only valid
-    alongside the encoders they were fitted with, because the residual chain
-    that produces the codes depends on both.
+    Passing a matching ``encoders``/``decoders`` pair reuses the complete
+    offline projection instead of learning it. CholeskyQR init, covariance
+    power iteration, Householder QR, and the per-group least-squares solve are
+    skipped. The pair must be supplied together because the residual chain that
+    produces the codes depends on both.
     """
     if target.dim() != 4:
         raise ValueError(f"target must be [B,H,L,D]; got {tuple(target.shape)}")
@@ -217,8 +214,8 @@ def quantize_block32_online(
             encoders, batch, heads, bits, dim, target.device, target.dtype
         )
     )
-    if decoders is not None and fixed_encoders is None:
-        raise ValueError("decoders require the matching encoders to be supplied")
+    if (encoders is None) != (decoders is None):
+        raise ValueError("encoders and decoders must be supplied together")
     fixed_decoders = (
         None
         if decoders is None

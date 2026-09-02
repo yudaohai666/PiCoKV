@@ -48,9 +48,7 @@ class Transformer(ModelProvider):
         offline_v_hadamard: bool = True,
         # quantpc offline block-32 encoders (--method quantpc)
         offline_proj_path: str | None = None,
-        whiten: bool = False,
         max_new_tokens: int = 50,
-        online_decoder_refit: str = "none",
         # PolarQuant params (--method polar)
         polar_mode: str = "mixed",
         polar_rbits: int = 3,
@@ -75,7 +73,6 @@ class Transformer(ModelProvider):
             prune_mode=prune_mode,
             log_eps=log_eps,
             offline_proj_path=offline_proj_path,
-            whiten=whiten,
             # KIVI params (--method kivi)
             group_size=group_size,
             residual_length=residual_length,
@@ -86,7 +83,6 @@ class Transformer(ModelProvider):
             kv_norm=kv_norm,
             residual_evict_size=residual_evict_size,
             offline_v_hadamard=offline_v_hadamard,
-            online_decoder_refit=online_decoder_refit,
             # PolarQuant params (--method polar)
             polar_mode=polar_mode,
             polar_rbits=polar_rbits,
@@ -190,9 +186,7 @@ def run_experiment(
     residual_evict_size: int | None = 256,
     offline_v_hadamard: bool = True,
     offline_proj_path: str | None = None,
-    whiten: bool = False,
     max_new_tokens: int = 50,
-    online_decoder_refit: str = "none",
     # PolarQuant params (--method polar)
     polar_mode: str = "mixed",
     polar_rbits: int = 3,
@@ -217,7 +211,6 @@ def run_experiment(
         prune_mode=prune_mode,
         log_eps=log_eps,
         offline_proj_path=offline_proj_path,
-        whiten=whiten,
         max_new_tokens=max_new_tokens,
         # KIVI params (--method kivi)
         group_size=group_size,
@@ -229,7 +222,6 @@ def run_experiment(
         kv_norm=kv_norm,
         residual_evict_size=residual_evict_size,
         offline_v_hadamard=offline_v_hadamard,
-        online_decoder_refit=online_decoder_refit,
         polar_mode=polar_mode,
         polar_rbits=polar_rbits,
         polar_tbits=polar_tbits,
@@ -338,21 +330,12 @@ def main() -> None:
     parser.add_argument(
         "--offline",
         action="store_true",
-        help="quantpc: use offline encoders (default path offline_projection/projections/{model}_k{K}_v{V}_nowhiten.pt)",
+        help="quantpc: use the complete offline encoder/decoder pair (default path offline_projection/projections/{model}_k{K}_v{V}.pt)",
     )
     parser.add_argument(
         "--offline-proj-path",
         default=None,
-        help="quantpc: explicit offline encoder .pt (overrides the --offline default path)",
-    )
-    parser.add_argument("--online-decoder-refit", default="none",
-                        choices=("none", "k", "v", "both"),
-                        help="quantpc offline only: refit decoder for K, V, or both sides")
-    parser.add_argument(
-        "--whiten",
-        action="store_true",
-        help="quantpc: rotate K/V into the query-whitened basis at runtime; a "
-             "folded projection already has this baked into its stored pair",
+        help="quantpc: explicit offline encoder/decoder pair .pt (overrides the --offline default path)",
     )
     parser.add_argument("--max-new-tokens", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42)
@@ -361,8 +344,8 @@ def main() -> None:
     parser.add_argument("--polar-rbits", type=int, default=3)
     parser.add_argument("--polar-tbits", type=int, default=3)
     parser.add_argument("--polar-vbits", type=int, default=2)
-    parser.add_argument("--decoder-ridge", type=float, default=1e-2,
-                        help="override the online decoder ridge (default 1e-2; offline PTs are fitted with 1e-3)")
+    parser.add_argument("--decoder-ridge", type=float, default=1e-3,
+                        help="override the online decoder ridge (default 1e-3; offline PTs are fitted with 1e-3)")
     args = parser.parse_args()
     if args.k_bits is None:
         args.k_bits = 2 if args.method == "kivi" else 320
@@ -378,7 +361,6 @@ def main() -> None:
     offline_proj_path = resolve_offline_proj_path(
         args.method, args.offline, args.offline_proj_path,
         model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,
-        whiten=args.whiten,
     )
     output_path = args.output
     if output_path is None:
@@ -386,8 +368,6 @@ def main() -> None:
         tag = output_tag(
             args.method, args.k_bits, args.v_bits, args.num_bits,
             offline=(args.offline or args.offline_proj_path is not None),
-            whiten=args.whiten if args.method == "quantpc" else None,
-            online_decoder_refit=args.online_decoder_refit,
         )
         output_path = str(Path("results/niah") / model_key / tag / "results.json")
     run_experiment(
@@ -418,9 +398,7 @@ def main() -> None:
         residual_evict_size=args.residual_evict_size,
         offline_v_hadamard=args.offline_v_hadamard,
         offline_proj_path=offline_proj_path,
-        whiten=args.whiten,
         max_new_tokens=args.max_new_tokens,
-        online_decoder_refit=args.online_decoder_refit,
         polar_mode=args.polar_mode,
         polar_rbits=args.polar_rbits,
         polar_tbits=args.polar_tbits,

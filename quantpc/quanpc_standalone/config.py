@@ -25,14 +25,6 @@ class StandaloneConfig:
     exp_bits: int = 4
     seed: int = 0
 
-    # Rotate K into the query-whitened basis and V into the o_proj-whitened one
-    # before quantizing. Exact for an unquantized run; it only redistributes
-    # quantization error. Applies to both sides and every layer -- an offline
-    # projection folds the same rotation into its stored pair instead, which is
-    # the configuration to prefer: applied at runtime this costs 5-6% of prefill
-    # and wins nothing on either code width.
-    whiten: bool = False
-
     # Per-token CUDA decode.
     use_pruning: bool = True
     prune_mode: int = 3

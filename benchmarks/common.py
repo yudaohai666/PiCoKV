@@ -59,31 +59,22 @@ def resolve_offline_proj_path(
     model_name: str,
     k_bits: int,
     v_bits: int,
-    whiten: bool = False,
 ) -> Optional[str]:
-    """Return the effective offline encoder .pt path, or None for online.
+    """Return the effective offline encoder/decoder pair path, or None for online.
 
     Offline is requested when ``--offline`` is set or an explicit path is given
     (quantpc only). With no explicit path, the default is derived from the model
-    tag and bits: ``offline_projection/projections/{model_tag}_k{k}_v{v}_nowhiten.pt``. Raises
+    tag and bits: ``offline_projection/projections/{model_tag}_k{k}_v{v}.pt``. Raises
     a clear error when the resolved file is missing. Offline projections already
-    contain the complete fitted basis, so runtime whitening is intentionally
-    rejected rather than combining incompatible bases.
+    contain the complete fitted basis.
     """
     if method != "quantpc":
         return None
     if not offline and offline_proj_path is None:
         return None
-    if whiten:
-        raise ValueError(
-            "offline projection and runtime --whiten cannot be combined: "
-            "offline PTs use the model basis, while whitened PTs already fold "
-            "the whitening into encoder/decoder. Use offline without --whiten "
-            "or online with --whiten."
-        )
     model_tag = Path(model_name.rstrip("/")).name
     path = offline_proj_path or str(
-        _REPO_ROOT / "offline_projection" / "projections" / f"{model_tag}_k{k_bits}_v{v_bits}_nowhiten.pt"
+        _REPO_ROOT / "offline_projection" / "projections" / f"{model_tag}_k{k_bits}_v{v_bits}.pt"
     )
     if not Path(path).exists():
         raise FileNotFoundError(
@@ -111,14 +102,11 @@ def output_tag(
     num_bits: int = 2,
     *,
     offline: bool = False,
-    whiten: bool | None = None,
-    online_decoder_refit: str = "none",
 ) -> str:
     """Directory/file tag keyed by method + KV bits, shared across runners.
 
-    Passing ``whiten`` switches quantpc to the full naming --
-    ``{online|offline}_k{K}_v{V}_{whiten|nowhiten}``. The local window is fixed
-    at 256 across the current experiments, so it is intentionally omitted.
+    The local window is fixed at 256 across the current experiments, so it is
+    intentionally omitted.
     """
     if method == "kivi":
         return f"kivi_k{k_bits}_v{v_bits}"
@@ -126,17 +114,8 @@ def output_tag(
         return f"oscar_int{num_bits}"
     if method != "quantpc":
         return method
-    if whiten is not None:
-        mode = "offline" if offline else "online"
-        tag = f"{mode}_k{k_bits}_v{v_bits}_{'whiten' if whiten else 'nowhiten'}"
-        refit_suffix = {"none": "", "k": "_krefit", "v": "_vrefit", "both": "_refit"}
-        if online_decoder_refit not in refit_suffix:
-            raise ValueError(f"unknown online_decoder_refit: {online_decoder_refit}")
-        return tag + refit_suffix[online_decoder_refit]
-    tag = f"quantpc_k{k_bits}_v{v_bits}"
-    if offline:
-        tag += "_offline"
-    return tag
+    mode = "offline" if offline else "online"
+    return f"quantpc_{mode}_k{k_bits}_v{v_bits}"
 
 
 def _load_kivi_model(
@@ -311,9 +290,7 @@ def _load_quantpc_model(
     use_pruning: bool,
     prune_mode: int,
     log_eps: float,
-    whiten: bool = False,
     offline_proj_path: Optional[str] = None,
-    online_decoder_refit: str = "none",
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
     """Load a HF model patched with the quanpc_standalone online-projection path.
 
@@ -344,44 +321,24 @@ def _load_quantpc_model(
         use_pruning=use_pruning,
         prune_mode=prune_mode,
         log_eps=log_eps,
-        whiten=whiten,
     )
 
     key_encoders = value_encoders = None
     key_decoders = value_decoders = None
     if offline_proj_path is not None:
-        if whiten:
-            raise ValueError(
-                "offline projection and runtime whitening cannot be combined; "
-                "use a folded offline PT without --whiten, or use online whitening."
-            )
         _projs = load_offline_projections(offline_proj_path)
-        # The offline projection contains both encoders and decoders.  Refit is
-        # controlled globally by side: the selected side(s) keep the offline
-        # encoder but solve the decoder online for the current context.
-        refit_sides = {
-            "none": (), "k": ("key",), "v": ("value",),
-            "both": ("key", "value"),
-        }[online_decoder_refit]
-        stored_sides = tuple(
-            side for side in ("key", "value") if side not in refit_sides
-        )
-        for side in stored_sides:
+        for side in ("key", "value"):
             if f"{side}_decoder" not in _projs:
                 raise ValueError(
-                    f"{offline_proj_path} stores encoders only; rebuild it with "
+                    f"{offline_proj_path} must contain both encoders and decoders; "
+                    "rebuild it with "
                     "offline_projection/create_offline_projections.py"
                 )
         key_encoders = _projs["key_encoder"]
         value_encoders = _projs["value_encoder"]
-        if "key" in stored_sides:
-            key_decoders = _projs["key_decoder"]
-        if "value" in stored_sides:
-            value_decoders = _projs["value_decoder"]
-        print(
-            f"online decoder refit sides: {refit_sides or '(none, fully offline decoder)'}",
-            flush=True,
-        )
+        key_decoders = _projs["key_decoder"]
+        value_decoders = _projs["value_decoder"]
+        print("offline decoder: fully offline", flush=True)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     # With a single visible GPU, device_map="auto" can offload layers to CPU
@@ -582,7 +539,6 @@ def load_model(
     use_pruning: bool = True,
     prune_mode: int = 3,
     log_eps: float = -10.0,
-    whiten: bool = False,
     group_size: int = 32,
     residual_length: int = 32,
     num_bits: int = 4,
@@ -596,7 +552,6 @@ def load_model(
     polar_rbits: int = 3,
     polar_tbits: int = 3,
     polar_vbits: int = 2,
-    online_decoder_refit: str = "none",
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
     """Load a HF model+tokenizer and return ``(model, tokenizer, make_cache)``.
 
@@ -659,9 +614,7 @@ def load_model(
             use_pruning=use_pruning,
             prune_mode=prune_mode,
             log_eps=log_eps,
-            whiten=whiten,
             offline_proj_path=offline_proj_path,
-            online_decoder_refit=online_decoder_refit,
         )
 
     if method == "polar":
