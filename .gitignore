@@ -19,16 +19,12 @@ dist/
 
 # Generated offline projection artifacts.
 offline_projection/projections/*
-!offline_projection/projections/Llama-3.1-8B-Instruct_k320_v320_nowhiten.pt
-!offline_projection/projections/Llama-3.1-8B-Instruct_k320_v256_nowhiten.pt
-!offline_projection/projections/Llama-3.1-8B-Instruct_k256_v256_nowhiten.pt
-!offline_projection/projections/Llama-3.1-8B-Instruct_k256_v256_whiten.pt
-!offline_projection/projections/Llama-3.1-8B-Instruct_k320_v256_whiten.pt
-!offline_projection/projections/Llama-3.1-8B-Instruct_k320_v320_whiten.pt
-!offline_projection/projections/Qwen3-8B_k320_v256_nowhiten.pt
-!offline_projection/projections/Qwen3-8B_k320_v256_whiten.pt
-!offline_projection/projections/Qwen3-8B_k320_v320_nowhiten.pt
-!offline_projection/projections/Qwen3-8B_k320_v320_whiten.pt
+!offline_projection/projections/Llama-3.1-8B-Instruct_k320_v320.pt
+!offline_projection/projections/Llama-3.1-8B-Instruct_k256_v256.pt
+!offline_projection/projections/Llama-3.1-8B-Instruct_k256_v256_zr20.pt
+!offline_projection/projections/Qwen3-8B_k320_v320.pt
+!offline_projection/projections/Qwen3-8B_k256_v256.pt
+!offline_projection/projections/Qwen3-8B_k256_v256_zr20.pt
 
 # Generated run logs.
 *.log
