@@ -10,7 +10,7 @@ export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 GPU="${GPU:-0}"
-MODEL="${MODEL:-/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Qwen3-8B}"
+MODEL="${MODEL:-/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct}"
 MODEL_TAG="$(basename "${MODEL%/}")"
 BASE_RESULT_DIR="results/niah"
 VIS_DIR="${BASE_RESULT_DIR}/vis"
@@ -34,7 +34,7 @@ METHODS=(
   # kivi
   # oscar
   # polar
-  # flash_attention_2
+  flash_attention_2
   # sdpa
   # eager
 )

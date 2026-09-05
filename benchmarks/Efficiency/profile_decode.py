@@ -34,6 +34,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from benchmarks.common import load_model, resolve_offline_proj_path, seed_everything  # noqa: E402
+from benchmarks.Efficiency.run_efficiency import build_inputs_from_dataset  # noqa: E402
 
 
 def _sync() -> None:
@@ -140,6 +141,8 @@ def main() -> None:
     p.add_argument("--kv-norm", default="1", help="OScaR kv norm (INT2 默认 1)")
     p.add_argument("--residual-evict-size", type=int, default=256, help="OScaR residual evict size (INT2 默认 256)")
     p.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
+    p.add_argument("--dataset", default=None,
+                   help="path to a .jsonl file with 'text' fields; uses real text instead of random token ids")
     p.add_argument("--sort", default=None, choices=["cpu", "cuda"],
                    help="override sort key: cpu=self_cpu_time_total, cuda=self_cuda_time_total")
     # ── PolarQuant params (--method polar) ──
@@ -163,7 +166,7 @@ def main() -> None:
         model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,
         whiten=args.whiten,
     )
-    model, _tok, make_cache = load_model(
+    model, tokenizer, make_cache = load_model(
         args.model,
         method=args.method,
         # quantpc KV-cache params (--method quantpc)
@@ -198,7 +201,12 @@ def main() -> None:
     )
     device = model.device
     vocab = model.config.vocab_size
-    input_ids = torch.randint(1, vocab, (args.batch, args.length), device=device, dtype=torch.long)
+    if args.dataset:
+        input_ids = build_inputs_from_dataset(
+            args.dataset, tokenizer, args.batch, args.length, device,
+        )
+    else:
+        input_ids = torch.randint(1, vocab, (args.batch, args.length), device=device, dtype=torch.long)
 
     activities = [ProfilerActivity.CPU]
     if torch.cuda.is_available():

@@ -27,6 +27,7 @@ import statistics
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 import torch
 
@@ -70,6 +71,34 @@ def _peak_gb() -> float:
 def build_inputs(vocab_size: int, batch_size: int, prompt_len: int, device) -> torch.Tensor:
     # Content is irrelevant for latency; use random in-range ids (avoid id 0/pad).
     return torch.randint(1, vocab_size, (batch_size, prompt_len), device=device, dtype=torch.long)
+
+
+def build_inputs_from_dataset(
+    dataset_path: str,
+    tokenizer,
+    batch_size: int,
+    prompt_len: int,
+    device,
+) -> torch.Tensor:
+    """Build a real-text input_ids tensor from a .jsonl dataset.
+
+    Concatenates all ``text`` fields, tokenizes, and slices exactly
+    ``prompt_len`` tokens. Falls back to random ids if the dataset does
+    not contain enough tokens.
+    """
+    texts = []
+    with open(dataset_path) as f:
+        for line in f:
+            obj = json.loads(line)
+            if "text" in obj:
+                texts.append(obj["text"])
+    combined = " ".join(texts)
+    token_ids = tokenizer.encode(combined, add_special_tokens=False)
+    if len(token_ids) < prompt_len:
+        # Not enough real text: fall back to random ids.
+        return build_inputs(tokenizer.vocab_size, batch_size, prompt_len, device)
+    ids = torch.tensor(token_ids[:prompt_len], dtype=torch.long, device=device)
+    return ids.unsqueeze(0).expand(batch_size, -1).contiguous()
 
 
 def _time_generate(model, input_ids, max_new_tokens, make_cache) -> float:
@@ -214,14 +243,16 @@ def _decode_peak_gb(model, input_ids, decode_tokens, make_cache, device) -> floa
     return peak
 
 
-def measure(model, make_cache, vocab_size, batch_size, prompt_len, decode_tokens, warmup, repeats, device, mem_only=False) -> dict:
+def measure(model, make_cache, vocab_size, batch_size, prompt_len, decode_tokens, warmup, repeats, device, mem_only=False, input_ids: Optional[torch.Tensor] = None) -> dict:
     """Benchmark one prompt length.
 
     ``mem_only=True``  -> memory-only mode: measure peak GPU memory, skip latency.
     ``mem_only=False`` -> latency-only mode: measure prefill/decode latency, skip
                           peak memory (avoids the extra reset+generate passes).
+    ``input_ids``      -> pre-built real-text token ids; falls back to random if None.
     """
-    input_ids = build_inputs(vocab_size, batch_size, prompt_len, device)
+    if input_ids is None:
+        input_ids = build_inputs(vocab_size, batch_size, prompt_len, device)
 
     # Warmup (kernel compile / cuBLAS autotune / allocator growth), not timed.
     for _ in range(warmup):
@@ -263,7 +294,7 @@ def run(args) -> None:
         model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,
         whiten=args.whiten,
     )
-    model, _tokenizer, make_cache = load_model(
+    model, tokenizer, make_cache = load_model(
         args.model,
         method=args.method,
         # quantpc KV-cache params (--method quantpc)
@@ -299,12 +330,22 @@ def run(args) -> None:
     device = model.device
     vocab_size = model.config.vocab_size
 
+    # Pre-tokenize real dataset once (shared across all lengths).
+    dataset_input_ids: dict[int, torch.Tensor] = {}
+    if args.dataset:
+        for length in parse_int_list(args.lengths):
+            dataset_input_ids[length] = build_inputs_from_dataset(
+                args.dataset, tokenizer, args.batch_size, length, device,
+            )
+
     results = {}
     for length in parse_int_list(args.lengths):
+        real_ids = dataset_input_ids.get(length) if args.dataset else None
         r = measure(
             model, make_cache, vocab_size, args.batch_size, length,
             args.decode_tokens, args.warmup, args.repeats, device,
             mem_only=args.mem_only,
+            input_ids=real_ids,
         )
         results[str(length)] = r
         if args.mem_only:
@@ -381,6 +422,8 @@ def main() -> None:
     parser.add_argument("--compare", default=None, help="aggregate all *.json under this dir into a table and exit")
     parser.add_argument("--model", default="/data/Llama-3.1-8B-Instruct")
     parser.add_argument("--method", default="quantpc", help="quantpc | oscar | kivi | flash_attention_2 | sdpa | eager")
+    parser.add_argument("--dataset", default=None,
+                        help="path to a .jsonl file with 'text' fields; uses real text instead of random token ids")
     parser.add_argument("--lengths", default="4096,16384,32768", help="comma-separated prompt lengths")
     parser.add_argument("--decode-tokens", type=int, default=64, help="new tokens to generate for decode timing")
     parser.add_argument("--batch-size", type=int, default=1)

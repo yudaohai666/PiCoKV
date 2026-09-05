@@ -27,6 +27,8 @@ BATCH="${BATCH:-1}"         # prefill/decode batch size
 WARMUP="${WARMUP:-2}"       # untimed decode steps before profiling
 ACTIVE="${ACTIVE:-64}"      # profiled decode steps
 ROWS="${ROWS:-30}"          # key_averages table rows
+# Optional real-text dataset (.jsonl with "text" fields). Empty = use random token ids.
+DATASET="${DATASET:-${SCRIPT_DIR}/datasets/PaulGrahamEssays.jsonl}"
 # Override the auto trace file (results/efficiency/prof/{method}_{LENGTH}.json).
 # Needed when the same method is profiled from several processes at once.
 OUTPUT_PATH="${OUTPUT_PATH:-}"
@@ -119,5 +121,6 @@ for method in "${METHODS[@]}"; do
   CUDA_VISIBLE_DEVICES=${GPU} python "${SCRIPT_DIR}/profile_decode.py" \
     --model "${MODEL}" --method "${method}" \
     --length "${LENGTH}" --batch "${BATCH}" --warmup "${WARMUP}" --active "${ACTIVE}" --rows "${ROWS}" \
+    ${DATASET:+--dataset "${DATASET}"} \
     --trace "${TRACE}" "${METHOD_ARGS[@]}"
 done

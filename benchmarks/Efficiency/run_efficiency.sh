@@ -18,18 +18,22 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # max_memory_allocated, which the allocator mode does not move (measured shift
 # ~1 MiB of 1450), so arms recorded before and after this line stay comparable.
 
-GPU="${GPU:-7}"
+GPU="${GPU:-0}"
 MODEL="${MODEL:-/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct}"
 MODEL_TAG="$(basename "${MODEL%/}")"
 RESULT_DIR="results/efficiency"
 mkdir -p "${RESULT_DIR}"
 
 # ── benchmark runtime params ──
+# LENGTHS="${LENGTHS:-131072}"
 LENGTHS="${LENGTHS:-131072}"
+
 DECODE_TOKENS="${DECODE_TOKENS:-64}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 WARMUP="${WARMUP:-2}"
 REPEATS="${REPEATS:-4}"
+# Optional real-text dataset (.jsonl with "text" fields). Empty = use random token ids.
+DATASET="${DATASET:-${SCRIPT_DIR}/datasets/PaulGrahamEssays.jsonl}"
 # Override the auto result file (results/efficiency/{TAG}.json). Needed when one
 # method is split across processes (e.g. one GPU per length): otherwise every
 # process writes the same file. --compare still scans the whole RESULT_DIR.
@@ -52,7 +56,8 @@ METHODS=(
 K_BITS="${K_BITS:-320}"; V_BITS="${V_BITS:-320}"
 SINK="${SINK:-64}"; LOCAL="${LOCAL:-256}"
 EXP_BITS="${EXP_BITS:-4}"; EAS="${EAS:-0.01}"; ZEROROPE="${ZEROROPE:-20}"
-USE_OFFLINE="${USE_OFFLINE:-0}"
+NO_PRUNING="${NO_PRUNING:-0}"
+USE_OFFLINE="${USE_OFFLINE:-1}"
 WHITEN="${WHITEN:-0}"
 ONLINE_DECODER_REFIT="${ONLINE_DECODER_REFIT:-none}"
 # 1e-3 == constants.ONLINE_DECODER_RIDGE, i.e. the shipped path. Do NOT raise this
@@ -106,6 +111,7 @@ build_method_args() {
       [ "${EXP_BITS}" != "4" ]  && TAG+="_exp${EXP_BITS}"
       [ "${ZEROROPE}" != "20" ] && TAG+="_zr${ZEROROPE}"
       [ "${EAS}" != "0.01" ]    && TAG+="_eas${EAS}"
+      [ "${NO_PRUNING}" = "1" ] && METHOD_ARGS+=(--no-pruning) && TAG+="_noprune"
       # A false `[ ]` above leaves the branch's status at 1, which would trip
       # `set -e` at the call site if this script ever gains it. `:` resets it.
       :
@@ -137,6 +143,7 @@ for method in "${METHODS[@]}"; do
     --model "${MODEL}" --method "${method}" \
     --lengths "${LENGTHS}" --decode-tokens "${DECODE_TOKENS}" \
     --batch-size "${BATCH_SIZE}" --warmup "${WARMUP}" --repeats "${REPEATS}" \
+    ${DATASET:+--dataset "${DATASET}"} \
     --output "${out_file}" "${METHOD_ARGS[@]}"
 done
 
