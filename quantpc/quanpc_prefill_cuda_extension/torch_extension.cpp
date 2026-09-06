@@ -77,6 +77,26 @@ std::vector<at::Tensor> quanpc_prefill_blockk_fast_fn(
       solve_mode);
 }
 
+std::vector<at::Tensor> quanpc_prefill_blockk_fixed_fn(
+    at::Tensor full_states,
+    at::Tensor encoders,
+    at::Tensor decoders,
+    int64_t glob_start,
+    int64_t glob_len,
+    int64_t zerorope,
+    bool apply_zerorope,
+    bool pack_key_layout) {
+  return quanpc_prefill_blockk_fixed(
+      full_states,
+      encoders,
+      decoders,
+      glob_start,
+      glob_len,
+      zerorope,
+      apply_zerorope,
+      pack_key_layout);
+}
+
 std::vector<at::Tensor> quanpc_prefill_select_eas_fn(
     at::Tensor key_err,
     at::Tensor value_err,
@@ -138,6 +158,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("quanpc_prefill_quantize_fn", &quanpc_prefill_quantize_fn, "QuanPC prefill projection quantization");
   m.def("quanpc_prefill_quantize_pack_fn", &quanpc_prefill_quantize_pack_fn, "QuanPC fused prefill quantization and token/code packing");
   m.def("quanpc_prefill_blockk_fast_fn", &quanpc_prefill_blockk_fast_fn, "QuanPC fast fused block-k prefill learning and quantization");
+  m.def("quanpc_prefill_blockk_fixed_fn", &quanpc_prefill_blockk_fixed_fn, "QuanPC fully fused fixed-projection cascade quantization and packing");
   m.def("quanpc_prefill_select_eas_fn", &quanpc_prefill_select_eas_fn, "QuanPC prefill EAS selection");
   m.def("quanpc_prefill_pack_key_transposed_fn", &quanpc_prefill_pack_key_transposed_fn, "QuanPC pack int8 key codes to [B,H,C/64,L]");
   m.def("quanpc_prefill_pack_value_token_fn", &quanpc_prefill_pack_value_token_fn, "QuanPC pack int8 value codes to [B,H,L,C/64]");

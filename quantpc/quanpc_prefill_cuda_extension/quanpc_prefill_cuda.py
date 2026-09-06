@@ -221,6 +221,38 @@ def blockk_fast_cuda(
     )
 
 
+def blockk_fixed_cuda(
+    full_states,
+    encoders,
+    decoders,
+    glob_start: int,
+    glob_len: int,
+    zerorope: int = 0,
+    apply_zerorope: bool = False,
+    pack_key_layout: bool = True,
+    verbose: bool = False,
+):
+    """Fully fused fixed-projection cascade (offline + no-refit path).
+
+    One kernel walks the whole group chain per token with the residual held in
+    registers, writes packed codes directly in the pack_key/pack_value layout,
+    and returns the per-token residual error.  ``encoders``/``decoders`` are
+    the stored ``[B,H,C,D]`` block-32 matrices.  Returns ``(packed, err)``.
+    """
+    ext = load_quanpc_prefill_extension(verbose)
+    packed, err = ext.quanpc_prefill_blockk_fixed_fn(
+        full_states.contiguous(),
+        encoders.contiguous(),
+        decoders.contiguous(),
+        int(glob_start),
+        int(glob_len),
+        int(zerorope),
+        bool(apply_zerorope),
+        bool(pack_key_layout),
+    )
+    return packed, err
+
+
 def select_eas_cuda(key_err, value_err, eas_size: int, verbose: bool = False):
     ext = load_quanpc_prefill_extension(verbose)
     return ext.quanpc_prefill_select_eas_fn(key_err.contiguous(), value_err.contiguous(), int(eas_size))

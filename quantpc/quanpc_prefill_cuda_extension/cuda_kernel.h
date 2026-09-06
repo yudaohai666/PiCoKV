@@ -39,6 +39,16 @@ std::vector<at::Tensor> quanpc_prefill_blockk_fast(
     int64_t power_iters,
     int64_t solve_mode);
 
+std::vector<at::Tensor> quanpc_prefill_blockk_fixed(
+    at::Tensor full_states,
+    at::Tensor encoders,
+    at::Tensor decoders,
+    int64_t glob_start,
+    int64_t glob_len,
+    int64_t zerorope,
+    bool apply_zerorope,
+    bool pack_key_layout);
+
 std::vector<at::Tensor> quanpc_prefill_select_eas(
     at::Tensor key_err,
     at::Tensor value_err,

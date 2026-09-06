@@ -33,6 +33,12 @@ class StandaloneConfig:
     # and wins nothing on either code width.
     whiten: bool = False
 
+    # Use the fully fused CUDA cascade kernel for offline+no-refit sides
+    # (stored decoder, no runtime whitening).  Numerically equivalent to the
+    # reference loop up to fp32 accumulation order; ~5x faster prefill
+    # preparation.  QUANPC_DISABLE_FUSED_QUANT=1 overrides this globally.
+    use_fused_quant: bool = True
+
     # Per-token CUDA decode.
     use_pruning: bool = True
     prune_mode: int = 3
@@ -50,6 +56,7 @@ class StandaloneConfig:
             "zerorope": self.zerorope,
             "exp_bits": self.exp_bits,
             "seed": self.seed,
+            "use_fused_quant": self.use_fused_quant,
         }
 
     def decode_kwargs(self) -> dict[str, object]:

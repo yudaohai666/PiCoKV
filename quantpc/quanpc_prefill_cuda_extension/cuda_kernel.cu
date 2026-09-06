@@ -7,6 +7,9 @@
 #include <cub/cub.cuh>
 #include <cuda.h>
 #include <cuda_bf16.h>
+#include <mma.h>
+
+namespace wmma = nvcuda::wmma;
 #include <cuda_runtime.h>
 
 #include <cmath>
@@ -2720,6 +2723,707 @@ std::vector<at::Tensor> quanpc_prefill_quantize_pack(
   return {packed, projection, err};
 }
 
+
+// Fully fused fixed-projection cascade (offline + no-refit path).
+//
+// With stored encoders AND decoders, the block-32 cascade has no cross-token
+// dependency left: the decoder least-squares solve was the only global
+// reduction, and it is now a constant.  Each token's group chain
+// (score -> sign -> residual update) is independent, so one thread owns one
+// token's whole 128-dim residual in registers and walks all groups without
+// touching HBM.  This removes the per-group residual read/write traffic that
+// both the PyTorch loop and the blockk_fast launcher pay (3 passes/group).
+//
+// Numerics deliberately replicate the reference PyTorch path's two rounding
+// points so the stored decoders stay calibrated to the codes they were fit
+// against:
+//   1. scores are rounded to bf16 before sign (reference: bf16-output matmul);
+//   2. the residual is rounded to bf16 after every group update
+//      (reference: baddbmm with bf16 output).
+// The fp32 accumulation ORDER differs from cuBLAS, so codes are not
+// guaranteed bit-identical: scores within a few fp32 ulps of zero can flip.
+// Those flips are quality-neutral (near-zero directions) but mean validation
+// must use agreement rate, not torch.equal.  err is a sequential fp32 sum,
+// which also differs from torch.linalg.vector_norm's tree order.
+constexpr int kFixedDim = 128;
+constexpr int kFixedGroupBits = 32;
+constexpr int kFixedThreads = 256;
+
+template <typename scalar_t>
+__global__ void __launch_bounds__(kFixedThreads)
+blockk_fixed_d128_kernel(
+    const scalar_t *__restrict__ full_states,
+    const scalar_t *__restrict__ encoders,
+    const scalar_t *__restrict__ decoders,
+    int64_t *__restrict__ packed_out,
+    float *__restrict__ err,
+    int rows,
+    int total_len,
+    int glob_start,
+    int glob_len,
+    int code_dim,
+    int zerorope,
+    bool apply_zerorope,
+    bool key_layout) {
+  const int token = blockIdx.x * kFixedThreads + threadIdx.x;
+  const int row = blockIdx.y;
+  const bool active = token < glob_len;
+  const int groups = code_dim / kFixedGroupBits;
+  const int words = code_dim >> 6;
+  const int half = kFixedDim / 2;
+
+  __shared__ float e_smem[kFixedGroupBits * kFixedDim];
+  __shared__ float d_smem[kFixedGroupBits * kFixedDim];
+
+  // Load this token's residual row once: global slice + zerorope masking,
+  // fused here instead of the reference path's clone + in-place zeroing.
+  float r[kFixedDim];
+  const int64_t src =
+      (static_cast<int64_t>(row) * total_len + glob_start + token) * kFixedDim;
+  #pragma unroll
+  for (int d = 0; d < kFixedDim; ++d) {
+    const bool zero =
+        apply_zerorope && (d < zerorope || (d >= half && d < half + zerorope));
+    r[d] = (active && !zero) ? load_scalar(full_states, src + d) : 0.0f;
+  }
+
+  const int64_t mat_row = static_cast<int64_t>(row) * code_dim * kFixedDim;
+  uint64_t word = 0;
+  for (int g = 0; g < groups; ++g) {
+    // Stage this group's encoder/decoder as fp32 in shared memory.  Every
+    // thread reads the same addresses during the FMA loops, so these are
+    // broadcast (conflict-free) accesses.
+    const scalar_t *e_g =
+        encoders + mat_row + static_cast<int64_t>(g) * kFixedGroupBits * kFixedDim;
+    const scalar_t *d_g =
+        decoders + mat_row + static_cast<int64_t>(g) * kFixedGroupBits * kFixedDim;
+    for (int i = threadIdx.x; i < kFixedGroupBits * kFixedDim; i += kFixedThreads) {
+      e_smem[i] = load_scalar(e_g, i);
+      d_smem[i] = load_scalar(d_g, i);
+    }
+    __syncthreads();
+
+    if (active) {
+      // b-outer / d-inner-by-4: one float4 LDS feeds four FMAs, and the 32
+      // independent accumulator chains give the scheduler enough ILP to hide
+      // FMA latency at 2 warps/scheduler.
+      float acc[kFixedGroupBits];
+      #pragma unroll
+      for (int b = 0; b < kFixedGroupBits; ++b) {
+        float a = 0.0f;
+        #pragma unroll
+        for (int d = 0; d < kFixedDim; d += 4) {
+          const float4 e4 =
+              *reinterpret_cast<const float4 *>(&e_smem[b * kFixedDim + d]);
+          a = fmaf(r[d + 0], e4.x, a);
+          a = fmaf(r[d + 1], e4.y, a);
+          a = fmaf(r[d + 2], e4.z, a);
+          a = fmaf(r[d + 3], e4.w, a);
+        }
+        acc[b] = a;
+      }
+
+      // Strict {-1,+1} with the reference rounding: score through bf16 first,
+      // exact zero maps to +1.  Bit packing follows the pack kernels'
+      // per-side convention: key sets a bit iff the code is negative, value
+      // sets it iff the code is positive.
+      float c[kFixedGroupBits];
+      #pragma unroll
+      for (int b = 0; b < kFixedGroupBits; ++b) {
+        const float score = round_like_scalar<scalar_t>(acc[b]);
+        c[b] = (score < 0.0f) ? -1.0f : 1.0f;
+        const bool bit = key_layout ? (score < 0.0f) : (score > 0.0f);
+        if (bit) {
+          word |= (uint64_t{1} << ((g & 1) * kFixedGroupBits + b));
+        }
+      }
+
+      #pragma unroll
+      for (int d = 0; d < kFixedDim; d += 4) {
+        float4 u = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        #pragma unroll
+        for (int b = 0; b < kFixedGroupBits; ++b) {
+          const float4 d4 =
+              *reinterpret_cast<const float4 *>(&d_smem[b * kFixedDim + d]);
+          const float cb = c[b];
+          u.x = fmaf(cb, d4.x, u.x);
+          u.y = fmaf(cb, d4.y, u.y);
+          u.z = fmaf(cb, d4.z, u.z);
+          u.w = fmaf(cb, d4.w, u.w);
+        }
+        r[d + 0] = round_like_scalar<scalar_t>(r[d + 0] - u.x);
+        r[d + 1] = round_like_scalar<scalar_t>(r[d + 1] - u.y);
+        r[d + 2] = round_like_scalar<scalar_t>(r[d + 2] - u.z);
+        r[d + 3] = round_like_scalar<scalar_t>(r[d + 3] - u.w);
+      }
+    }
+    __syncthreads();
+
+    // Two 32-bit groups make one packed uint64 word, written in exactly the
+    // layouts pack_key_transposed / pack_value_token produce.
+    if ((g & 1) == 1 && active) {
+      const int w = g >> 1;
+      const int64_t addr =
+          key_layout
+              ? (static_cast<int64_t>(row) * words + w) * glob_len + token
+              : (static_cast<int64_t>(row) * glob_len + token) * words + w;
+      packed_out[addr] = static_cast<int64_t>(word);
+      word = 0;
+    }
+  }
+
+  if (active) {
+    float norm2 = 0.0f;
+    #pragma unroll
+    for (int d = 0; d < kFixedDim; ++d) {
+      norm2 = fmaf(r[d], r[d], norm2);
+    }
+    err[static_cast<int64_t>(row) * glob_len + token] = sqrtf(fmaxf(norm2, 0.0f));
+  }
+}
+
+
+// Tensor-core (wmma) variant of the fixed cascade.  The SIMT kernel above is
+// issue/latency-bound at ~15 TFLOPS (240 regs/thread -> 1 block/SM); the mma
+// path keeps the residual tile in shared memory, runs both per-group matmuls
+// on bf16 tensor cores, and reaches 4 blocks/SM.  Numerics are identical in
+// structure: bf16 products are exact, accumulation is fp32, scores are
+// rounded to bf16 before sign, and the residual is rounded to bf16 after
+// every group update.
+constexpr int kFixedWmmaTile = 64;
+constexpr int kFixedRStride = 136;  // bf16 elements per residual row (16B-multiple)
+constexpr int kFixedCStride = 40;   // bf16 elements per code row
+constexpr int kFixedYStride = 132;  // fp32 elements per score/update row
+constexpr int kFixedSmemBytes =
+    kFixedWmmaTile * (kFixedRStride * 2 + kFixedCStride * 2 + kFixedYStride * 4) +
+    2 * 32 * kFixedRStride * 2;
+
+__global__ void __launch_bounds__(kFixedThreads)
+blockk_fixed_wmma_d128_kernel(
+    const __nv_bfloat16 *__restrict__ full_states,
+    const __nv_bfloat16 *__restrict__ encoders,
+    const __nv_bfloat16 *__restrict__ decoders,
+    int64_t *__restrict__ packed_out,
+    float *__restrict__ err,
+    int rows,
+    int total_len,
+    int glob_start,
+    int glob_len,
+    int code_dim,
+    int zerorope,
+    bool apply_zerorope,
+    bool key_layout,
+    int phase_mask) {  // debug ablation: bit0 score, bit1 sign, bit2 update, bit3 residual, bit4 staging
+  constexpr int kDim = 128;
+  constexpr int kGb = 32;
+  const int tile_token = blockIdx.x * kFixedWmmaTile;
+  const int row = blockIdx.y;
+  const int groups = code_dim / kGb;
+  const int words = code_dim >> 6;
+  const int warp = threadIdx.x >> 5;
+
+  extern __shared__ unsigned char fixed_smem[];
+  __nv_bfloat16 *r_smem = reinterpret_cast<__nv_bfloat16 *>(fixed_smem);
+  __nv_bfloat16 *c_smem = r_smem + kFixedWmmaTile * kFixedRStride;
+  float *yu_smem = reinterpret_cast<float *>(c_smem + kFixedWmmaTile * kFixedCStride);
+  // Per-group staged encoder/decoder tiles.  wmma B-fragment loads from
+  // global memory compile to per-lane gathers with L2 latency on the mma
+  // critical path; staging them in smem turns them into ldmatrix.
+  __nv_bfloat16 *e_smem =
+      reinterpret_cast<__nv_bfloat16 *>(yu_smem + kFixedWmmaTile * kFixedYStride);
+  __nv_bfloat16 *d_smem = e_smem + kGb * kFixedRStride;
+
+  // Load the residual tile once: global slice + zerorope masking fused.
+  for (int i = threadIdx.x; i < kFixedWmmaTile * kDim; i += kFixedThreads) {
+    const int t = i >> 7;
+    const int d = i & (kDim - 1);
+    const int token = tile_token + t;
+    __nv_bfloat16 v = __float2bfloat16(0.0f);
+    if (token < glob_len) {
+      const bool zero =
+          apply_zerorope && (d < zerorope || (d >= kDim / 2 && d < kDim / 2 + zerorope));
+      if (!zero) {
+        v = full_states[
+            (static_cast<int64_t>(row) * total_len + glob_start + token) * kDim + d];
+      }
+    }
+    r_smem[t * kFixedRStride + d] = v;
+  }
+  __syncthreads();
+
+  // Lane 0 of each warp accumulates the packed words of the warp's tokens.
+  uint64_t packed_words[kFixedWmmaTile / 8] = {};
+  for (int g = 0; g < groups; ++g) {
+    const __nv_bfloat16 *e_g =
+        encoders + (static_cast<int64_t>(row) * code_dim + g * kGb) * kDim;
+    const __nv_bfloat16 *d_g =
+        decoders + (static_cast<int64_t>(row) * code_dim + g * kGb) * kDim;
+    // Coalesced stage of both 32x128 tiles into padded smem rows.
+    if (phase_mask & 16)
+    for (int i = threadIdx.x; i < kGb * (kDim / 8); i += kFixedThreads) {
+      const int rr = i >> 4;
+      const int cc = i & 15;
+      reinterpret_cast<uint4 *>(e_smem)[rr * (kFixedRStride / 8) + cc] =
+          reinterpret_cast<const uint4 *>(e_g)[i];
+      reinterpret_cast<uint4 *>(d_smem)[rr * (kFixedRStride / 8) + cc] =
+          reinterpret_cast<const uint4 *>(d_g)[i];
+    }
+    __syncthreads();
+
+    // Y[64x32] = R[64x128] @ E_g^T;  E_g is [32][128] row-major, i.e. the
+    // matrix_b operand in col-major with ldm=128.  Warp w owns output tile
+    // (w&3, w>>2) of the 4x2 tile grid.
+    if (phase_mask & 1) {
+      wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
+      wmma::fill_fragment(acc, 0.0f);
+      const int tw = (warp & 3) * 16;
+      const int tn = (warp >> 2) * 16;
+      #pragma unroll
+      for (int k = 0; k < kDim; k += 16) {
+        wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> af;
+        wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> bf;
+        wmma::load_matrix_sync(af, &r_smem[tw * kFixedRStride + k], kFixedRStride);
+        wmma::load_matrix_sync(bf, e_smem + tn * kFixedRStride + k, kFixedRStride);
+        wmma::mma_sync(acc, af, bf, acc);
+      }
+      wmma::store_matrix_sync(&yu_smem[tw * kFixedYStride + tn], acc, kFixedYStride,
+                              wmma::mem_row_major);
+    }
+    __syncthreads();
+
+    // Strict {-1,+1} sign with the reference bf16 score rounding; per-side
+    // bit convention (key: negative; value: positive).  One warp per 8
+    // tokens: lane b reads score b of the token (conflict-free), and
+    // __ballot_sync assembles all 32 code bits in one instruction.  Lane 0
+    // accumulates each token's word and packs two groups per uint64.
+    if (phase_mask & 2) {
+      const int lane = threadIdx.x & 31;
+      #pragma unroll
+      for (int tl = 0; tl < kFixedWmmaTile / 8; ++tl) {
+        const int t = warp * (kFixedWmmaTile / 8) + tl;
+        const float score = __bfloat162float(
+            __float2bfloat16(yu_smem[t * kFixedYStride + lane]));
+        c_smem[t * kFixedCStride + lane] =
+            __float2bfloat16((score < 0.0f) ? -1.0f : 1.0f);
+        const bool bit = key_layout ? (score < 0.0f) : (score > 0.0f);
+        const unsigned mask = __ballot_sync(0xffffffffu, bit);
+        if (lane == 0) {
+          packed_words[tl] |= (static_cast<uint64_t>(mask) << ((g & 1) * kGb));
+        }
+      }
+      if ((g & 1) == 1 && lane == 0) {
+        const int w = g >> 1;
+        #pragma unroll
+        for (int tl = 0; tl < kFixedWmmaTile / 8; ++tl) {
+          const int token = tile_token + warp * (kFixedWmmaTile / 8) + tl;
+          if (token < glob_len) {
+            const int64_t addr =
+                key_layout
+                    ? (static_cast<int64_t>(row) * words + w) * glob_len + token
+                    : (static_cast<int64_t>(row) * glob_len + token) * words + w;
+            packed_out[addr] = static_cast<int64_t>(packed_words[tl]);
+          }
+          packed_words[tl] = 0;
+        }
+      }
+    }
+    __syncthreads();
+
+    // U[64x128] = C[64x32] @ D_g[32x128];  32 output tiles, 8 warps x 4 each.
+    if (phase_mask & 4)
+    for (int tile = warp; tile < 4 * 8; tile += 8) {
+      const int tw = (tile & 3) * 16;
+      const int tn = (tile >> 2) * 16;
+      wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc;
+      wmma::fill_fragment(acc, 0.0f);
+      #pragma unroll
+      for (int k = 0; k < kGb; k += 16) {
+        wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> af;
+        wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::row_major> bf;
+        wmma::load_matrix_sync(af, &c_smem[tw * kFixedCStride + k], kFixedCStride);
+        wmma::load_matrix_sync(bf, d_smem + k * kFixedRStride + tn, kFixedRStride);
+        wmma::mma_sync(acc, af, bf, acc);
+      }
+      wmma::store_matrix_sync(&yu_smem[tw * kFixedYStride + tn], acc, kFixedYStride,
+                              wmma::mem_row_major);
+    }
+    __syncthreads();
+
+    // R = bf16(R - U), replicating the reference baddbmm rounding point.
+    if (phase_mask & 8)
+    for (int i = threadIdx.x; i < kFixedWmmaTile * kDim; i += kFixedThreads) {
+      const int t = i >> 7;
+      const int d = i & (kDim - 1);
+      r_smem[t * kFixedRStride + d] = __float2bfloat16(
+          __bfloat162float(r_smem[t * kFixedRStride + d]) - yu_smem[t * kFixedYStride + d]);
+    }
+    __syncthreads();
+  }
+
+  if (threadIdx.x < kFixedWmmaTile) {
+    const int t = threadIdx.x;
+    const int token = tile_token + t;
+    if (token < glob_len) {
+      float norm2 = 0.0f;
+      #pragma unroll
+      for (int d = 0; d < kDim; ++d) {
+        const float v = __bfloat162float(r_smem[t * kFixedRStride + d]);
+        norm2 = fmaf(v, v, norm2);
+      }
+      err[static_cast<int64_t>(row) * glob_len + token] = sqrtf(fmaxf(norm2, 0.0f));
+    }
+  }
+}
+
+
+// Fragment-resident fixed cascade.  The wmma kernel above still round-trips
+// Y/C/U/R through shared memory every group (~240 KB per 64-token tile per
+// group); ablation shows all phases contend superlinearly on the smem/MIO
+// pipe.  This version keeps the residual tile in matrix_a fragments
+// distributed across lanes for the kernel's whole life, exploiting the
+// m16n16k16 layout identity between f32 accumulator fragments and bf16
+// matrix_a fragments (the flash-attention mma-chaining trick): sign, bit
+// packing, and the residual update all run elementwise in registers, and
+// shared memory only stages the per-group encoder/decoder tiles.
+//
+// Fragment element map (m16n16k16, lane = 4*lg + lc): element i of an
+// 8-wide fragment covers (row, col) =
+//   i%4 in {0,1}: (lg + 8*(i>>2 & 1)... ) -- concretely:
+//   x[0],x[1] -> (lg, 2lc), (lg, 2lc+1)
+//   x[2],x[3] -> (lg+8, 2lc), (lg+8, 2lc+1)
+//   x[4],x[5] -> (lg, 2lc+8), (lg, 2lc+9)
+//   x[6],x[7] -> (lg+8, 2lc+8), (lg+8, 2lc+9)
+// identical for f32 accumulators and bf16 A-fragments, which is what makes
+// the register-only residual update exact.
+constexpr int kFixedFragTile = 128;     // tokens per block
+constexpr int kFixedFragThreads = 128;  // 4 warps, 32 rows each
+
+__global__ void __launch_bounds__(kFixedFragThreads)
+blockk_fixed_frag_d128_kernel(
+    const __nv_bfloat16 *__restrict__ full_states,
+    const __nv_bfloat16 *__restrict__ encoders,
+    const __nv_bfloat16 *__restrict__ decoders,
+    int64_t *__restrict__ packed_out,
+    float *__restrict__ err,
+    int rows,
+    int total_len,
+    int glob_start,
+    int glob_len,
+    int code_dim,
+    int zerorope,
+    bool apply_zerorope,
+    bool key_layout,
+    int phase_mask) {
+  constexpr int kDim = 128;
+  constexpr int kGb = 32;
+  const int tile_token = blockIdx.x * kFixedFragTile;
+  const int row = blockIdx.y;
+  const int groups = code_dim / kGb;
+  const int words = code_dim >> 6;
+  const int warp = threadIdx.x >> 5;
+  const int lane = threadIdx.x & 31;
+  const int lg = lane >> 2;
+  const int lc = lane & 3;
+
+  // Union: residual staging tile during init, encoder/decoder tiles after.
+  extern __shared__ unsigned char frag_smem[];
+  __nv_bfloat16 *stage = reinterpret_cast<__nv_bfloat16 *>(frag_smem);
+  __nv_bfloat16 *e_smem = stage;                 // [32][136]
+  __nv_bfloat16 *d_smem = stage + kGb * 136;     // [32][136]
+
+  for (int i = threadIdx.x; i < kFixedFragTile * kDim; i += kFixedFragThreads) {
+    const int t = i >> 7;
+    const int d = i & (kDim - 1);
+    const int token = tile_token + t;
+    __nv_bfloat16 v = __float2bfloat16(0.0f);
+    if (token < glob_len) {
+      const bool zero =
+          apply_zerorope && (d < zerorope || (d >= kDim / 2 && d < kDim / 2 + zerorope));
+      if (!zero) {
+        v = full_states[
+            (static_cast<int64_t>(row) * total_len + glob_start + token) * kDim + d];
+      }
+    }
+    stage[t * 136 + d] = v;
+  }
+  __syncthreads();
+
+  // Residual fragments: warp owns rows [warp*32, warp*32+32) = 2 bands of 16.
+  wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major>
+      r_frag[2][8];
+  #pragma unroll
+  for (int band = 0; band < 2; ++band) {
+    #pragma unroll
+    for (int k = 0; k < 8; ++k) {
+      wmma::load_matrix_sync(
+          r_frag[band][k], &stage[(warp * 32 + band * 16) * 136 + k * 16], 136);
+    }
+  }
+  __syncthreads();  // stage[] now serves as the e/d buffers
+
+  uint64_t pword[2][2] = {};  // [band][row half]: packed bits across 2 groups
+  for (int g = 0; g < groups; ++g) {
+    if (phase_mask & 16) {
+      const __nv_bfloat16 *e_g =
+          encoders + (static_cast<int64_t>(row) * code_dim + g * kGb) * kDim;
+      const __nv_bfloat16 *d_g =
+          decoders + (static_cast<int64_t>(row) * code_dim + g * kGb) * kDim;
+      for (int i = threadIdx.x; i < kGb * (kDim / 8); i += kFixedFragThreads) {
+        const int rr = i >> 4;
+        const int cc = i & 15;
+        reinterpret_cast<uint4 *>(e_smem)[rr * 17 + cc] =
+            reinterpret_cast<const uint4 *>(e_g)[i];
+        reinterpret_cast<uint4 *>(d_smem)[rr * 17 + cc] =
+            reinterpret_cast<const uint4 *>(d_g)[i];
+      }
+    }
+    __syncthreads();
+
+    #pragma unroll
+    for (int band = 0; band < 2; ++band) {
+      // Y[16x32] = R_band[16x128] @ E_g^T
+      wmma::fragment<wmma::accumulator, 16, 16, 16, float> acc[2];
+      if (phase_mask & 1) {
+        #pragma unroll
+        for (int ct = 0; ct < 2; ++ct) {
+          wmma::fill_fragment(acc[ct], 0.0f);
+          #pragma unroll
+          for (int k = 0; k < 8; ++k) {
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> bf;
+            wmma::load_matrix_sync(bf, e_smem + ct * 16 * 136 + k * 16, 136);
+            wmma::mma_sync(acc[ct], r_frag[band][k], bf, acc[ct]);
+          }
+        }
+      }
+
+      // Sign in registers (reference bf16 score rounding), build C fragments
+      // for the update mma, and assemble this group's 32 code bits per row.
+      wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major>
+          c_frag[2];
+      uint32_t bits0 = 0;  // row lg of this band
+      uint32_t bits1 = 0;  // row lg+8
+      if (phase_mask & 2) {
+        #pragma unroll
+        for (int ct = 0; ct < 2; ++ct) {
+          __nv_bfloat16 *cx = reinterpret_cast<__nv_bfloat16 *>(c_frag[ct].x);
+          #pragma unroll
+          for (int i = 0; i < 8; ++i) {
+            const float score =
+                __bfloat162float(__float2bfloat16(acc[ct].x[i]));
+            cx[i] = __float2bfloat16((score < 0.0f) ? -1.0f : 1.0f);
+            const bool bit = key_layout ? (score < 0.0f) : (score > 0.0f);
+            if (bit) {
+              // col within the 32-wide code row of this group; x[0,1,4,5]
+              // belong to row lg, x[2,3,6,7] to row lg+8.
+              const int col = ct * 16 + (lc * 2) + (i & 1) + ((i >> 2) << 3);
+              if ((i & 2) == 0) {
+                bits0 |= (uint32_t{1} << col);
+              } else {
+                bits1 |= (uint32_t{1} << col);
+              }
+            }
+          }
+        }
+        bits0 |= __shfl_xor_sync(0xffffffffu, bits0, 1);
+        bits0 |= __shfl_xor_sync(0xffffffffu, bits0, 2);
+        bits1 |= __shfl_xor_sync(0xffffffffu, bits1, 1);
+        bits1 |= __shfl_xor_sync(0xffffffffu, bits1, 2);
+      }
+
+      // R_band = bf16(R_band - C @ D_g), elementwise on fragments.
+      if (phase_mask & 4) {
+        #pragma unroll
+        for (int ct = 0; ct < 8; ++ct) {
+          wmma::fragment<wmma::accumulator, 16, 16, 16, float> uacc;
+          wmma::fill_fragment(uacc, 0.0f);
+          #pragma unroll
+          for (int k = 0; k < 2; ++k) {
+            wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::row_major> bf;
+            wmma::load_matrix_sync(bf, d_smem + k * 16 * 136 + ct * 16, 136);
+            wmma::mma_sync(uacc, c_frag[k], bf, uacc);
+          }
+          __nv_bfloat16 *rx = reinterpret_cast<__nv_bfloat16 *>(r_frag[band][ct].x);
+          #pragma unroll
+          for (int i = 0; i < 8; ++i) {
+            rx[i] = __float2bfloat16(__bfloat162float(rx[i]) - uacc.x[i]);
+          }
+        }
+      }
+
+      // Pack two groups per uint64 word; lane lc==0 of each quad writes.
+      if (phase_mask & 2) {
+        if ((g & 1) == 0) {
+          pword[band][0] = (pword[band][0] & ~uint64_t{0xffffffff}) | bits0;
+          pword[band][1] = (pword[band][1] & ~uint64_t{0xffffffff}) | bits1;
+        } else {
+          pword[band][0] |= static_cast<uint64_t>(bits0) << 32;
+          pword[band][1] |= static_cast<uint64_t>(bits1) << 32;
+          if (lc == 0) {
+            const int w = g >> 1;
+            const int tok0 = tile_token + warp * 32 + band * 16 + lg;
+            const int tok1 = tok0 + 8;
+            if (key_layout) {
+              const int64_t base =
+                  (static_cast<int64_t>(row) * words + w) * glob_len;
+              if (tok0 < glob_len) packed_out[base + tok0] = static_cast<int64_t>(pword[band][0]);
+              if (tok1 < glob_len) packed_out[base + tok1] = static_cast<int64_t>(pword[band][1]);
+            } else {
+              if (tok0 < glob_len)
+                packed_out[(static_cast<int64_t>(row) * glob_len + tok0) * words + w] =
+                    static_cast<int64_t>(pword[band][0]);
+              if (tok1 < glob_len)
+                packed_out[(static_cast<int64_t>(row) * glob_len + tok1) * words + w] =
+                    static_cast<int64_t>(pword[band][1]);
+            }
+          }
+          pword[band][0] = 0;
+          pword[band][1] = 0;
+        }
+      }
+    }
+    __syncthreads();
+  }
+
+  // Per-token residual norm from the fragments: lane holds 4 elements of row
+  // lg and 4 of row lg+8 per fragment; butterfly-reduce within the quad.
+  // Norms are per band -- accumulating across bands would mix two tokens.
+  #pragma unroll
+  for (int band = 0; band < 2; ++band) {
+    float n0 = 0.0f, n1 = 0.0f;
+    #pragma unroll
+    for (int k = 0; k < 8; ++k) {
+      const __nv_bfloat16 *rx =
+          reinterpret_cast<const __nv_bfloat16 *>(r_frag[band][k].x);
+      #pragma unroll
+      for (int i = 0; i < 8; ++i) {
+        const float v = __bfloat162float(rx[i]);
+        // x[0,1,4,5] -> row lg, x[2,3,6,7] -> row lg+8
+        if ((i & 2) == 0) {
+          n0 = fmaf(v, v, n0);
+        } else {
+          n1 = fmaf(v, v, n1);
+        }
+      }
+    }
+    n0 += __shfl_xor_sync(0xffffffffu, n0, 1);
+    n0 += __shfl_xor_sync(0xffffffffu, n0, 2);
+    n1 += __shfl_xor_sync(0xffffffffu, n1, 1);
+    n1 += __shfl_xor_sync(0xffffffffu, n1, 2);
+    if (lc == 0) {
+      const int tok0 = tile_token + warp * 32 + band * 16 + lg;
+      if (tok0 < glob_len)
+        err[static_cast<int64_t>(row) * glob_len + tok0] = sqrtf(fmaxf(n0, 0.0f));
+      if (tok0 + 8 < glob_len)
+        err[static_cast<int64_t>(row) * glob_len + tok0 + 8] = sqrtf(fmaxf(n1, 0.0f));
+    }
+  }
+}
+
+std::vector<at::Tensor> quanpc_prefill_blockk_fixed(
+    at::Tensor full_states,
+    at::Tensor encoders,
+    at::Tensor decoders,
+    int64_t glob_start,
+    int64_t glob_len,
+    int64_t zerorope,
+    bool apply_zerorope,
+    bool pack_key_layout) {
+  TORCH_CHECK(full_states.is_cuda() && encoders.is_cuda() && decoders.is_cuda(),
+              "full_states/encoders/decoders must be CUDA");
+  TORCH_CHECK(full_states.is_contiguous() && encoders.is_contiguous() && decoders.is_contiguous(),
+              "full_states/encoders/decoders must be contiguous");
+  TORCH_CHECK(full_states.dim() == 4, "full_states must be [B,H,L,D]");
+  TORCH_CHECK(encoders.dim() == 4 && decoders.dim() == 4,
+              "encoders/decoders must be [B,H,C,D]");
+  TORCH_CHECK(full_states.scalar_type() == encoders.scalar_type() &&
+                  full_states.scalar_type() == decoders.scalar_type(),
+              "full_states/encoders/decoders dtype mismatch");
+  TORCH_CHECK(full_states.scalar_type() == at::kBFloat16 || full_states.scalar_type() == at::kFloat,
+              "blockk_fixed currently supports bf16 and fp32");
+
+  const int B = full_states.size(0);
+  const int H = full_states.size(1);
+  const int total_len = full_states.size(2);
+  const int D = full_states.size(3);
+  const int C = encoders.size(2);
+  TORCH_CHECK(encoders.size(0) == B && encoders.size(1) == H && encoders.size(3) == D &&
+                  decoders.size(0) == B && decoders.size(1) == H &&
+                  decoders.size(2) == C && decoders.size(3) == D,
+              "encoders/decoders shape must match full_states B/H/D and share C");
+  TORCH_CHECK(D == kFixedDim, "blockk_fixed currently supports head_dim == 128");
+  TORCH_CHECK(C > 0 && C % 64 == 0, "code_dim must be positive and divisible by 64");
+  TORCH_CHECK(glob_start >= 0 && glob_len > 0 && glob_start + glob_len <= total_len,
+              "invalid global slice");
+  TORCH_CHECK(zerorope >= 0 && zerorope <= D / 2, "invalid zerorope");
+
+  at::cuda::CUDAGuard device_guard(full_states.device());
+  auto stream = at::cuda::getCurrentCUDAStream(full_states.device().index());
+  const int rows = B * H;
+  const int words = C >> 6;
+
+  auto packed = pack_key_layout
+      ? at::empty({B, H, words, static_cast<int>(glob_len)}, full_states.options().dtype(at::kLong))
+      : at::empty({B, H, static_cast<int>(glob_len), words}, full_states.options().dtype(at::kLong));
+  auto err = at::empty({B, H, static_cast<int>(glob_len)}, full_states.options().dtype(at::kFloat));
+
+  dim3 grid(static_cast<unsigned int>(ceil_div_i64(glob_len, kFixedThreads)), rows);
+  if (full_states.scalar_type() == at::kBFloat16) {
+    static bool wmma_smem_ready = false;
+    if (!wmma_smem_ready) {
+      cudaFuncSetAttribute(blockk_fixed_wmma_d128_kernel,
+                           cudaFuncAttributeMaxDynamicSharedMemorySize,
+                           kFixedSmemBytes);
+      wmma_smem_ready = true;
+    }
+    static const int phase_mask = [] {
+      const char *s = getenv("QUANPC_FIXED_PHASE_MASK");
+      return s ? atoi(s) : 0x1f;
+    }();
+    constexpr int kFragSmemBytes = kFixedFragTile * 136 * 2;
+    static bool frag_smem_configured = false;
+    if (!frag_smem_configured) {
+      AT_CUDA_CHECK(cudaFuncSetAttribute(
+          blockk_fixed_frag_d128_kernel,
+          cudaFuncAttributeMaxDynamicSharedMemorySize,
+          kFragSmemBytes));
+      frag_smem_configured = true;
+    }
+    dim3 wmma_grid(
+        static_cast<unsigned int>(ceil_div_i64(glob_len, kFixedFragTile)), rows);
+    blockk_fixed_frag_d128_kernel<<<wmma_grid, kFixedFragThreads, kFragSmemBytes, stream>>>(
+        reinterpret_cast<const __nv_bfloat16 *>(full_states.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16 *>(encoders.data_ptr<at::BFloat16>()),
+        reinterpret_cast<const __nv_bfloat16 *>(decoders.data_ptr<at::BFloat16>()),
+        packed.data_ptr<int64_t>(),
+        err.data_ptr<float>(),
+        rows,
+        total_len,
+        static_cast<int>(glob_start),
+        static_cast<int>(glob_len),
+        C,
+        static_cast<int>(zerorope),
+        apply_zerorope,
+        pack_key_layout,
+        phase_mask);
+  } else {
+    blockk_fixed_d128_kernel<float><<<grid, kFixedThreads, 0, stream>>>(
+        full_states.data_ptr<float>(),
+        encoders.data_ptr<float>(),
+        decoders.data_ptr<float>(),
+        packed.data_ptr<int64_t>(),
+        err.data_ptr<float>(),
+        rows,
+        total_len,
+        static_cast<int>(glob_start),
+        static_cast<int>(glob_len),
+        C,
+        static_cast<int>(zerorope),
+        apply_zerorope,
+        pack_key_layout);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {packed, err};
+}
 
 std::vector<at::Tensor> quanpc_prefill_blockk_fast(
     at::Tensor full_states,

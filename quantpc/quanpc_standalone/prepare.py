@@ -6,22 +6,25 @@ decode logic, model integration, or alternative projection implementations.
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 import torch
 
 from .cache import PreparedKVCache
 from .constants import SUPPORTED_CODE_BITS, SUPPORTED_EXP_BITS
-from .online import quantize_block32_online
+from .online import _prepare_fixed_block32, quantize_block32_online
 from .whiten import whiten_states
 
 try:
     from quantpc.quanpc_prefill_cuda_extension.quanpc_prefill_cuda import (
+        blockk_fixed_cuda,
         gather_pack_from_packed_cuda,
         pack_key_transposed_cuda,
         pack_value_token_cuda,
     )
 except Exception:  # pragma: no cover - reported by _require_prefill_cuda
+    blockk_fixed_cuda = None
     gather_pack_from_packed_cuda = None
     pack_key_transposed_cuda = None
     pack_value_token_cuda = None
@@ -189,6 +192,7 @@ def prepare_kv_cache(
     value_decoders: Optional[torch.Tensor] = None,
     key_whitening: Optional[torch.Tensor] = None,
     value_whitening: Optional[torch.Tensor] = None,
+    use_fused_quant: bool = True,
 ) -> PreparedKVCache:
     """Learn online K/V projections and build a packed CUDA cache.
 
@@ -209,6 +213,14 @@ def prepare_kv_cache(
     factors from :mod:`.whiten`.  Whitening is applied here rather than by the
     caller because ``zerorope`` masks RoPE frequency pairs *by coordinate*: it
     is only meaningful in the model's basis, so it must run before the rotation.
+
+    ``use_fused_quant`` selects the fully fused CUDA cascade kernel for any
+    side that has a stored decoder and no runtime whitening (one launch does
+    quantize + pack + err with the residual held in tensor-core fragments).
+    ``False`` forces the reference PyTorch loop everywhere; the environment
+    variable ``QUANPC_DISABLE_FUSED_QUANT=1`` does the same globally, which is
+    convenient for A/B benchmarking without code changes.  Both paths
+    implement identical numerics up to fp32 accumulation order.
     """
     _validate_prepare_inputs(full_key, full_value, eas, direction_sample_size)
     _require_prefill_cuda()
@@ -222,13 +234,33 @@ def prepare_kv_cache(
         int(sink_size),
         int(local_size),
     )
-    key_global = full_key[:, :, global_start : global_start + global_len].clone()
-    _apply_zerorope_(key_global, int(zerorope))
-    value_global = full_value[
-        :,
-        :,
-        global_start : global_start + global_len,
-    ].contiguous()
+    batch, heads, dim = full_key.shape[0], full_key.shape[1], full_key.shape[3]
+
+    # A side with a stored decoder (and no runtime whitening) runs the fully
+    # fused cascade kernel: a single launch quantizes, packs, and produces the
+    # EAS error with the residual held in registers, skipping the global
+    # clone, the Python group loop, and the separate pack kernels.  Whitening
+    # forces the reference path because the fused kernel reads full states in
+    # the model's own basis.
+    fused_enabled = (
+        use_fused_quant
+        and os.environ.get("QUANPC_DISABLE_FUSED_QUANT", "0") != "1"
+    )
+    key_fused = fused_enabled and key_decoders is not None and key_whitening is None
+    value_fused = fused_enabled and value_decoders is not None and value_whitening is None
+    if (key_fused or value_fused) and blockk_fixed_cuda is None:
+        raise RuntimeError("QuanPC prefill CUDA extension is unavailable")
+
+    key_global = value_global = None
+    if not key_fused:
+        key_global = full_key[:, :, global_start : global_start + global_len].clone()
+        _apply_zerorope_(key_global, int(zerorope))
+    if not value_fused:
+        value_global = full_value[
+            :,
+            :,
+            global_start : global_start + global_len,
+        ].contiguous()
 
     # Rotate into the whitened bases only after zerorope has masked the RoPE
     # pairs.  The dense sink/local/EAS windows are gathered from full_key/value
@@ -246,32 +278,75 @@ def prepare_kv_cache(
     value_stream = _side_stream(full_key.device)
     value_stream.wait_stream(current_stream)
     with torch.cuda.stream(value_stream):
-        value_block = quantize_block32_online(
-            value_global,
-            value_bits,
-            direction_sample_size=direction_sample_size,
-            seed=int(seed) + 1009,
-            encoders=value_encoders,
-            decoders=value_decoders,
+        if value_fused:
+            value_projection = _prepare_fixed_block32(
+                value_decoders, batch, heads, value_bits, dim,
+                full_value.device, full_value.dtype,
+            ).view(batch, heads, value_bits, dim)
+            packed_value_all, value_err = blockk_fixed_cuda(
+                full_value,
+                _prepare_fixed_block32(
+                    value_encoders, batch, heads, value_bits, dim,
+                    full_value.device, full_value.dtype,
+                ).view(batch, heads, value_bits, dim),
+                value_projection,
+                global_start,
+                global_len,
+                zerorope=0,
+                apply_zerorope=False,
+                pack_key_layout=False,
+            )
+        else:
+            value_block = quantize_block32_online(
+                value_global,
+                value_bits,
+                direction_sample_size=direction_sample_size,
+                seed=int(seed) + 1009,
+                encoders=value_encoders,
+                decoders=value_decoders,
+            )
+    if key_fused:
+        key_projection = _prepare_fixed_block32(
+            key_decoders, batch, heads, key_bits, dim,
+            full_key.device, full_key.dtype,
+        ).view(batch, heads, key_bits, dim)
+        packed_key_all, key_err = blockk_fixed_cuda(
+            full_key,
+            _prepare_fixed_block32(
+                key_encoders, batch, heads, key_bits, dim,
+                full_key.device, full_key.dtype,
+            ).view(batch, heads, key_bits, dim),
+            key_projection,
+            global_start,
+            global_len,
+            zerorope=int(zerorope),
+            apply_zerorope=True,
+            pack_key_layout=True,
         )
-    key_block = quantize_block32_online(
-        key_global,
-        key_bits,
-        direction_sample_size=direction_sample_size,
-        seed=int(seed),
-        encoders=key_encoders,
-        decoders=key_decoders,
-    )
+    else:
+        key_block = quantize_block32_online(
+            key_global,
+            key_bits,
+            direction_sample_size=direction_sample_size,
+            seed=int(seed),
+            encoders=key_encoders,
+            decoders=key_decoders,
+        )
     current_stream.wait_stream(value_stream)
 
-    # Pack all codes once.  The fused gather then moves EAS tokens into the
-    # dense cache and removes the same positions from the packed global cache.
-    packed_key_all = pack_key_transposed_cuda(key_block.codes)
-    packed_value_all = pack_value_token_cuda(value_block.codes)
+    # Pack all codes once (reference path only; the fused kernel already wrote
+    # packed words).  The fused gather then moves EAS tokens into the dense
+    # cache and removes the same positions from the packed global cache.
+    if not key_fused:
+        packed_key_all = pack_key_transposed_cuda(key_block.codes)
+        key_err = key_block.err
+    if not value_fused:
+        packed_value_all = pack_value_token_cuda(value_block.codes)
+        value_err = value_block.err
     eas_size = max(1, int(global_len * float(eas)))
     eas_indices = _select_eas_indices(
-        key_block.err,
-        value_block.err,
+        key_err,
+        value_err,
         eas_size,
     ).to(torch.int32).contiguous()
     kept_indices = _invert_indices(eas_indices, global_len)
@@ -289,12 +364,15 @@ def prepare_kv_cache(
     )
 
     # Decode consumes K projection transposed, so materialize it once here.
-    key_projection = key_block.decoder.contiguous()
+    if not key_fused:
+        key_projection = key_block.decoder.contiguous()
+    if not value_fused:
+        value_projection = value_block.decoder.contiguous()
     return PreparedKVCache(
         dense_key=dense_key,
         dense_value=dense_value,
         key_projection=key_projection,
-        value_projection=value_block.decoder.contiguous(),
+        value_projection=value_projection,
         key_projection_t=key_projection.transpose(-1, -2).contiguous(),
         packed_key=packed_key,
         packed_value=packed_value,
