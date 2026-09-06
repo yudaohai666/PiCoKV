@@ -41,10 +41,10 @@ OUTPUT_PATH="${OUTPUT_PATH:-}"
 
 # ── methods to run (comment out to skip; METHOD=oscar forces a single one) ──
 METHODS=(
-  flash_attention_2
+  # flash_attention_2
   quantpc
   # kivi
-  oscar
+  # oscar
   # polar
   # sdpa
   # eager

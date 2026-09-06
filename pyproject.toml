@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "accelerate==1.14.0",
-    "triton==3.3.0",
+    "triton==3.2.0",
     "datasets==5.0.1",
     "flash-attn==2.7.4.post1",
     "fuzzywuzzy==0.18.0",
@@ -18,6 +18,10 @@ dependencies = [
     "torchaudio>=2.6.0",
     "torchvision>=0.21.0",
     "transformers==4.53.2",
+    "lm-eval==0.4.12",
+    "loguru>=0.7.3",
+    "wonderwords>=3.0.1",
+    "nltk>=3.10.3",
 ]
 
 [[tool.uv.index]]
