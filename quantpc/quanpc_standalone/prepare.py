@@ -102,6 +102,87 @@ def _apply_zerorope_(states: torch.Tensor, zerorope: int) -> None:
     states[..., half : half + zerorope] = 0
 
 
+# Memoized _prepare_fixed_block32 results.  Stored projections are
+# model-owned persistent tensors, so (data_ptr, shape, dtype, device) is a
+# stable identity for the whole run; the H2D copy + group rearrange otherwise
+# costs ~0.3 ms of host time per layer per side, which dominates short-context
+# prefill.  Keyed on the *source* tensor identity plus the target geometry.
+_PREPARED_PROJ_CACHE: dict = {}
+
+
+def _prepare_fixed_block32_cached(
+    encoders: torch.Tensor,
+    batch: int,
+    heads: int,
+    bits: int,
+    dim: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    key = (
+        encoders.data_ptr(),
+        tuple(encoders.shape),
+        encoders.dtype,
+        encoders.device,
+        batch,
+        heads,
+        bits,
+        dim,
+        device,
+        dtype,
+    )
+    hit = _PREPARED_PROJ_CACHE.get(key)
+    if hit is None:
+        hit = _prepare_fixed_block32(encoders, batch, heads, bits, dim, device, dtype)
+        _PREPARED_PROJ_CACHE[key] = hit
+    return hit
+
+
+def _select_eas_and_kept_indices(
+    key_error: torch.Tensor,
+    value_error: torch.Tensor,
+    eas_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sync-free EAS union + kept complement, both sorted ascending.
+
+    Semantically identical to ``_select_eas_indices`` + ``_invert_indices``
+    but never synchronizes the host: the complement is built by a stable
+    argsort partition instead of boolean-mask indexing (``torch.nonzero``
+    needs the output count on the host, which drains the whole async
+    pipeline -- that stall, not the kernel time, is what made short-context
+    prefill host-bound).  GPU cost stays in the same league as the plain
+    topk path, so this one path serves all sequence lengths.
+    """
+    length = int(key_error.shape[-1])
+    key_count = min(int(eas_size), length)
+    key_indices = torch.topk(key_error, k=key_count, dim=-1).indices
+    if key_count == length:
+        eas = key_indices.sort(dim=-1).values.to(torch.int32).contiguous()
+        kept = torch.empty(
+            *key_error.shape[:-1], 0, device=key_error.device, dtype=torch.int32
+        )
+        return eas, kept
+    value_count = min(int(eas_size), length - key_count)
+    is_eas = torch.zeros_like(key_error, dtype=torch.bool).scatter_(
+        -1, key_indices, True
+    )
+    value_indices = torch.topk(
+        value_error.masked_fill(is_eas, -torch.inf),
+        k=value_count,
+        dim=-1,
+    ).indices
+    is_eas.scatter_(-1, value_indices, True)
+    # Stable descending sort of the 0/1 "kept" flag: kept positions come
+    # first in ascending index order, EAS positions after, also ascending.
+    order = torch.argsort(
+        (~is_eas).to(torch.int8), dim=-1, stable=True, descending=True
+    )
+    kept_len = length - key_count - value_count
+    kept = order[..., :kept_len].to(torch.int32).contiguous()
+    eas = order[..., kept_len:].to(torch.int32).contiguous()
+    return eas, kept
+
+
 def _select_eas_indices(
     key_error: torch.Tensor,
     value_error: torch.Tensor,
@@ -134,22 +215,24 @@ def _select_eas_indices(
 
 
 def _invert_indices(drop_indices: torch.Tensor, length: int) -> torch.Tensor:
-    """Build sorted int32 indices of global tokens that remain compressed."""
-    drop_indices = drop_indices.to(torch.long)
-    mask = torch.ones(
+    """Build sorted int32 indices of global tokens that remain compressed.
+
+    A stable argsort of the 0/1 dropped flag partitions kept positions first,
+    in ascending original order -- the same result as boolean-mask indexing,
+    but with a static output shape, so it never triggers the D2H
+    synchronization that ``positions[mask]`` (a ``nonzero`` under the hood)
+    forces while sizing its output.
+    """
+    is_dropped = torch.zeros(
         *drop_indices.shape[:2],
         int(length),
         device=drop_indices.device,
-        dtype=torch.bool,
+        dtype=torch.int8,
     )
-    mask.scatter_(-1, drop_indices, False)
-    positions = torch.arange(
-        int(length),
-        device=drop_indices.device,
-        dtype=torch.int32,
-    ).view(1, 1, int(length)).expand_as(mask)
+    is_dropped.scatter_(-1, drop_indices.to(torch.long), 1)
+    order = torch.argsort(is_dropped, dim=-1, stable=True)
     kept_len = int(length) - int(drop_indices.shape[-1])
-    return positions[mask].reshape(*drop_indices.shape[:2], kept_len).contiguous()
+    return order[..., :kept_len].to(torch.int32).contiguous()
 
 
 def _validate_prepare_inputs(
@@ -279,13 +362,13 @@ def prepare_kv_cache(
     value_stream.wait_stream(current_stream)
     with torch.cuda.stream(value_stream):
         if value_fused:
-            value_projection = _prepare_fixed_block32(
+            value_projection = _prepare_fixed_block32_cached(
                 value_decoders, batch, heads, value_bits, dim,
                 full_value.device, full_value.dtype,
             ).view(batch, heads, value_bits, dim)
             packed_value_all, value_err = blockk_fixed_cuda(
                 full_value,
-                _prepare_fixed_block32(
+                _prepare_fixed_block32_cached(
                     value_encoders, batch, heads, value_bits, dim,
                     full_value.device, full_value.dtype,
                 ).view(batch, heads, value_bits, dim),
@@ -306,13 +389,13 @@ def prepare_kv_cache(
                 decoders=value_decoders,
             )
     if key_fused:
-        key_projection = _prepare_fixed_block32(
+        key_projection = _prepare_fixed_block32_cached(
             key_decoders, batch, heads, key_bits, dim,
             full_key.device, full_key.dtype,
         ).view(batch, heads, key_bits, dim)
         packed_key_all, key_err = blockk_fixed_cuda(
             full_key,
-            _prepare_fixed_block32(
+            _prepare_fixed_block32_cached(
                 key_encoders, batch, heads, key_bits, dim,
                 full_key.device, full_key.dtype,
             ).view(batch, heads, key_bits, dim),
@@ -344,12 +427,11 @@ def prepare_kv_cache(
         packed_value_all = pack_value_token_cuda(value_block.codes)
         value_err = value_block.err
     eas_size = max(1, int(global_len * float(eas)))
-    eas_indices = _select_eas_indices(
+    eas_indices, kept_indices = _select_eas_and_kept_indices(
         key_err,
         value_err,
         eas_size,
-    ).to(torch.int32).contiguous()
-    kept_indices = _invert_indices(eas_indices, global_len)
+    )
     dense_key, dense_value, packed_key, packed_value = (
         gather_pack_from_packed_cuda(
             full_key,
