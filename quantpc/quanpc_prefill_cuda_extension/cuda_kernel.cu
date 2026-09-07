@@ -2725,7 +2725,7 @@ std::vector<at::Tensor> quanpc_prefill_quantize_pack(
 }
 
 
-// Fully fused fixed-projection cascade (offline + no-refit path).
+// Fully fused fixed-projection cascade (stored-decoder path).
 //
 // With stored encoders AND decoders, the block-32 cascade has no cross-token
 // dependency left: the decoder least-squares solve was the only global

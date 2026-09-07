@@ -52,17 +52,13 @@ METHODS=(
 [ -n "${METHOD:-}" ] && METHODS=("${METHOD}")
 
 # ── per-method defaults (identical across all benchmark launchers) ──
-# quantpc; default = offline + vrefit
+# quantpc; default = offline
 K_BITS="${K_BITS:-320}"; V_BITS="${V_BITS:-320}"
 SINK="${SINK:-64}"; LOCAL="${LOCAL:-256}"
 EXP_BITS="${EXP_BITS:-4}"; EAS="${EAS:-0.01}"; ZEROROPE="${ZEROROPE:-20}"
 NO_PRUNING="${NO_PRUNING:-0}"
 USE_OFFLINE="${USE_OFFLINE:-1}"
-ONLINE_DECODER_REFIT="${ONLINE_DECODER_REFIT:-none}"
-# 1e-3 == constants.ONLINE_DECODER_RIDGE, i.e. the shipped path. Do NOT raise this
-# back to 1e-2: a nominal 1e-2 swamps the -9.3e-4 negative ridge the bf16 gram used
-# to contribute, making it the one setting under which the fp32-gram fix is
-# unmeasurable (16 paired cells: 6 up / 7 down / 3 tie, mean -0.004).
+# 1e-3 == constants.ONLINE_DECODER_RIDGE, i.e. the shipped path.
 DECODER_RIDGE="${DECODER_RIDGE:-1e-3}"
 OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
 # kivi (2/4-bit KV)
@@ -75,14 +71,14 @@ POLAR_MODE="${POLAR_MODE:-mixed}"; POLAR_RBITS="${POLAR_RBITS:-3}"; POLAR_TBITS=
 
 # Build METHOD_ARGS[] and TAG for a method. Needs REPO_ROOT, MODEL_TAG + the
 # per-method defaults above. quantpc TAG matches run_ruler/run_infinitebench's
-# python run_tag(): quantpc_{mode}_k{K}_v{V}[_krefit|_vrefit|_refit].
+# python run_tag(): quantpc_{mode}_k{K}_v{V}.
 build_method_args() {
   METHOD_ARGS=(); TAG="$1"
   case "$1" in
     quantpc)
       METHOD_ARGS=(--k-bits "${K_BITS}" --v-bits "${V_BITS}" --sink-size "${SINK}" --local-size "${LOCAL}"
         --exp-bits "${EXP_BITS}" --eas "${EAS}" --zerorope "${ZEROROPE}"
-        --decoder-ridge "${DECODER_RIDGE}" --online-decoder-refit "${ONLINE_DECODER_REFIT}")
+        --decoder-ridge "${DECODER_RIDGE}")
       local mode proj
       if [ "${USE_OFFLINE}" = "1" ] || [ -n "${OFFLINE_PROJ_PATH}" ]; then
         mode="offline"; METHOD_ARGS+=(--offline); proj="${OFFLINE_PROJ_PATH}"
@@ -91,10 +87,6 @@ build_method_args() {
         mode="online"
       fi
       TAG="quantpc_${mode}_k${K_BITS}_v${V_BITS}"
-      # refit suffix applies only to the offline path.
-      if [ "${mode}" = "offline" ]; then
-        case "${ONLINE_DECODER_REFIT}" in k) TAG+="_krefit" ;; v) TAG+="_vrefit" ;; both) TAG+="_refit" ;; esac
-      fi
       # Knobs that change the result but were missing from the tag. EAS is the
       # one that bit us on NIAH: two EAS arms shared a directory. Here TAG names
       # the result *file*, so a second arm would overwrite the first outright.

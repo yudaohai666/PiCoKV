@@ -217,22 +217,13 @@ def main(args):
         r'(?:_local(\d+))?'
         # Archived dirs from before whitening was dropped still carry the token;
         # swallow it so those runs keep plotting.
-        r'(?:_(?:whiten|nowhiten))?'
-        r'(?:_(krefit|vrefit|refit))?',
+        r'(?:_(?:whiten|nowhiten))?',
         method, re.IGNORECASE,
     )
     if structured:
-        mode, k, v, local, refit = structured.groups()
+        mode, k, v, local = structured.groups()
         local_text = f", local {local}" if local else ""
-        refit_names = {
-            "krefit": "K decoder refit",
-            "vrefit": "V decoder refit",
-            "refit": "K+V decoder refit",
-        }
-        refit_text = f", {refit_names[refit.lower()]}" if refit else ""
-        method_title = (
-            f"QuanPC k{k}/v{v} ({mode.lower()}{local_text}{refit_text})"
-        )
+        method_title = f"QuanPC k{k}/v{v} ({mode.lower()}{local_text})"
     # Match method names with budget suffix, e.g. snapkv-2048
     elif re.match(r'([^-]+)-(\d+)', method, re.IGNORECASE):
         method_name = re.match(r'([^-]+)-(\d+)', method, re.IGNORECASE).group(1)

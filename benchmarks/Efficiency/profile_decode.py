@@ -122,9 +122,6 @@ def main() -> None:
                    help="quantpc: use offline encoders (skip online QR at prefill); path defaults to offline_projection/projections/{model}_k{K}_v{V}.pt")
     p.add_argument("--offline-proj-path", default=None,
                    help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
-    p.add_argument("--online-decoder-refit", default="none",
-                   choices=("none", "k", "v", "both"),
-                   help="quantpc offline only: drop the baked K/V decoder(s) and refit online while keeping the fixed offline encoder; none=use baked decoders")
     p.add_argument("--decoder-ridge", type=float, default=1e-2,
                    help="override the online decoder ridge (default 1e-2; offline PTs are fitted with 1e-3)")
     p.set_defaults(use_pruning=True)
@@ -187,7 +184,6 @@ def main() -> None:
         residual_evict_size=args.residual_evict_size,
         offline_v_hadamard=args.offline_v_hadamard,
         offline_proj_path=offline_proj_path,
-        online_decoder_refit=args.online_decoder_refit,
         # PolarQuant params (--method polar)
         polar_mode=args.polar_mode,
         polar_rbits=args.polar_rbits,

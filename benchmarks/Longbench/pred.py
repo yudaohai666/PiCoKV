@@ -78,7 +78,6 @@ class QuantPCModel:
         offline_v_hadamard: bool = True,
         # quantpc offline block-32 encoders (--method quantpc)
         offline_proj_path: str | None = None,
-        online_decoder_refit: str = "none",
         # PolarQuant params (--method polar)
         polar_mode: str = "mixed",
         polar_rbits: int = 3,
@@ -111,7 +110,6 @@ class QuantPCModel:
             kv_norm=kv_norm,
             residual_evict_size=residual_evict_size,
             offline_v_hadamard=offline_v_hadamard,
-            online_decoder_refit=online_decoder_refit,
             # PolarQuant params (--method polar)
             polar_mode=polar_mode,
             polar_rbits=polar_rbits,
@@ -273,8 +271,6 @@ def parse_args(argv=None):
     p.add_argument("--residual-evict-size", type=int, default=256, help="OScaR residual evict size (INT2 默认 256)")
     p.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
     p.add_argument("--offline", action="store_true", help="quantpc: use offline encoders (default path offline_projection/projections/{model}_k{K}_v{V}.pt)")
-    p.add_argument("--online-decoder-refit", default="none", choices=("none", "k", "v", "both"),
-                   help="quantpc offline only: refit decoder for K, V, or both sides")
     p.add_argument("--offline-proj-path", default=None, help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
     p.add_argument("--decoder-ridge", type=float, default=1e-2,
                    help="override the online decoder ridge (default 1e-2; offline PTs are fitted with 1e-3)")
@@ -314,7 +310,6 @@ def main() -> None:
         args.method, args.k_bits, args.v_bits, args.num_bits,
         offline=(args.offline or args.offline_proj_path is not None),
         full_tag=(args.method == "quantpc"),
-        online_decoder_refit=args.online_decoder_refit,
     )
     save_path = (
         Path(args.output_path)
@@ -353,7 +348,6 @@ def main() -> None:
         residual_evict_size=args.residual_evict_size,
         offline_v_hadamard=args.offline_v_hadamard,
         offline_proj_path=offline_proj_path,
-        online_decoder_refit=args.online_decoder_refit,
         polar_mode=args.polar_mode,
         polar_rbits=args.polar_rbits,
         polar_tbits=args.polar_tbits,

@@ -102,14 +102,12 @@ def output_tag(
     *,
     offline: bool = False,
     full_tag: bool = False,
-    online_decoder_refit: str = "none",
 ) -> str:
     """Directory/file tag keyed by method + KV bits, shared across runners.
 
-    ``full_tag`` switches quantpc to the full naming --
-    ``{online|offline}_k{K}_v{V}`` plus a decoder-refit suffix. The local window
-    is fixed at 256 across the current experiments, so it is intentionally
-    omitted.
+    ``full_tag`` switches quantpc to the full naming ``{online|offline}_k{K}_v{V}``.
+    The local window is fixed at 256 across the current experiments, so it is
+    intentionally omitted.
     """
     if method == "kivi":
         return f"kivi_k{k_bits}_v{v_bits}"
@@ -119,11 +117,7 @@ def output_tag(
         return method
     if full_tag:
         mode = "offline" if offline else "online"
-        tag = f"{mode}_k{k_bits}_v{v_bits}"
-        refit_suffix = {"none": "", "k": "_krefit", "v": "_vrefit", "both": "_refit"}
-        if online_decoder_refit not in refit_suffix:
-            raise ValueError(f"unknown online_decoder_refit: {online_decoder_refit}")
-        return tag + refit_suffix[online_decoder_refit]
+        return f"{mode}_k{k_bits}_v{v_bits}"
     tag = f"quantpc_k{k_bits}_v{v_bits}"
     if offline:
         tag += "_offline"
@@ -303,7 +297,6 @@ def _load_quantpc_model(
     prune_mode: int,
     log_eps: float,
     offline_proj_path: Optional[str] = None,
-    online_decoder_refit: str = "none",
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
     """Load a HF model patched with the quanpc_standalone online-projection path.
 
@@ -340,17 +333,9 @@ def _load_quantpc_model(
     key_decoders = value_decoders = None
     if offline_proj_path is not None:
         _projs = load_offline_projections(offline_proj_path)
-        # The offline projection contains both encoders and decoders.  Refit is
-        # controlled globally by side: the selected side(s) keep the offline
-        # encoder but solve the decoder online for the current context.
-        refit_sides = {
-            "none": (), "k": ("key",), "v": ("value",),
-            "both": ("key", "value"),
-        }[online_decoder_refit]
-        stored_sides = tuple(
-            side for side in ("key", "value") if side not in refit_sides
-        )
-        for side in stored_sides:
+        # An offline projection is used whole: its decoder was fitted against the
+        # codes its own encoder produces, so the two only make sense together.
+        for side in ("key", "value"):
             if f"{side}_decoder" not in _projs:
                 raise ValueError(
                     f"{offline_proj_path} stores encoders only; rebuild it with "
@@ -358,14 +343,9 @@ def _load_quantpc_model(
                 )
         key_encoders = _projs["key_encoder"]
         value_encoders = _projs["value_encoder"]
-        if "key" in stored_sides:
-            key_decoders = _projs["key_decoder"]
-        if "value" in stored_sides:
-            value_decoders = _projs["value_decoder"]
-        print(
-            f"online decoder refit sides: {refit_sides or '(none, fully offline decoder)'}",
-            flush=True,
-        )
+        key_decoders = _projs["key_decoder"]
+        value_decoders = _projs["value_decoder"]
+        print(f"offline projection: {offline_proj_path}", flush=True)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     # With a single visible GPU, device_map="auto" can offload layers to CPU
@@ -579,7 +559,6 @@ def load_model(
     polar_rbits: int = 3,
     polar_tbits: int = 3,
     polar_vbits: int = 2,
-    online_decoder_refit: str = "none",
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
     """Load a HF model+tokenizer and return ``(model, tokenizer, make_cache)``.
 
@@ -643,7 +622,6 @@ def load_model(
             prune_mode=prune_mode,
             log_eps=log_eps,
             offline_proj_path=offline_proj_path,
-            online_decoder_refit=online_decoder_refit,
         )
 
     if method == "polar":

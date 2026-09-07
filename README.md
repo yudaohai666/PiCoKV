@@ -107,13 +107,12 @@ QuanPC supports **two projection paths**, both using block-32 CholeskyQR /
 Householder subspace quantization with a ridge-regularized decoder:
 
 - **Online** (`StandaloneConfig()` defaults, no projection args): projections are
-  fit from the current prefill K/V inside `prepare_kv_cache`. Optional decoder
-  refit via `online_decoder_refit` (`k`/`v`/`kv`/`none`).
+  fit from the current prefill K/V inside `prepare_kv_cache`.
 - **Offline**: load a stored `.pt` whose encoder + decoder are folded
   into a single pair (`load_offline_projections`, `transformers.py:51`), then pass
-  them into `prepare_kv_cache` (`prepare.py:190-241`). The offline decoder can
-  still be refit online. The benchmark launchers default to this path
-  (`USE_OFFLINE=1`, `ONLINE_DECODER_REFIT=v`).
+  them into `prepare_kv_cache` (`prepare.py:190-241`). A stored projection is used
+  whole: encoder and decoder always come from the same `.pt`. Enable it with
+  `USE_OFFLINE=1`.
 
 Decode requires bf16 CUDA and GQA=4 (`QH/KVH == 4`, `D == 128`), code bits in
 `{128,192,256,320,384,448,512}`, and `exp_bits` in `{1,2,4,8}` (default 4).
@@ -271,20 +270,19 @@ bash benchmarks/InfiniteBench/run_infinitebench.sh
 Each launcher exposes a `METHODS=(...)` list near the top (comment methods in
 or out, or force one with `METHOD=quantpc`) and shares the same tunables:
 `K_BITS`/`V_BITS` (320), `SINK` (64), `LOCAL` (256), `EXP_BITS` (4),
-`EAS` (0.01), `ZEROROPE` (20), `USE_OFFLINE` (1),
-`ONLINE_DECODER_REFIT` (v), `DECODER_RIDGE` (1e-2). The resolved quantpc tag is
-`quantpc_{mode}_k{K}_v{V}[_krefit|_vrefit|_refit]`. Note the default
+`EAS` (0.01), `ZEROROPE` (20), `USE_OFFLINE` (0, except 1 in
+`run_efficiency.sh`), `DECODER_RIDGE` (1e-3). The resolved quantpc tag is
+`quantpc_{mode}_k{K}_v{V}`, plus a `_ridge{value}` suffix whenever the ridge
+differs from the python default 1e-2 (so the shipped 1e-3 does add one). Note the default
 `MODEL` path differs per launcher (`/data/Llama-3.1-8B-Instruct` for
 Ruler/InfiniteBench/Longbench/Needle vs the full share-storage path for
 Efficiency) — override `MODEL=...` as needed.
 
 For QuanPC, the standard configuration is K/V `320/320`, `sink_size=64`,
 `local_size=256`, `eas=0.01`, and `zerorope=20`. Offline projections already
-contain their fitted encoder/decoder pair; the benchmark launchers default to
-`USE_OFFLINE=1` and load
-`offline_projection/projections/{model}_k320_v320.pt` (set
-`USE_OFFLINE=0` for the online path). A missing default PT is reported as an
-explicit `FileNotFoundError`.
+contain their fitted encoder/decoder pair; set `USE_OFFLINE=1` to load
+`offline_projection/projections/{model}_k320_v320.pt` instead of fitting online.
+A missing default PT is reported as an explicit `FileNotFoundError`.
 
 LongBench 的数据目录不设机器相关默认值。直接运行 `pred.py` 时必须显式传入
 `--data-dir /path/to/longbench/data`；使用 `run_longbench.sh` 时通过环境变量

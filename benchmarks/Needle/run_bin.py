@@ -49,7 +49,6 @@ class Transformer(ModelProvider):
         # quantpc offline block-32 encoders (--method quantpc)
         offline_proj_path: str | None = None,
         max_new_tokens: int = 50,
-        online_decoder_refit: str = "none",
         # PolarQuant params (--method polar)
         polar_mode: str = "mixed",
         polar_rbits: int = 3,
@@ -84,7 +83,6 @@ class Transformer(ModelProvider):
             kv_norm=kv_norm,
             residual_evict_size=residual_evict_size,
             offline_v_hadamard=offline_v_hadamard,
-            online_decoder_refit=online_decoder_refit,
             # PolarQuant params (--method polar)
             polar_mode=polar_mode,
             polar_rbits=polar_rbits,
@@ -189,7 +187,6 @@ def run_experiment(
     offline_v_hadamard: bool = True,
     offline_proj_path: str | None = None,
     max_new_tokens: int = 50,
-    online_decoder_refit: str = "none",
     # PolarQuant params (--method polar)
     polar_mode: str = "mixed",
     polar_rbits: int = 3,
@@ -225,7 +222,6 @@ def run_experiment(
         kv_norm=kv_norm,
         residual_evict_size=residual_evict_size,
         offline_v_hadamard=offline_v_hadamard,
-        online_decoder_refit=online_decoder_refit,
         polar_mode=polar_mode,
         polar_rbits=polar_rbits,
         polar_tbits=polar_tbits,
@@ -341,9 +337,6 @@ def main() -> None:
         default=None,
         help="quantpc: explicit offline encoder .pt (overrides the --offline default path)",
     )
-    parser.add_argument("--online-decoder-refit", default="none",
-                        choices=("none", "k", "v", "both"),
-                        help="quantpc offline only: refit decoder for K, V, or both sides")
     parser.add_argument("--max-new-tokens", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42)
     # ── PolarQuant params (--method polar) ──
@@ -376,7 +369,6 @@ def main() -> None:
             args.method, args.k_bits, args.v_bits, args.num_bits,
             offline=(args.offline or args.offline_proj_path is not None),
             full_tag=(args.method == "quantpc"),
-            online_decoder_refit=args.online_decoder_refit,
         )
         output_path = str(Path("results/niah") / model_key / tag / "results.json")
     run_experiment(
@@ -408,7 +400,6 @@ def main() -> None:
         offline_v_hadamard=args.offline_v_hadamard,
         offline_proj_path=offline_proj_path,
         max_new_tokens=args.max_new_tokens,
-        online_decoder_refit=args.online_decoder_refit,
         polar_mode=args.polar_mode,
         polar_rbits=args.polar_rbits,
         polar_tbits=args.polar_tbits,

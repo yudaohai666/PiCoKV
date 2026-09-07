@@ -113,9 +113,6 @@ def parse_arguments():
                         help="quantpc: use offline encoders "
                              "(default path offline_projection/projections/"
                              "{model}_k{K}_v{V}.pt)")
-    parser.add_argument("--online-decoder-refit", default="none",
-                        choices=("none", "k", "v", "both"),
-                        help="quantpc offline only: online decoder refit side")
     parser.add_argument("--offline-proj-path", default=None,
                         help="quantpc: explicit offline encoder .pt")
 
@@ -176,11 +173,6 @@ def run_tag(args):
     if args.method == "quantpc":
         mode = "offline" if offline else "online"
         tag = f"quantpc_{mode}_k{args.k_bits}_v{args.v_bits}"
-        if offline:
-            suffix = {"k": "krefit", "v": "vrefit", "both": "refit"}.get(
-                args.online_decoder_refit)
-            if suffix:
-                tag += f"_{suffix}"
         if float(args.decoder_ridge) != 1e-2:
             tag += f"_ridge{float(args.decoder_ridge):g}"
         if args.exp_bits != 4:
@@ -375,7 +367,6 @@ def main():
             use_pruning=args.use_pruning, prune_mode=args.prune_mode,
             log_eps=args.log_eps,
             offline_proj_path=offline_proj_path,
-            online_decoder_refit=args.online_decoder_refit,
             group_size=args.group_size,
             residual_length=args.residual_length,
             num_bits=args.num_bits,

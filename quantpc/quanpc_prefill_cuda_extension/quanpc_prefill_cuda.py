@@ -232,7 +232,7 @@ def blockk_fixed_cuda(
     pack_key_layout: bool = True,
     verbose: bool = False,
 ):
-    """Fully fused fixed-projection cascade (offline + no-refit path).
+    """Fully fused fixed-projection cascade (stored-decoder path).
 
     One kernel walks the whole group chain per token with the residual held in
     registers, writes packed codes directly in the pack_key/pack_value layout,
