@@ -7,6 +7,7 @@
 #include <cub/cub.cuh>
 #include <cuda.h>
 #include <cuda_bf16.h>
+#include <cuda_pipeline.h>
 #include <mma.h>
 
 namespace wmma = nvcuda::wmma;
@@ -3125,11 +3126,10 @@ blockk_fixed_frag_d128_kernel(
   const int lg = lane >> 2;
   const int lc = lane & 3;
 
-  // Union: residual staging tile during init, encoder/decoder tiles after.
+  // Union: residual staging tile during init, then two double-buffered
+  // (E,D) staging pairs: 4 * 32 * 136 bf16 = exactly the same 34.8 KB.
   extern __shared__ unsigned char frag_smem[];
   __nv_bfloat16 *stage = reinterpret_cast<__nv_bfloat16 *>(frag_smem);
-  __nv_bfloat16 *e_smem = stage;                 // [32][136]
-  __nv_bfloat16 *d_smem = stage + kGb * 136;     // [32][136]
 
   for (int i = threadIdx.x; i < kFixedFragTile * kDim; i += kFixedFragThreads) {
     const int t = i >> 7;
@@ -3161,23 +3161,37 @@ blockk_fixed_frag_d128_kernel(
   }
   __syncthreads();  // stage[] now serves as the e/d buffers
 
-  uint64_t pword[2][2] = {};  // [band][row half]: packed bits across 2 groups
-  for (int g = 0; g < groups; ++g) {
+  // Double-buffered E/D staging with cp.async: the group g+1 tiles are
+  // prefetched while group g computes, hiding the global-load latency under
+  // the mma work and needing only one barrier per group.
+  auto stage_group = [&](int gg, int p) {
     if (phase_mask & 16) {
       const __nv_bfloat16 *e_g =
-          encoders + (static_cast<int64_t>(row) * code_dim + g * kGb) * kDim;
+          encoders + (static_cast<int64_t>(row) * code_dim + gg * kGb) * kDim;
       const __nv_bfloat16 *d_g =
-          decoders + (static_cast<int64_t>(row) * code_dim + g * kGb) * kDim;
+          decoders + (static_cast<int64_t>(row) * code_dim + gg * kGb) * kDim;
+      __nv_bfloat16 *e_dst = stage + p * (2 * kGb * 136);
+      __nv_bfloat16 *d_dst = e_dst + kGb * 136;
       for (int i = threadIdx.x; i < kGb * (kDim / 8); i += kFixedFragThreads) {
         const int rr = i >> 4;
         const int cc = i & 15;
-        reinterpret_cast<uint4 *>(e_smem)[rr * 17 + cc] =
-            reinterpret_cast<const uint4 *>(e_g)[i];
-        reinterpret_cast<uint4 *>(d_smem)[rr * 17 + cc] =
-            reinterpret_cast<const uint4 *>(d_g)[i];
+        __pipeline_memcpy_async(e_dst + rr * 136 + cc * 8, e_g + i * 8, 16);
+        __pipeline_memcpy_async(d_dst + rr * 136 + cc * 8, d_g + i * 8, 16);
       }
     }
+    __pipeline_commit();
+  };
+
+  uint64_t pword[2][2] = {};  // [band][row half]: packed bits across 2 groups
+  stage_group(0, 0);
+  for (int g = 0; g < groups; ++g) {
+    __pipeline_wait_prior(0);
     __syncthreads();
+    if (g + 1 < groups) {
+      stage_group(g + 1, (g + 1) & 1);
+    }
+    const __nv_bfloat16 *e_smem = stage + (g & 1) * (2 * kGb * 136);
+    const __nv_bfloat16 *d_smem = e_smem + kGb * 136;
 
     #pragma unroll
     for (int band = 0; band < 2; ++band) {
@@ -3281,7 +3295,6 @@ blockk_fixed_frag_d128_kernel(
         }
       }
     }
-    __syncthreads();
   }
 
   // Per-token residual norm from the fragments: lane holds 4 elements of row
