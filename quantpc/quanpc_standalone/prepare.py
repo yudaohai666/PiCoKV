@@ -14,7 +14,6 @@ import torch
 from .cache import PreparedKVCache
 from .constants import SUPPORTED_CODE_BITS, SUPPORTED_EXP_BITS
 from .online import _prepare_fixed_block32, quantize_block32_online
-from .whiten import whiten_states
 
 try:
     from quantpc.quanpc_prefill_cuda_extension.quanpc_prefill_cuda import (
@@ -273,8 +272,6 @@ def prepare_kv_cache(
     value_encoders: Optional[torch.Tensor] = None,
     key_decoders: Optional[torch.Tensor] = None,
     value_decoders: Optional[torch.Tensor] = None,
-    key_whitening: Optional[torch.Tensor] = None,
-    value_whitening: Optional[torch.Tensor] = None,
     use_fused_quant: bool = True,
 ) -> PreparedKVCache:
     """Learn online K/V projections and build a packed CUDA cache.
@@ -292,14 +289,9 @@ def prepare_kv_cache(
     Adding ``key_decoders``/``value_decoders`` drops that solve too, reusing a
     decoder fitted offline against the same encoders.
 
-    ``key_whitening``/``value_whitening`` are the symmetric ``[.., D, D]``
-    factors from :mod:`.whiten`.  Whitening is applied here rather than by the
-    caller because ``zerorope`` masks RoPE frequency pairs *by coordinate*: it
-    is only meaningful in the model's basis, so it must run before the rotation.
-
     ``use_fused_quant`` selects the fully fused CUDA cascade kernel for any
-    side that has a stored decoder and no runtime whitening (one launch does
-    quantize + pack + err with the residual held in tensor-core fragments).
+    side that has a stored decoder (one launch does quantize + pack + err with
+    the residual held in tensor-core fragments).
     ``False`` forces the reference PyTorch loop everywhere; the environment
     variable ``QUANPC_DISABLE_FUSED_QUANT=1`` does the same globally, which is
     convenient for A/B benchmarking without code changes.  Both paths
@@ -319,18 +311,16 @@ def prepare_kv_cache(
     )
     batch, heads, dim = full_key.shape[0], full_key.shape[1], full_key.shape[3]
 
-    # A side with a stored decoder (and no runtime whitening) runs the fully
-    # fused cascade kernel: a single launch quantizes, packs, and produces the
-    # EAS error with the residual held in registers, skipping the global
-    # clone, the Python group loop, and the separate pack kernels.  Whitening
-    # forces the reference path because the fused kernel reads full states in
-    # the model's own basis.
+    # A side with a stored decoder runs the fully fused cascade kernel: a single
+    # launch quantizes, packs, and produces the EAS error with the residual held
+    # in registers, skipping the global clone, the Python group loop, and the
+    # separate pack kernels.
     fused_enabled = (
         use_fused_quant
         and os.environ.get("QUANPC_DISABLE_FUSED_QUANT", "0") != "1"
     )
-    key_fused = fused_enabled and key_decoders is not None and key_whitening is None
-    value_fused = fused_enabled and value_decoders is not None and value_whitening is None
+    key_fused = fused_enabled and key_decoders is not None
+    value_fused = fused_enabled and value_decoders is not None
     if (key_fused or value_fused) and blockk_fixed_cuda is None:
         raise RuntimeError("QuanPC prefill CUDA extension is unavailable")
 
@@ -344,16 +334,6 @@ def prepare_kv_cache(
             :,
             global_start : global_start + global_len,
         ].contiguous()
-
-    # Rotate into the whitened bases only after zerorope has masked the RoPE
-    # pairs.  The dense sink/local/EAS windows are gathered from full_key/value
-    # below, so they must be rotated too or decode would mix two bases.
-    if key_whitening is not None:
-        key_global = whiten_states(key_global, key_whitening).contiguous()
-        full_key = whiten_states(full_key, key_whitening).contiguous()
-    if value_whitening is not None:
-        value_global = whiten_states(value_global, value_whitening).contiguous()
-        full_value = whiten_states(full_value, value_whitening).contiguous()
 
     # This internal K/V overlap is part of the measured fast path.  It is not
     # the removed async-prepare/prefill overlap API.

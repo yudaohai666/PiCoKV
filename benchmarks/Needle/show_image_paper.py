@@ -199,16 +199,12 @@ def main(args):
         'bpc_offline': 'BinaryPC w/ OPC',
         'k320online': 'QuanPC k320/v320 (online)',
         'k320offdec': 'QuanPC k320/v320 (offline decoder)',
-        # All three projections offline -- whitening, encoder, decoder -- with
-        # W^-1 D^T folded into one stored matrix; plus the local-window ablation.
+        # Encoder and decoder both offline, folded into one stored pair; plus the
+        # local-window ablation.
         'k320folded': 'QuanPC k320/v320 (all-offline, folded W)',
         'k320foldedlocal256': 'QuanPC k320/v320 (all-offline, local 256)',
         'k320onlinelocal256': 'QuanPC k320/v320 (online, local 256)',
         'k256folded': 'QuanPC k256/v256 (all-offline, folded W)',
-        'k320offlinenowhiten': 'QuanPC k320/v320 (all-offline, no whitening, local 256)',
-        'k256offlinenowhiten': 'QuanPC k256/v256 (all-offline, no whitening, local 256)',
-        'k256onlinewhiten': 'QuanPC k256/v256 (online + whitening)',
-        'k320onlinewhiten': 'QuanPC k320/v320 (online + whitening)',
         'k256online': 'QuanPC k256/v256 (online)',
         'k256offdec': 'QuanPC k256/v256 (offline decoder)',
     }
@@ -218,12 +214,15 @@ def main(args):
     # that is how earlier plots ended up titled "(online)" for a local-256 run.
     structured = re.fullmatch(
         r'(?:quantpc_)?(online|offline)_k(\d+)_v(\d+)'
-        r'(?:_local(\d+))?_(whiten|nowhiten)'
+        r'(?:_local(\d+))?'
+        # Archived dirs from before whitening was dropped still carry the token;
+        # swallow it so those runs keep plotting.
+        r'(?:_(?:whiten|nowhiten))?'
         r'(?:_(krefit|vrefit|refit))?',
         method, re.IGNORECASE,
     )
     if structured:
-        mode, k, v, local, whiten, refit = structured.groups()
+        mode, k, v, local, refit = structured.groups()
         local_text = f", local {local}" if local else ""
         refit_names = {
             "krefit": "K decoder refit",
@@ -232,9 +231,7 @@ def main(args):
         }
         refit_text = f", {refit_names[refit.lower()]}" if refit else ""
         method_title = (
-            f"QuanPC k{k}/v{v} ({mode.lower()}{local_text}, "
-            f"{'whitened' if whiten.lower() == 'whiten' else 'no whitening'}"
-            f"{refit_text})"
+            f"QuanPC k{k}/v{v} ({mode.lower()}{local_text}{refit_text})"
         )
     # Match method names with budget suffix, e.g. snapkv-2048
     elif re.match(r'([^-]+)-(\d+)', method, re.IGNORECASE):

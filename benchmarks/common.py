@@ -59,31 +59,21 @@ def resolve_offline_proj_path(
     model_name: str,
     k_bits: int,
     v_bits: int,
-    whiten: bool = False,
 ) -> Optional[str]:
     """Return the effective offline encoder .pt path, or None for online.
 
     Offline is requested when ``--offline`` is set or an explicit path is given
     (quantpc only). With no explicit path, the default is derived from the model
-    tag and bits: ``offline_projection/projections/{model_tag}_k{k}_v{v}_nowhiten.pt``. Raises
-    a clear error when the resolved file is missing. Offline projections already
-    contain the complete fitted basis, so runtime whitening is intentionally
-    rejected rather than combining incompatible bases.
+    tag and bits: ``offline_projection/projections/{model_tag}_k{k}_v{v}.pt``.
+    Raises a clear error when the resolved file is missing.
     """
     if method != "quantpc":
         return None
     if not offline and offline_proj_path is None:
         return None
-    if whiten:
-        raise ValueError(
-            "offline projection and runtime --whiten cannot be combined: "
-            "offline PTs use the model basis, while whitened PTs already fold "
-            "the whitening into encoder/decoder. Use offline without --whiten "
-            "or online with --whiten."
-        )
     model_tag = Path(model_name.rstrip("/")).name
     path = offline_proj_path or str(
-        _REPO_ROOT / "offline_projection" / "projections" / f"{model_tag}_k{k_bits}_v{v_bits}_nowhiten.pt"
+        _REPO_ROOT / "offline_projection" / "projections" / f"{model_tag}_k{k_bits}_v{v_bits}.pt"
     )
     if not Path(path).exists():
         raise FileNotFoundError(
@@ -111,14 +101,15 @@ def output_tag(
     num_bits: int = 2,
     *,
     offline: bool = False,
-    whiten: bool | None = None,
+    full_tag: bool = False,
     online_decoder_refit: str = "none",
 ) -> str:
     """Directory/file tag keyed by method + KV bits, shared across runners.
 
-    Passing ``whiten`` switches quantpc to the full naming --
-    ``{online|offline}_k{K}_v{V}_{whiten|nowhiten}``. The local window is fixed
-    at 256 across the current experiments, so it is intentionally omitted.
+    ``full_tag`` switches quantpc to the full naming --
+    ``{online|offline}_k{K}_v{V}`` plus a decoder-refit suffix. The local window
+    is fixed at 256 across the current experiments, so it is intentionally
+    omitted.
     """
     if method == "kivi":
         return f"kivi_k{k_bits}_v{v_bits}"
@@ -126,9 +117,9 @@ def output_tag(
         return f"oscar_int{num_bits}"
     if method != "quantpc":
         return method
-    if whiten is not None:
+    if full_tag:
         mode = "offline" if offline else "online"
-        tag = f"{mode}_k{k_bits}_v{v_bits}_{'whiten' if whiten else 'nowhiten'}"
+        tag = f"{mode}_k{k_bits}_v{v_bits}"
         refit_suffix = {"none": "", "k": "_krefit", "v": "_vrefit", "both": "_refit"}
         if online_decoder_refit not in refit_suffix:
             raise ValueError(f"unknown online_decoder_refit: {online_decoder_refit}")
@@ -311,7 +302,6 @@ def _load_quantpc_model(
     use_pruning: bool,
     prune_mode: int,
     log_eps: float,
-    whiten: bool = False,
     offline_proj_path: Optional[str] = None,
     online_decoder_refit: str = "none",
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
@@ -344,17 +334,11 @@ def _load_quantpc_model(
         use_pruning=use_pruning,
         prune_mode=prune_mode,
         log_eps=log_eps,
-        whiten=whiten,
     )
 
     key_encoders = value_encoders = None
     key_decoders = value_decoders = None
     if offline_proj_path is not None:
-        if whiten:
-            raise ValueError(
-                "offline projection and runtime whitening cannot be combined; "
-                "use a folded offline PT without --whiten, or use online whitening."
-            )
         _projs = load_offline_projections(offline_proj_path)
         # The offline projection contains both encoders and decoders.  Refit is
         # controlled globally by side: the selected side(s) keep the offline
@@ -582,7 +566,6 @@ def load_model(
     use_pruning: bool = True,
     prune_mode: int = 3,
     log_eps: float = -10.0,
-    whiten: bool = False,
     group_size: int = 32,
     residual_length: int = 32,
     num_bits: int = 4,
@@ -659,7 +642,6 @@ def load_model(
             use_pruning=use_pruning,
             prune_mode=prune_mode,
             log_eps=log_eps,
-            whiten=whiten,
             offline_proj_path=offline_proj_path,
             online_decoder_refit=online_decoder_refit,
         )

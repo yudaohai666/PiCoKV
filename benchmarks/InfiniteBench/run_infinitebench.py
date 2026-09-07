@@ -112,11 +112,10 @@ def parse_arguments():
     parser.add_argument("--offline", action="store_true",
                         help="quantpc: use offline encoders "
                              "(default path offline_projection/projections/"
-                             "{model}_k{K}_v{V}_nowhiten.pt)")
+                             "{model}_k{K}_v{V}.pt)")
     parser.add_argument("--online-decoder-refit", default="none",
                         choices=("none", "k", "v", "both"),
                         help="quantpc offline only: online decoder refit side")
-    parser.add_argument("--whiten", action="store_true")
     parser.add_argument("--offline-proj-path", default=None,
                         help="quantpc: explicit offline encoder .pt")
 
@@ -174,15 +173,9 @@ def parse_arguments():
 def run_tag(args):
     """Reproducible run tag (same scheme as run_ruler_evaluation.run_tag)."""
     offline = args.offline or args.offline_proj_path is not None
-    whiten = args.whiten
-    if offline and args.offline_proj_path:
-        from quantpc.quanpc_standalone.transformers import load_offline_projections
-        meta = load_offline_projections(args.offline_proj_path).get("meta", {})
-        whiten = bool(meta.get("whitened"))
     if args.method == "quantpc":
         mode = "offline" if offline else "online"
-        tag = (f"quantpc_{mode}_k{args.k_bits}_v{args.v_bits}_"
-               f"{'whiten' if whiten else 'nowhiten'}")
+        tag = f"quantpc_{mode}_k{args.k_bits}_v{args.v_bits}"
         if offline:
             suffix = {"k": "krefit", "v": "vrefit", "both": "refit"}.get(
                 args.online_decoder_refit)
@@ -372,7 +365,6 @@ def main():
         offline_proj_path = resolve_offline_proj_path(
             args.method, args.offline, args.offline_proj_path,
             model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,
-            whiten=args.whiten,
         )
         model, tokenizer, kv_cache_factory = load_model(
             args.model,
@@ -384,7 +376,6 @@ def main():
             log_eps=args.log_eps,
             offline_proj_path=offline_proj_path,
             online_decoder_refit=args.online_decoder_refit,
-            whiten=args.whiten,
             group_size=args.group_size,
             residual_length=args.residual_length,
             num_bits=args.num_bits,

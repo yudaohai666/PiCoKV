@@ -151,7 +151,6 @@ def main() -> None:
                         help="explicit 'depth:length,...' pairs; overrides the "
                              "--depths x --lengths cross product so a handful of "
                              "cells can be rechecked without the full sweep")
-    parser.add_argument("--whiten", action="store_true")
     parser.add_argument("--k-bits", type=int, default=320)
     parser.add_argument("--v-bits", type=int, default=320)
     parser.add_argument("--direction-sample-size", type=int, default=8192)
@@ -197,16 +196,9 @@ def main() -> None:
         use_pruning=args.use_pruning,
         prune_mode=args.prune_mode,
         log_eps=args.log_eps,
-        whiten=args.whiten,
     )
     offline: dict = {}
     if args.offline_proj_path is not None:
-        if args.whiten:
-            raise SystemExit(
-                "offline projection and runtime --whiten cannot be combined; "
-                "use a folded offline PT without --whiten, or omit the offline "
-                "projection when testing online whitening."
-            )
         stored = load_offline_projections(args.offline_proj_path)
         # An offline projection is used whole: its decoder was fitted against
         # the codes its own encoder produces, so the two only make sense together.
@@ -256,7 +248,6 @@ def main() -> None:
                 "requested_length": requested_length,
                 "actual_tokens": provider.last_actual_tokens,
                 "depth": depth,
-                "whiten": bool(args.whiten),
                 "found": found,
                 "hits": hits,
                 "error": error,

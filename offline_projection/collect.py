@@ -1,14 +1,12 @@
 """Calibration-state collection for the offline block-32 pipeline.
 
 Runs the model over calibration text and dumps per-layer post-RoPE K/V shards
-under a temp directory, each shard also carrying that sample's per-head query
-Gram -- whitening needs only ``Q^T Q``, so the queries themselves never reach
-disk.
+under a temp directory.
 
 This is a library, not an entry point: ``create_offline_projections.py`` drives
 it and owns the fitting stages.  It used to double as a CLI that wrote
 encoder-only projections in the ``quanpc_standalone_block32_encoder_v1`` format,
-which the folded encoder+decoder+whitening artifact superseded.
+which the encoder+decoder artifact superseded.
 """
 from __future__ import annotations
 
@@ -240,24 +238,10 @@ def collect_kv(layer_idx, key_states, value_states):
     if end <= sink_size:
         return
     stride = max(1, int(collect_stride))
-    # collect_query must have run for this layer already: collect_kv is what
-    # raises StopForwardAfterCollect, and the query Gram rides in the same shard.
     current_states[layer_idx]["key"] = key_states[0, :, sink_size:end:stride, :].detach().to("cpu", dtype=torch.bfloat16)
     current_states[layer_idx]["value"] = value_states[0, :, sink_size:end:stride, :].detach().to("cpu", dtype=torch.bfloat16)
     if layer_idx == target_collect_layers[-1]:
         raise StopForwardAfterCollect()
-
-
-# Whitening needs (Q^T Q)^{1/2} and nothing else, so unlike K/V the query never
-# has to reach disk in full: a [kv_heads, D, D] Gram rides along inside each
-# sample shard and the whitening stage just sums them.  Off by default, so the
-# encoder-only pipeline behaves exactly as before.
-collect_query_grams = False
-
-
-def set_collect_query_grams(enabled):
-    global collect_query_grams
-    collect_query_grams = bool(enabled)
 
 
 def set_collect_stride(stride):
@@ -269,21 +253,6 @@ def set_collect_stride(stride):
     """
     global collect_stride
     collect_stride = max(1, int(stride))
-
-
-def collect_query(layer_idx, query_states, num_kv_heads, chunk=8192):
-    """Accumulate this sample's per-KV-head query Gram in float64."""
-    if not collect_query_grams or layer_idx not in target_collect_layers:
-        return
-    grouped = query_states.reshape(
-        query_states.shape[0], num_kv_heads, -1, query_states.shape[-1]
-    )[0]
-    gram = None
-    for start in range(0, grouped.shape[-2], chunk):
-        block = grouped[:, start:start + chunk].double()
-        part = torch.matmul(block.transpose(-1, -2), block)
-        gram = part if gram is None else gram + part
-    current_states[layer_idx]["query_gram"] = gram.detach().to("cpu")
 
 
 def modified_mlp_forward(self, x, chunk_size=8192):
@@ -327,7 +296,6 @@ def modify_for_collect(model):
             value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
             cos, sin = position_embeddings
             query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-            collect_query(self.layer_idx, query_states, key_states.shape[1])
             collect_kv(self.layer_idx, key_states, value_states)
             attn_output = eager_attention_forward(query_states, key_states, value_states)
             attn_output = attn_output.transpose(1, 2).contiguous()
@@ -375,7 +343,6 @@ def modify_qwen3_for_collect(model):
             query_states, key_states = qwen3_apply_rotary_pos_emb(
                 query_states, key_states, cos, sin
             )
-            collect_query(self.layer_idx, query_states, key_states.shape[1])
             collect_kv(self.layer_idx, key_states, value_states)
             attn_output = eager_attention_forward(query_states, key_states, value_states)
             attn_output = attn_output.transpose(1, 2).contiguous()

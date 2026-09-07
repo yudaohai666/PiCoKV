@@ -41,12 +41,11 @@ METHODS=(
 [ -n "${METHOD:-}" ] && METHODS=("${METHOD}")
 
 # ── per-method defaults (identical across all benchmark launchers) ──
-# quantpc; default = offline + nowhiten + vrefit
+# quantpc; default = offline + vrefit
 K_BITS="${K_BITS:-320}"; V_BITS="${V_BITS:-320}"
 SINK="${SINK:-64}"; LOCAL="${LOCAL:-256}"
 EXP_BITS="${EXP_BITS:-4}"; EAS="${EAS:-0.01}"; ZEROROPE="${ZEROROPE:-20}"
 USE_OFFLINE="${USE_OFFLINE:-0}"
-WHITEN="${WHITEN:-0}"
 ONLINE_DECODER_REFIT="${ONLINE_DECODER_REFIT:-none}"
 # 1e-3 == constants.ONLINE_DECODER_RIDGE, i.e. the shipped path. Do NOT raise this
 # back to 1e-2: a nominal 1e-2 swamps the -9.3e-4 negative ridge the bf16 gram used
@@ -64,7 +63,7 @@ POLAR_MODE="${POLAR_MODE:-mixed}"; POLAR_RBITS="${POLAR_RBITS:-3}"; POLAR_TBITS=
 
 # Build METHOD_ARGS[] and TAG for a method. Needs REPO_ROOT, MODEL_TAG + the
 # per-method defaults above. quantpc TAG matches run_ruler/run_infinitebench's
-# python run_tag(): quantpc_{mode}_k{K}_v{V}_{whiten}[_krefit|_vrefit|_refit].
+# python run_tag(): quantpc_{mode}_k{K}_v{V}[_krefit|_vrefit|_refit].
 build_method_args() {
   METHOD_ARGS=(); TAG="$1"
   case "$1" in
@@ -72,27 +71,22 @@ build_method_args() {
       METHOD_ARGS=(--k-bits "${K_BITS}" --v-bits "${V_BITS}" --sink-size "${SINK}" --local-size "${LOCAL}"
         --exp-bits "${EXP_BITS}" --eas "${EAS}" --zerorope "${ZEROROPE}"
         --decoder-ridge "${DECODER_RIDGE}" --online-decoder-refit "${ONLINE_DECODER_REFIT}")
-      local mode proj whiten_tag
+      local mode proj
       if [ "${USE_OFFLINE}" = "1" ] || [ -n "${OFFLINE_PROJ_PATH}" ]; then
         mode="offline"; METHOD_ARGS+=(--offline); proj="${OFFLINE_PROJ_PATH}"
-        # offline + whiten -> the folded _whiten.pt (no runtime --whiten flag)
-        if [ -z "${proj}" ] && [ "${WHITEN}" = "1" ]; then
-          proj="${REPO_ROOT}/offline_projection/projections/${MODEL_TAG}_k${K_BITS}_v${V_BITS}_whiten.pt"
-        fi
         [ -n "${proj}" ] && METHOD_ARGS+=(--offline-proj-path "${proj}")
       else
-        mode="online"; [ "${WHITEN}" = "1" ] && METHOD_ARGS+=(--whiten)
+        mode="online"
       fi
-      [ "${WHITEN}" = "1" ] && whiten_tag="whiten" || whiten_tag="nowhiten"
-      TAG="quantpc_${mode}_k${K_BITS}_v${V_BITS}_${whiten_tag}"
+      TAG="quantpc_${mode}_k${K_BITS}_v${V_BITS}"
       # refit suffix applies only to the offline path.
       if [ "${mode}" = "offline" ]; then
         case "${ONLINE_DECODER_REFIT}" in k) TAG+="_krefit" ;; v) TAG+="_vrefit" ;; both) TAG+="_refit" ;; esac
       fi
       # Ridge always goes in the tag. run_ruler_evaluation.run_tag() omits it at
-      # the 1e-2 default, but NIAH is where that bit us: the archived
-      # Qwen3-8B-pre/quantpc_online_k320_v320_nowhiten/ is a ridge-1e-3 run whose
-      # dir name doesn't say so. Ridge is model-dependent and changes the result,
+      # the 1e-2 default, but NIAH is where that bit us: an archived Qwen3-8B
+      # online k320/v320 run was actually fitted at ridge 1e-3 and its dir name
+      # doesn't say so. Ridge is model-dependent and changes the result,
       # and run_bin.py resumes from results.json by (length, depth) -- a shared
       # dir silently mixes two ridges into one heatmap.
       TAG+="_ridge${DECODER_RIDGE}"

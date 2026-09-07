@@ -138,8 +138,6 @@ python benchmarks/Needle/run_bin.py --method quantpc \
 
 For offline evaluation, pass ``--offline`` or an explicit
 ``--offline-proj-path``. The default path is
-``offline_projection/projections/{model}_k320_v320_nowhiten.pt`` when the
+``offline_projection/projections/{model}_k320_v320.pt`` when the
 model basename is ``Llama-3.1-8B-Instruct``. ``--online-decoder-refit`` may be
-``none``, ``k``, ``v``, or ``both``. Runtime ``--whiten`` is only for online
-projection; it is rejected together with an offline PT because offline
-artifacts already use their fitted basis.
+``none``, ``k``, ``v``, or ``both``.

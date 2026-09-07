@@ -25,18 +25,10 @@ class StandaloneConfig:
     exp_bits: int = 4
     seed: int = 0
 
-    # Rotate K into the query-whitened basis and V into the o_proj-whitened one
-    # before quantizing. Exact for an unquantized run; it only redistributes
-    # quantization error. Applies to both sides and every layer -- an offline
-    # projection folds the same rotation into its stored pair instead, which is
-    # the configuration to prefer: applied at runtime this costs 5-6% of prefill
-    # and wins nothing on either code width.
-    whiten: bool = False
-
-    # Use the fully fused CUDA cascade kernel for offline+no-refit sides
-    # (stored decoder, no runtime whitening).  Numerically equivalent to the
-    # reference loop up to fp32 accumulation order; ~5x faster prefill
-    # preparation.  QUANPC_DISABLE_FUSED_QUANT=1 overrides this globally.
+    # Use the fully fused CUDA cascade kernel for sides with a stored decoder.
+    # Numerically equivalent to the reference loop up to fp32 accumulation
+    # order; ~5x faster prefill preparation.  QUANPC_DISABLE_FUSED_QUANT=1
+    # overrides this globally.
     use_fused_quant: bool = True
 
     # Per-token CUDA decode.

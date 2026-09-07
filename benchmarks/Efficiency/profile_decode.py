@@ -119,15 +119,12 @@ def main() -> None:
     p.add_argument("--prune-mode", type=int, default=3)
     p.add_argument("--log-eps", type=float, default=-10.0)
     p.add_argument("--offline", action="store_true",
-                   help="quantpc: use offline encoders (skip online QR at prefill); path defaults to offline_projection/projections/{model}_k{K}_v{V}_nowhiten.pt")
+                   help="quantpc: use offline encoders (skip online QR at prefill); path defaults to offline_projection/projections/{model}_k{K}_v{V}.pt")
     p.add_argument("--offline-proj-path", default=None,
                    help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
     p.add_argument("--online-decoder-refit", default="none",
                    choices=("none", "k", "v", "both"),
                    help="quantpc offline only: drop the baked K/V decoder(s) and refit online while keeping the fixed offline encoder; none=use baked decoders")
-    p.add_argument("--whiten", action="store_true",
-                   help="quantpc: rotate K/V into the query-whitened basis at runtime; a "
-                        "folded projection already has this baked into its stored pair")
     p.add_argument("--decoder-ridge", type=float, default=1e-2,
                    help="override the online decoder ridge (default 1e-2; offline PTs are fitted with 1e-3)")
     p.set_defaults(use_pruning=True)
@@ -164,7 +161,6 @@ def main() -> None:
     offline_proj_path = resolve_offline_proj_path(
         args.method, args.offline, args.offline_proj_path,
         model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,
-        whiten=args.whiten,
     )
     model, tokenizer, make_cache = load_model(
         args.model,
@@ -191,7 +187,6 @@ def main() -> None:
         residual_evict_size=args.residual_evict_size,
         offline_v_hadamard=args.offline_v_hadamard,
         offline_proj_path=offline_proj_path,
-        whiten=args.whiten,
         online_decoder_refit=args.online_decoder_refit,
         # PolarQuant params (--method polar)
         polar_mode=args.polar_mode,
