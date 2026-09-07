@@ -6,7 +6,7 @@ For each (method, prompt_length) it measures:
   * decode throughput (tokens/s)
   * peak GPU memory for the prefill phase and for the full generation
 
-The same ``generate()``-based methodology works uniformly across quantpc (a
+The same ``generate()``-based methodology works uniformly across picokv (a
 fresh QuantKVCache injected per call), kivi (internal quantized cache), and the
 dense flash_attention_2 / sdpa / eager baselines, so numbers are comparable.
 
@@ -31,7 +31,7 @@ from typing import Optional
 
 import torch
 
-# Make `benchmarks.common` / `import quantpc` resolvable from any CWD.
+# Make `benchmarks.common` / `import picokv` resolvable from any CWD.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -116,7 +116,7 @@ def _time_generate(model, input_ids, max_new_tokens, make_cache) -> float:
         use_cache=True,
         pad_token_id=pad_token_id,  # silence "Setting pad_token_id to eos_token_id" warning
     )
-    # quantpc needs a fresh QuantKVCache per call; kivi/dense keep make_cache=None.
+    # picokv needs a fresh QuantKVCache per call; kivi/dense keep make_cache=None.
     pkv = make_cache() if make_cache is not None else None
     if pkv is not None:
         gen_kwargs["past_key_values"] = pkv
@@ -140,7 +140,7 @@ def _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats, d
     reliable even when prefill >> decode (where ``total - ttft`` subtraction
     goes negative). Each step goes through ``prepare_inputs_for_generation`` so
     position_ids / cache_position / logits_to_keep match ``generate`` exactly,
-    uniformly across quantpc / kivi / dense.
+    uniformly across picokv / kivi / dense.
 
     The first decode step after a long prefill can be 10-50x a steady step (one-off
     workspace allocation / cuBLAS autotune / kernel init, and cudaMalloc under a
@@ -148,7 +148,7 @@ def _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats, d
     the per-token average and mis-rank methods; ``decode_warmup`` steps move it out
     of the timed region so the number reflects steady-state throughput.
 
-    ``cache_position`` is required by the stock (quantpc/dense) prepare path;
+    ``cache_position`` is required by the stock (picokv/dense) prepare path;
     ``logits_to_keep=1`` avoids materializing full-sequence fp32 logits at
     prefill (a 131072-len prompt would otherwise need ~67GB). KIVI's custom
     prepare ignores both (it already forces logits_to_keep=1).
@@ -296,7 +296,7 @@ def run(args) -> None:
     model, tokenizer, make_cache = load_model(
         args.model,
         method=args.method,
-        # quantpc KV-cache params (--method quantpc)
+        # picokv KV-cache params (--method picokv)
         k_bits=args.k_bits,
         v_bits=args.v_bits,
         sink_size=args.sink_size,
@@ -418,7 +418,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Prefill vs decode efficiency benchmark.")
     parser.add_argument("--compare", default=None, help="aggregate all *.json under this dir into a table and exit")
     parser.add_argument("--model", default="/data/Llama-3.1-8B-Instruct")
-    parser.add_argument("--method", default="quantpc", help="quantpc | oscar | kivi | flash_attention_2 | sdpa | eager")
+    parser.add_argument("--method", default="picokv", help="picokv | oscar | kivi | flash_attention_2 | sdpa | eager")
     parser.add_argument("--dataset", default=None,
                         help="path to a .jsonl file with 'text' fields; uses real text instead of random token ids")
     parser.add_argument("--lengths", default="4096,16384,32768", help="comma-separated prompt lengths")
@@ -429,10 +429,10 @@ def main() -> None:
     parser.add_argument("--mem-only", action="store_true",
                         help="memory-only mode: measure peak GPU memory only, skip all latency timing; "
                              "when off, run latency benchmark only and do NO memory-related work")
-    parser.add_argument("--output", default="results/efficiency/quantpc.json")
-    # ── quantpc KV-cache params (--method quantpc) ──
-    parser.add_argument("--k-bits", type=int, default=None, help="QuanPC K projection bits; KIVI defaults to 2")
-    parser.add_argument("--v-bits", type=int, default=None, help="QuanPC V projection bits; KIVI defaults to 2")
+    parser.add_argument("--output", default="results/efficiency/picokv.json")
+    # ── picokv KV-cache params (--method picokv) ──
+    parser.add_argument("--k-bits", type=int, default=None, help="PiCoKV K projection bits; KIVI defaults to 2")
+    parser.add_argument("--v-bits", type=int, default=None, help="PiCoKV V projection bits; KIVI defaults to 2")
     parser.add_argument("--sink-size", type=int, default=64, help="initial (sink) tokens kept in full precision")
     parser.add_argument("--local-size", type=int, default=256, help="most-recent (local) tokens kept in full precision")
     parser.add_argument("--exp-bits", type=int, default=4)
@@ -452,8 +452,8 @@ def main() -> None:
     parser.add_argument("--kv-norm", default="1", help="OScaR kv norm (INT2 默认 1)")
     parser.add_argument("--residual-evict-size", type=int, default=256, help="OScaR residual evict size (INT2 默认 256)")
     parser.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
-    parser.add_argument("--offline", action="store_true", help="quantpc: use offline encoders (default path offline_projection/projections/{model}_k{K}_v{V}.pt)")
-    parser.add_argument("--offline-proj-path", default=None, help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
+    parser.add_argument("--offline", action="store_true", help="picokv: use offline encoders (default path offline_projection/projections/{model}_k{K}_v{V}.pt)")
+    parser.add_argument("--offline-proj-path", default=None, help="picokv: explicit offline encoder .pt (overrides the --offline default path)")
     # ── PolarQuant params (--method polar) ──
     parser.add_argument("--polar-mode", default="mixed", choices=["mixed", "group", "snapkv"], help="PolarQuant attention variant: mixed (K polar + V KIVI-quant) | group (K-only) | snapkv")
     parser.add_argument("--polar-rbits", type=int, default=3, help="PolarQuant K radius bits (rbits+tbits<=8)")

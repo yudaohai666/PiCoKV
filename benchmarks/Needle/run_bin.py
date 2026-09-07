@@ -1,4 +1,4 @@
-"""Experiment runner for the QuanPC quantized KV-cache algorithm."""
+"""Experiment runner for the PiCoKV quantized KV-cache algorithm."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import Optional
 
 import torch
 
-# Make `import quantpc` / `from benchmarks.common import ...` resolvable from any CWD.
+# Make `import picokv` / `from benchmarks.common import ...` resolvable from any CWD.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -23,8 +23,8 @@ class Transformer(ModelProvider):
     def __init__(
         self,
         model_name: str = "/data/Llama-3.1-8B-Instruct",
-        method: str = "quantpc",
-        # quantpc KV-cache params (--method quantpc)
+        method: str = "picokv",
+        # picokv KV-cache params (--method picokv)
         k_bits: int = 320,
         v_bits: int = 320,
         sink_size: int = 64,
@@ -46,7 +46,7 @@ class Transformer(ModelProvider):
         kv_norm: str = "1",
         residual_evict_size: int | None = 256,
         offline_v_hadamard: bool = True,
-        # quantpc offline block-32 encoders (--method quantpc)
+        # picokv offline block-32 encoders (--method picokv)
         offline_proj_path: str | None = None,
         max_new_tokens: int = 50,
         # PolarQuant params (--method polar)
@@ -61,7 +61,7 @@ class Transformer(ModelProvider):
         self.model, self.tokenizer, self._make_cache = load_model(
             model_name,
             method=method,
-            # quantpc KV-cache params (--method quantpc)
+            # picokv KV-cache params (--method picokv)
             k_bits=k_bits,
             v_bits=v_bits,
             sink_size=sink_size,
@@ -110,7 +110,7 @@ class Transformer(ModelProvider):
                 do_sample=False,
                 return_dict_in_generate=True,
             )
-            # quantpc injects a fresh QuantKVCache per request; baselines use the
+            # picokv injects a fresh QuantKVCache per request; baselines use the
             # model's default cache (no past_key_values override).
             past_key_values = self._make_cache() if self._make_cache is not None else None
             if past_key_values is not None:
@@ -163,7 +163,7 @@ def run_experiment(
     depths: list[int],
     output_path: str,
     method: str,
-    # quantpc KV-cache params (--method quantpc)
+    # picokv KV-cache params (--method picokv)
     k_bits: int,
     v_bits: int,
     sink_size: int,
@@ -199,7 +199,7 @@ def run_experiment(
     model = Transformer(
         model_name,
         method=method,
-        # quantpc KV-cache params (--method quantpc)
+        # picokv KV-cache params (--method picokv)
         k_bits=k_bits,
         v_bits=v_bits,
         sink_size=sink_size,
@@ -260,9 +260,9 @@ def main() -> None:
     parser.add_argument("--model", default="/data/Llama-3.1-8B-Instruct")
     parser.add_argument(
         "--method",
-        default="quantpc",
+        default="picokv",
         help=(
-            "evaluation method: 'quantpc' / 'kivi' / 'oscar' / 'polar' (quantized KV cache), "
+            "evaluation method: 'picokv' / 'kivi' / 'oscar' / 'polar' (quantized KV cache), "
             "or a dense baseline attn implementation 'flash_attention_2' / 'sdpa' / 'eager'"
         ),
     )
@@ -270,9 +270,9 @@ def main() -> None:
     parser.add_argument("--depths", default="50", help="comma-separated needle depths")
     parser.add_argument("--output", default=None,
                         help="output JSON path (default: results/niah/{model}/{tag}/results.json)")
-    # ── quantpc KV-cache params (--method quantpc) ──
-    parser.add_argument("--k-bits", type=int, default=None, help="QuanPC K projection bits; KIVI defaults to 2")
-    parser.add_argument("--v-bits", type=int, default=None, help="QuanPC V projection bits; KIVI defaults to 2")
+    # ── picokv KV-cache params (--method picokv) ──
+    parser.add_argument("--k-bits", type=int, default=None, help="PiCoKV K projection bits; KIVI defaults to 2")
+    parser.add_argument("--v-bits", type=int, default=None, help="PiCoKV V projection bits; KIVI defaults to 2")
     parser.add_argument(
         "--sink-size",
         type=int,
@@ -330,12 +330,12 @@ def main() -> None:
     parser.add_argument(
         "--offline",
         action="store_true",
-        help="quantpc: use offline encoders (default path offline_projection/projections/{model}_k{K}_v{V}.pt)",
+        help="picokv: use offline encoders (default path offline_projection/projections/{model}_k{K}_v{V}.pt)",
     )
     parser.add_argument(
         "--offline-proj-path",
         default=None,
-        help="quantpc: explicit offline encoder .pt (overrides the --offline default path)",
+        help="picokv: explicit offline encoder .pt (overrides the --offline default path)",
     )
     parser.add_argument("--max-new-tokens", type=int, default=50)
     parser.add_argument("--seed", type=int, default=42)
@@ -361,7 +361,7 @@ def main() -> None:
         tag = output_tag(
             args.method, args.k_bits, args.v_bits, args.num_bits,
             offline=(args.offline or args.offline_proj_path is not None),
-            full_tag=(args.method == "quantpc"),
+            full_tag=(args.method == "picokv"),
         )
         output_path = str(Path("results/niah") / model_key / tag / "results.json")
     run_experiment(
@@ -370,7 +370,7 @@ def main() -> None:
         depths=parse_int_list(args.depths),
         output_path=output_path,
         method=args.method,
-        # quantpc KV-cache params (--method quantpc)
+        # picokv KV-cache params (--method picokv)
         k_bits=args.k_bits,
         v_bits=args.v_bits,
         sink_size=args.sink_size,

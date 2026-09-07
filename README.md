@@ -1,7 +1,7 @@
-# QuanPC KV Cache Experiments
+# PiCoKV KV Cache Experiments
 
-This workspace contains QuanPC quantized KV-cache attention code for
-long-context decoding. The implementation lives under `quantpc/` and supports
+This workspace contains PiCoKV quantized KV-cache attention code for
+long-context decoding. The implementation lives under `picokv/` and supports
 both online projection learning and fully offline projections, whose encoder and
 decoder are folded into a single stored pair.
 
@@ -54,8 +54,8 @@ source .venv/bin/activate
    ```
 
 CUDA 12.4 is required for the fast decode/prefill kernels; the CUDA extensions
-under `quantpc/quanpc_cuda_extension/` and
-`quantpc/quanpc_prefill_cuda_extension/` build on first use.
+under `picokv/picokv_cuda_extension/` and
+`picokv/picokv_prefill_cuda_extension/` build on first use.
 
 ### Key package install commands
 
@@ -81,7 +81,7 @@ Plain `pip install ...` works the same if you are inside an activated venv.
 
 ### Baseline method setup (kivi / oscar / polar)
 
-The `quantpc` and dense baselines (`flash_attention_2` / `sdpa` / `eager`) work
+The `picokv` and dense baselines (`flash_attention_2` / `sdpa` / `eager`) work
 out of the box. The KV-quant baselines need their CUDA kernels built into the
 same `.venv/` first (each script activates `.venv` and builds `--no-build-isolation`
 against the pinned torch 2.6.0+cu124, so it will not downgrade torch/transformers):
@@ -99,11 +99,11 @@ against the pinned torch 2.6.0+cu124, so it will not downgrade torch/transformer
   ```
 
 Both require a CUDA 12.4 toolchain on `PATH` (`nvcc`, `CUDA_HOME`, e.g.
-`/usr/local/cuda`). Skip these if you only run `quantpc`.
+`/usr/local/cuda`). Skip these if you only run `picokv`.
 
-## Core package: `quantpc.quanpc_standalone`
+## Core package: `picokv.picokv_standalone`
 
-QuanPC supports **two projection paths**, both using block-32 CholeskyQR /
+PiCoKV supports **two projection paths**, both using block-32 CholeskyQR /
 Householder subspace quantization with a ridge-regularized decoder:
 
 - **Online** (`StandaloneConfig()` defaults, no projection args): projections are
@@ -117,13 +117,13 @@ Householder subspace quantization with a ridge-regularized decoder:
 Decode requires bf16 CUDA and GQA=4 (`QH/KVH == 4`, `D == 128`), code bits in
 `{128,192,256,320,384,448,512}`, and `exp_bits` in `{1,2,4,8}` (default 4).
 
-See `quantpc/README.md` for the full package reference.
+See `picokv/README.md` for the full package reference.
 
 ### Minimal end-to-end example
 
 ```python
 import torch
-from quantpc.quanpc_standalone import (
+from picokv.picokv_standalone import (
     StandaloneConfig,
     prepare_kv_cache,
     decode_attention,
@@ -165,8 +165,8 @@ the packed global cache.
 ### Hugging Face Llama
 
 ```python
-from quantpc.quanpc_standalone import StandaloneConfig
-from quantpc.quanpc_standalone.transformers import (
+from picokv.picokv_standalone import StandaloneConfig
+from picokv.picokv_standalone.transformers import (
     StandaloneLlamaCache,
     modify_llama_for_standalone,
 )
@@ -186,12 +186,12 @@ CUDA decode path.
 
 ## Layout
 
-Active core (`quantpc/`):
+Active core (`picokv/`):
 
-- `quantpc/quanpc_standalone/`: online/offline projection prepare/decode API + HF Llama adapter.
-- `quantpc/quanpc_cuda_extension/`: single-token decode CUDA kernels.
-- `quantpc/quanpc_prefill_cuda_extension/`: cache-packing / gather CUDA kernels.
-- `quantpc/README.md`, `quantpc/test_quanpc_standalone_online.py`
+- `picokv/picokv_standalone/`: online/offline projection prepare/decode API + HF Llama adapter.
+- `picokv/picokv_cuda_extension/`: single-token decode CUDA kernels.
+- `picokv/picokv_prefill_cuda_extension/`: cache-packing / gather CUDA kernels.
+- `picokv/README.md`, `picokv/test_picokv_standalone_online.py`
   (+ `needle.py`, `PaulGrahamEssays/` for the self-contained corpus).
 
 Offline projections (`offline_projection/`):
@@ -202,12 +202,11 @@ Offline projections (`offline_projection/`):
   (on disk: `k320_v320`, `k320_v256`, `k256_v256`).
 
 Baselines (`src/`): `KIVI/`, `OScaR-KV-Quant/`, `PolarQuant/`, plus `lmeval.py`.
-`quantpc_legacy/` holds the superseded extension and is not used by benchmarks.
 
 Benchmarks (`benchmarks/`):
 `benchmarks/common.py::load_model(method=...)` builds the model for each method.
-Supported methods: `quantpc`, `kivi`, `oscar`, `polar`, and the dense baselines
-`flash_attention_2` / `sdpa` / `eager`. For `quantpc` it patches the model via
+Supported methods: `picokv`, `kivi`, `oscar`, `polar`, and the dense baselines
+`flash_attention_2` / `sdpa` / `eager`. For `picokv` it patches the model via
 `modify_llama_for_standalone` and injects a fresh `StandaloneLlamaCache` per call.
 The Efficiency / Needle / Longbench / Ruler / InfiniteBench runners all go
 through it.
@@ -225,26 +224,26 @@ export CUDA_VISIBLE_DEVICES=0
 Standalone regression test:
 
 ```bash
-python quantpc/test_quanpc_standalone_online.py
+python picokv/test_picokv_standalone_online.py
 ```
 
 NIAH. `benchmarks/Needle/run_bin.py` is the shared entry point for every
-method (quantpc / kivi / oscar / polar / dense baselines) and writes the flat
+method (picokv / kivi / oscar / polar / dense baselines) and writes the flat
 format `show_image_paper.py` plots:
 
 ```bash
-python benchmarks/Needle/run_bin.py --method quantpc \
+python benchmarks/Needle/run_bin.py --method picokv \
   --k-bits 320 --v-bits 320 --local-size 256 --zerorope 20 \
   --lengths 64000,110000 --depths 50 \
   --output results/niah/Llama-3.1-8B-Instruct_online_k320_v320/results.json
 ```
 
-`quantpc/run_standalone_niah.py` runs the same sweep for quantpc alone but also
+`picokv/run_standalone_niah.py` runs the same sweep for picokv alone but also
 records per-cell prefill timing and the full config, which is where the speed
 numbers come from:
 
 ```bash
-python quantpc/run_standalone_niah.py \
+python picokv/run_standalone_niah.py \
   --k-bits 320 --v-bits 320 --local-size 256 \
   --lengths 64000,110000 --depths 50 \
   --output-json results/niah/timed_runs/online_k320_v320.json
@@ -252,11 +251,11 @@ python quantpc/run_standalone_niah.py \
 
 See `results/niah/` for the stored outputs of these runs.
 
-Efficiency benchmark (quantpc vs dense/KIVI baselines):
+Efficiency benchmark (picokv vs dense/KIVI baselines):
 
 ```bash
 python benchmarks/Efficiency/run_efficiency.py \
-  --method quantpc --k-bits 320 --v-bits 320 --zerorope 20
+  --method picokv --k-bits 320 --v-bits 320 --zerorope 20
 ```
 
 Ruler / InfiniteBench (require `lm-eval`, see Environment Setup). Prefer the
@@ -268,7 +267,7 @@ bash benchmarks/InfiniteBench/run_infinitebench.sh
 ```
 
 Each launcher exposes a `METHODS=(...)` list near the top (comment methods in
-or out, or force one with `METHOD=quantpc`) and shares the same tunables:
+or out, or force one with `METHOD=picokv`) and shares the same tunables:
 `K_BITS`/`V_BITS` (320), `SINK` (64), `LOCAL` (256), `EXP_BITS` (4),
 `EAS` (0.01), `ZEROROPE` (20), `USE_OFFLINE` (0, except 1 in
 `run_efficiency.sh`). The decoder ridge is fixed at
@@ -276,15 +275,15 @@ or out, or force one with `METHOD=quantpc`) and shares the same tunables:
 offline fits, and decode-time pruning is off everywhere by default
 (`run_efficiency.sh` can re-enable it with `PRUNING=1`, which adds a `_prune`
 tag suffix). The fused prefill cascade is on by default
-(`QUANPC_DISABLE_FUSED_QUANT` is unset, i.e. read as `0`); no launcher sets it,
+(`PICOKV_DISABLE_FUSED_QUANT` is unset, i.e. read as `0`); no launcher sets it,
 and `=1` forces the reference PyTorch loop for A/B runs. It only applies to
 sides that carry a stored decoder, so it is a no-op unless `USE_OFFLINE=1`.
-The resolved quantpc tag is `quantpc_{mode}_k{K}_v{V}`. Note the default
+The resolved picokv tag is `picokv_{mode}_k{K}_v{V}`. Note the default
 `MODEL` path differs per launcher (`/data/Llama-3.1-8B-Instruct` for
 Ruler/InfiniteBench/Longbench/Needle vs the full share-storage path for
 Efficiency) — override `MODEL=...` as needed.
 
-For QuanPC, the standard configuration is K/V `320/320`, `sink_size=64`,
+For PiCoKV, the standard configuration is K/V `320/320`, `sink_size=64`,
 `local_size=256`, `eas=0.01`, and `zerorope=20`. Offline projections already
 contain their fitted encoder/decoder pair; set `USE_OFFLINE=1` to load
 `offline_projection/projections/{model}_k320_v320.pt` instead of fitting online.

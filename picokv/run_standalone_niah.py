@@ -13,9 +13,9 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from needle import LLMNeedleHaystackTester, ModelProvider
-from quantpc.model_config import load_model_config
-from quantpc.quanpc_standalone import StandaloneConfig
-from quantpc.quanpc_standalone.transformers import (
+from picokv.model_config import load_model_config
+from picokv.picokv_standalone import StandaloneConfig
+from picokv.picokv_standalone.transformers import (
     StandaloneLlamaCache,
     load_offline_projections,
     modify_llama_for_standalone,

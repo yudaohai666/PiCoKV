@@ -1,4 +1,4 @@
-"""Parameter search for the CUDA QuanPC NIAH implementation.
+"""Parameter search for the CUDA PiCoKV NIAH implementation.
 
 The production runner captures its cache configuration when the model is
 constructed, so every configuration is evaluated with a fresh Transformer
@@ -17,7 +17,7 @@ from pathlib import Path
 
 import torch
 
-# Allow both ``python benchmarks/Needle/search_quanpc_torch_params.py`` and
+# Allow both ``python benchmarks/Needle/search_picokv_torch_params.py`` and
 # importing this helper from the repository root.
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[1]
@@ -80,7 +80,7 @@ def build_model(model_name: str, config: Config) -> Transformer:
     """Construct a model whose cache factory uses exactly ``config``."""
     return Transformer(
         model_name=model_name,
-        method="quantpc",
+        method="picokv",
         k_bits=config.k_bits,
         v_bits=config.v_bits,
         exp_bits=config.exp_bits,
@@ -121,9 +121,9 @@ def make_grid(args) -> list[Config]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Search CUDA QuanPC NIAH parameters.")
+    parser = argparse.ArgumentParser(description="Search CUDA PiCoKV NIAH parameters.")
     parser.add_argument("--model", default="/data/Llama-3.1-8B-Instruct")
-    parser.add_argument("--output", default="results/niah/results_quanpc_param_search.json")
+    parser.add_argument("--output", default="results/niah/results_picokv_param_search.json")
     parser.add_argument("--length", type=int, default=100000)
     parser.add_argument("--depth", type=int, default=50)
     parser.add_argument("--k-bits-values", default="320")

@@ -55,19 +55,19 @@ from collect import (  # noqa: E402
     save_pt,
     set_collect_stride,
 )
-from quantpc.quanpc_standalone.constants import (  # noqa: E402
+from picokv.picokv_standalone.constants import (  # noqa: E402
     ONLINE_DECODER_RIDGE,
     ONLINE_GROUP_BITS,
 )
-from quantpc.model_config import load_model_config  # noqa: E402
-from quantpc.quanpc_standalone.online import (  # noqa: E402
+from picokv.model_config import load_model_config  # noqa: E402
+from picokv.picokv_standalone.online import (  # noqa: E402
     _strict_binary_sign_,
     quantize_block32_online,
 )
 from transformers import AutoModelForCausalLM  # noqa: E402
 
 # Historical tag kept as-is so existing artifacts keep loading.
-FOLDED_FORMAT = "quanpc_standalone_block32_folded_v1"
+FOLDED_FORMAT = "picokv_standalone_block32_folded_v1"
 DEFAULT_K_BITS = 320
 DEFAULT_V_BITS = 320
 DEFAULT_DECODER_ITERS = 5

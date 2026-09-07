@@ -6,6 +6,7 @@ import torch
 import json
 import numpy as np
 import random
+from pathlib import Path
 from tqdm import tqdm
 from utils.metrics import qa_f1_score, code_sim_score
 from accelerate import PartialState
@@ -13,6 +14,17 @@ from accelerate.utils import gather_object
 from transformers import AutoConfig, AutoTokenizer, AutoModelForCausalLM, GenerationConfig
 
 from models.modeling_llama_polar import generate
+
+
+# Repo-relative paths, matching benchmarks/Longbench: the prompt templates live
+# in the repo and are resolved off __file__, while the LongBench *.jsonl data has
+# no machine-independent location and comes from LONGBENCH_DATA_DIR.
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CONFIG_DIR = REPO_ROOT / "benchmarks" / "Longbench" / "config"
+DATA_DIR = os.environ.get("LONGBENCH_DATA_DIR", "")
+OUTPUT_DIR = Path(
+    os.environ.get("POLAR_OUTPUT_DIR", REPO_ROOT / "results" / "polarquant" / "longbench")
+)
 
 
 # config 4 different pretrained models
@@ -87,9 +99,14 @@ def seed_everything(seed):
 if __name__ == '__main__':
     seed_everything(42)
 
-    # Your LongBench data path here
-    dataset2prompt = json.load(open("//root/paddlejob/share-storage/gpfs/system-public/yudaohai/quantpc/PolarQuant/public/data/longbench/dataset2prompt.json", "r"))
-    dataset2maxlen = json.load(open("//root/paddlejob/share-storage/gpfs/system-public/yudaohai/quantpc/PolarQuant/public/data/longbench/dataset2maxlen.json", "r"))
+    if not DATA_DIR:
+        raise SystemExit(
+            "set LONGBENCH_DATA_DIR to the directory holding the LongBench *.jsonl files, "
+            "e.g. LONGBENCH_DATA_DIR=/path/to/longbench/data python test4long.py"
+        )
+
+    dataset2prompt = json.load(open(CONFIG_DIR / "dataset2prompt.json", "r"))
+    dataset2maxlen = json.load(open(CONFIG_DIR / "dataset2maxlen.json", "r"))
 
     datasets = [
         "narrativeqa", 
@@ -100,8 +117,8 @@ if __name__ == '__main__':
 
     for dataset in datasets:
         template = dataset2prompt[dataset]
-        test_file = f'//root/paddlejob/share-storage/gpfs/system-public/yudaohai/quantpc/PolarQuant/public/data/longbench/{dataset}.jsonl'
-        output_file = f'//root/paddlejob/share-storage/gpfs/system-public/yudaohai/quantpc/PolarQuant/output/longbench/{dataset}.jsonl'
+        test_file = str(Path(DATA_DIR) / f"{dataset}.jsonl")
+        output_file = str(OUTPUT_DIR / f"{dataset}.jsonl")
         os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
         idx, examples = 0, []
@@ -167,7 +184,8 @@ if __name__ == '__main__':
                     fw.write(json.dumps({"idx": idx, "output_text": output_text, "answers": answers, "score": score}) + "\n")
 
 
-# CUDA_VISIBLE_DEVICES=0 python test4long.py
-# CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --nproc_per_node=8 --master_port=6666 test4long.py
+# LONGBENCH_DATA_DIR=/path/to/longbench/data CUDA_VISIBLE_DEVICES=0 python test4long.py
+# LONGBENCH_DATA_DIR=/path/to/longbench/data CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+#   torchrun --nproc_per_node=8 --master_port=6666 test4long.py
 
 

@@ -16,7 +16,7 @@ from .constants import SUPPORTED_CODE_BITS, SUPPORTED_EXP_BITS
 from .online import _prepare_fixed_block32, quantize_block32_online
 
 try:
-    from quantpc.quanpc_prefill_cuda_extension.quanpc_prefill_cuda import (
+    from picokv.picokv_prefill_cuda_extension.picokv_prefill_cuda import (
         blockk_fixed_cuda,
         gather_pack_from_packed_cuda,
         pack_key_transposed_cuda,
@@ -76,7 +76,7 @@ def _require_prefill_cuda() -> None:
             pack_value_token_cuda,
         )
     ):
-        raise RuntimeError("QuanPC prefill CUDA extension is unavailable")
+        raise RuntimeError("PiCoKV prefill CUDA extension is unavailable")
 
 
 def _global_span(total_len: int, sink_size: int, local_size: int) -> tuple[int, int]:
@@ -293,7 +293,7 @@ def prepare_kv_cache(
     side that has a stored decoder (one launch does quantize + pack + err with
     the residual held in tensor-core fragments).
     ``False`` forces the reference PyTorch loop everywhere; the environment
-    variable ``QUANPC_DISABLE_FUSED_QUANT=1`` does the same globally, which is
+    variable ``PICOKV_DISABLE_FUSED_QUANT=1`` does the same globally, which is
     convenient for A/B benchmarking without code changes.  Both paths
     implement identical numerics up to fp32 accumulation order.
     """
@@ -317,12 +317,12 @@ def prepare_kv_cache(
     # separate pack kernels.
     fused_enabled = (
         use_fused_quant
-        and os.environ.get("QUANPC_DISABLE_FUSED_QUANT", "0") != "1"
+        and os.environ.get("PICOKV_DISABLE_FUSED_QUANT", "0") != "1"
     )
     key_fused = fused_enabled and key_decoders is not None
     value_fused = fused_enabled and value_decoders is not None
     if (key_fused or value_fused) and blockk_fixed_cuda is None:
-        raise RuntimeError("QuanPC prefill CUDA extension is unavailable")
+        raise RuntimeError("PiCoKV prefill CUDA extension is unavailable")
 
     key_global = value_global = None
     if not key_fused:

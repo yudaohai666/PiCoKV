@@ -197,23 +197,23 @@ def main(args):
         'magicpig': 'MagicPIG',
         'bpc': 'BinaryPC',
         'bpc_offline': 'BinaryPC w/ OPC',
-        'k320online': 'QuanPC k320/v320 (online)',
-        'k320offdec': 'QuanPC k320/v320 (offline decoder)',
+        'k320online': 'PiCoKV k320/v320 (online)',
+        'k320offdec': 'PiCoKV k320/v320 (offline decoder)',
         # Encoder and decoder both offline, folded into one stored pair; plus the
         # local-window ablation.
-        'k320folded': 'QuanPC k320/v320 (all-offline, folded W)',
-        'k320foldedlocal256': 'QuanPC k320/v320 (all-offline, local 256)',
-        'k320onlinelocal256': 'QuanPC k320/v320 (online, local 256)',
-        'k256folded': 'QuanPC k256/v256 (all-offline, folded W)',
-        'k256online': 'QuanPC k256/v256 (online)',
-        'k256offdec': 'QuanPC k256/v256 (offline decoder)',
+        'k320folded': 'PiCoKV k320/v320 (all-offline, folded W)',
+        'k320foldedlocal256': 'PiCoKV k320/v320 (all-offline, local 256)',
+        'k320onlinelocal256': 'PiCoKV k320/v320 (online, local 256)',
+        'k256folded': 'PiCoKV k256/v256 (all-offline, folded W)',
+        'k256online': 'PiCoKV k256/v256 (online)',
+        'k256offdec': 'PiCoKV k256/v256 (offline decoder)',
     }
 
-    # Structured QuanPC run tags carry every field that distinguishes a sweep, so
+    # Structured PiCoKV run tags carry every field that distinguishes a sweep, so
     # build the title from them instead of adding a name_map row per config --
     # that is how earlier plots ended up titled "(online)" for a local-256 run.
     structured = re.fullmatch(
-        r'(?:quantpc_)?(online|offline)_k(\d+)_v(\d+)'
+        r'(?:picokv_)?(online|offline)_k(\d+)_v(\d+)'
         r'(?:_local(\d+))?'
         # Archived dirs from before whitening was dropped still carry the token;
         # swallow it so those runs keep plotting.
@@ -223,7 +223,7 @@ def main(args):
     if structured:
         mode, k, v, local = structured.groups()
         local_text = f", local {local}" if local else ""
-        method_title = f"QuanPC k{k}/v{v} ({mode.lower()}{local_text})"
+        method_title = f"PiCoKV k{k}/v{v} ({mode.lower()}{local_text})"
     # Match method names with budget suffix, e.g. snapkv-2048
     elif re.match(r'([^-]+)-(\d+)', method, re.IGNORECASE):
         method_name = re.match(r'([^-]+)-(\d+)', method, re.IGNORECASE).group(1)

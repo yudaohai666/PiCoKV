@@ -3,7 +3,7 @@
 #include <torch/extension.h>
 #include <vector>
 
-std::vector<at::Tensor> quanpc_prefill_learn_projection(
+std::vector<at::Tensor> picokv_prefill_learn_projection(
     at::Tensor full_states,
     at::Tensor init_vectors,
     int64_t glob_start,
@@ -11,7 +11,7 @@ std::vector<at::Tensor> quanpc_prefill_learn_projection(
     int64_t zerorope,
     bool apply_zerorope);
 
-std::vector<at::Tensor> quanpc_prefill_quantize(
+std::vector<at::Tensor> picokv_prefill_quantize(
     at::Tensor full_states,
     at::Tensor projection,
     int64_t glob_start,
@@ -19,7 +19,7 @@ std::vector<at::Tensor> quanpc_prefill_quantize(
     int64_t zerorope,
     bool apply_zerorope);
 
-std::vector<at::Tensor> quanpc_prefill_quantize_pack(
+std::vector<at::Tensor> picokv_prefill_quantize_pack(
     at::Tensor full_states,
     at::Tensor projection,
     int64_t glob_start,
@@ -28,7 +28,7 @@ std::vector<at::Tensor> quanpc_prefill_quantize_pack(
     bool apply_zerorope,
     bool pack_key_layout);
 
-std::vector<at::Tensor> quanpc_prefill_blockk_fast(
+std::vector<at::Tensor> picokv_prefill_blockk_fast(
     at::Tensor full_states,
     at::Tensor init_vectors,
     int64_t glob_start,
@@ -39,7 +39,7 @@ std::vector<at::Tensor> quanpc_prefill_blockk_fast(
     int64_t power_iters,
     int64_t solve_mode);
 
-std::vector<at::Tensor> quanpc_prefill_blockk_fixed(
+std::vector<at::Tensor> picokv_prefill_blockk_fixed(
     at::Tensor full_states,
     at::Tensor encoders,
     at::Tensor decoders,
@@ -49,16 +49,16 @@ std::vector<at::Tensor> quanpc_prefill_blockk_fixed(
     bool apply_zerorope,
     bool pack_key_layout);
 
-std::vector<at::Tensor> quanpc_prefill_select_eas(
+std::vector<at::Tensor> picokv_prefill_select_eas(
     at::Tensor key_err,
     at::Tensor value_err,
     int64_t eas_size);
 
-at::Tensor quanpc_prefill_pack_key_transposed(at::Tensor codes);
+at::Tensor picokv_prefill_pack_key_transposed(at::Tensor codes);
 
-at::Tensor quanpc_prefill_pack_value_token(at::Tensor codes);
+at::Tensor picokv_prefill_pack_value_token(at::Tensor codes);
 
-std::vector<at::Tensor> quanpc_prefill_gather_pack(
+std::vector<at::Tensor> picokv_prefill_gather_pack(
     at::Tensor full_key,
     at::Tensor full_value,
     at::Tensor key_codes,
@@ -69,7 +69,7 @@ std::vector<at::Tensor> quanpc_prefill_gather_pack(
     int64_t local_size);
 
 
-std::vector<at::Tensor> quanpc_prefill_gather_pack_from_packed(
+std::vector<at::Tensor> picokv_prefill_gather_pack_from_packed(
     at::Tensor full_key,
     at::Tensor full_value,
     at::Tensor packed_key_all,

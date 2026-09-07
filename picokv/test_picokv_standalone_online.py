@@ -6,14 +6,14 @@ import inspect
 
 import torch
 
-import quantpc.quanpc_standalone as quanpc_standalone
-from quantpc.quanpc_standalone import (
+import picokv.picokv_standalone as picokv_standalone
+from picokv.picokv_standalone import (
     PreparedKVCache,
     StandaloneConfig,
     decode_attention,
     prepare_kv_cache,
 )
-from quantpc.quanpc_standalone.online import (
+from picokv.picokv_standalone.online import (
     _cholesky_qr,
     _householder_qr,
     _solve_decoder_from_matrices,
@@ -69,7 +69,7 @@ def main() -> None:
         raise AssertionError("a removed prepare option is public again")
     if REMOVED_DECODE_OPTIONS & decode_parameters:
         raise AssertionError("a removed decode option is public again")
-    if hasattr(quanpc_standalone, "prepare_kv_cache_async"):
+    if hasattr(picokv_standalone, "prepare_kv_cache_async"):
         raise AssertionError("removed async prepare API is exported")
 
     scores = torch.tensor([-2.0, 0.0, 3.0])

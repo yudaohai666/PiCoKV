@@ -1,6 +1,6 @@
-"""Isolated CUDA prefill path for QuanPC experiments.
+"""Isolated CUDA prefill path for PiCoKV experiments.
 
-This module is intentionally separate from ``quanpc.py`` and the existing decode
+This module is intentionally separate from ``picokv.py`` and the existing decode
 CUDA extension.  It accelerates the prefill-side steps after projections are
 known: projection quantization, EAS selection, dense retained-KV construction,
 and packed global-code generation.
@@ -26,27 +26,27 @@ _EXTENSION = None
 
 def _prebuilt_path() -> Path:
     """Return the optional install-time build directory."""
-    configured = os.environ.get("QUANPC_PREBUILT_DIR")
+    configured = os.environ.get("PICOKV_PREBUILT_DIR")
     if configured:
         return Path(configured)
-    return Path(__file__).resolve().parents[2] / "build" / "quantpc_extensions"
+    return Path(__file__).resolve().parents[2] / "build" / "picokv_extensions"
 
 
 def _load_prebuilt_extension():
     """Load the install-time .so without invoking torch's JIT builder."""
-    if os.environ.get("QUANPC_DISABLE_PREBUILT") == "1":
+    if os.environ.get("PICOKV_DISABLE_PREBUILT") == "1":
         return None
     root = _prebuilt_path()
-    candidates = sorted(root.glob("_quanpc_prefill_cuda*.so"))
+    candidates = sorted(root.glob("_picokv_prefill_cuda*.so"))
     if not candidates:
         return None
-    module_name = "_quanpc_prefill_cuda"
+    module_name = "_picokv_prefill_cuda"
     existing = sys.modules.get(module_name)
     if existing is not None:
         return existing
     spec = importlib.util.spec_from_file_location(module_name, candidates[0])
     if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load prebuilt QuanPC prefill extension: {candidates[0]}")
+        raise ImportError(f"cannot load prebuilt PiCoKV prefill extension: {candidates[0]}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     try:
@@ -86,7 +86,7 @@ def _ensure_build_tool_path() -> None:
         os.environ["PATH"] = python_bin + os.pathsep + os.environ.get("PATH", "")
 
 
-def load_quanpc_prefill_extension(verbose: bool = False):
+def load_picokv_prefill_extension(verbose: bool = False):
     global _EXTENSION
     if _EXTENSION is not None:
         return _EXTENSION
@@ -102,7 +102,7 @@ def load_quanpc_prefill_extension(verbose: bool = False):
     _ensure_build_tool_path()
     root = Path(__file__).resolve().parent
     _EXTENSION = load(
-        "quanpc_prefill_cuda",
+        "picokv_prefill_cuda",
         [str(root / "cuda_kernel.cu"), str(root / "torch_extension.cpp")],
         extra_cflags=["-O3"],
         extra_cuda_cflags=["-O3"],
@@ -144,8 +144,8 @@ def _check_full_inputs(full_key, full_value, key_projection, value_projection, s
 
 
 def learn_projection_cuda(full_states, init_vectors, glob_start: int, glob_len: int, zerorope: int = 0, apply_zerorope: bool = False, verbose: bool = False):
-    ext = load_quanpc_prefill_extension(verbose)
-    (projection,) = ext.quanpc_prefill_learn_projection_fn(
+    ext = load_picokv_prefill_extension(verbose)
+    (projection,) = ext.picokv_prefill_learn_projection_fn(
         full_states.contiguous(),
         init_vectors.contiguous(),
         int(glob_start),
@@ -157,18 +157,18 @@ def learn_projection_cuda(full_states, init_vectors, glob_start: int, glob_len: 
 
 
 def pack_key_transposed_cuda(codes, verbose: bool = False):
-    ext = load_quanpc_prefill_extension(verbose)
-    return ext.quanpc_prefill_pack_key_transposed_fn(codes.contiguous())
+    ext = load_picokv_prefill_extension(verbose)
+    return ext.picokv_prefill_pack_key_transposed_fn(codes.contiguous())
 
 
 def pack_value_token_cuda(codes, verbose: bool = False):
-    ext = load_quanpc_prefill_extension(verbose)
-    return ext.quanpc_prefill_pack_value_token_fn(codes.contiguous())
+    ext = load_picokv_prefill_extension(verbose)
+    return ext.picokv_prefill_pack_value_token_fn(codes.contiguous())
 
 
 def quantize_pack_cuda(full_states, projection, glob_start: int, glob_len: int, zerorope: int = 0, apply_zerorope: bool = False, pack_key_layout: bool = True, verbose: bool = False):
-    ext = load_quanpc_prefill_extension(verbose)
-    return ext.quanpc_prefill_quantize_pack_fn(
+    ext = load_picokv_prefill_extension(verbose)
+    return ext.picokv_prefill_quantize_pack_fn(
         full_states.contiguous(),
         projection.contiguous(),
         int(glob_start),
@@ -180,8 +180,8 @@ def quantize_pack_cuda(full_states, projection, glob_start: int, glob_len: int, 
 
 
 def quantize_unpacked_cuda(full_states, projection, glob_start: int, glob_len: int, zerorope: int = 0, apply_zerorope: bool = False, verbose: bool = False):
-    ext = load_quanpc_prefill_extension(verbose)
-    return ext.quanpc_prefill_quantize_fn(
+    ext = load_picokv_prefill_extension(verbose)
+    return ext.picokv_prefill_quantize_fn(
         full_states.contiguous(),
         projection.contiguous(),
         int(glob_start),
@@ -207,8 +207,8 @@ def blockk_fast_cuda(
 
     Returns ``codes, encoder, decoder, err``.  ``solve_mode=0`` uses full group Gram solve; ``solve_mode=1`` uses the faster diagonal refit ``U.T @ residual / L``.
     """
-    ext = load_quanpc_prefill_extension(verbose)
-    return ext.quanpc_prefill_blockk_fast_fn(
+    ext = load_picokv_prefill_extension(verbose)
+    return ext.picokv_prefill_blockk_fast_fn(
         full_states.contiguous(),
         init_vectors.contiguous(),
         int(glob_start),
@@ -239,8 +239,8 @@ def blockk_fixed_cuda(
     and returns the per-token residual error.  ``encoders``/``decoders`` are
     the stored ``[B,H,C,D]`` block-32 matrices.  Returns ``(packed, err)``.
     """
-    ext = load_quanpc_prefill_extension(verbose)
-    packed, err = ext.quanpc_prefill_blockk_fixed_fn(
+    ext = load_picokv_prefill_extension(verbose)
+    packed, err = ext.picokv_prefill_blockk_fixed_fn(
         full_states.contiguous(),
         encoders.contiguous(),
         decoders.contiguous(),
@@ -254,13 +254,13 @@ def blockk_fixed_cuda(
 
 
 def select_eas_cuda(key_err, value_err, eas_size: int, verbose: bool = False):
-    ext = load_quanpc_prefill_extension(verbose)
-    return ext.quanpc_prefill_select_eas_fn(key_err.contiguous(), value_err.contiguous(), int(eas_size))
+    ext = load_picokv_prefill_extension(verbose)
+    return ext.picokv_prefill_select_eas_fn(key_err.contiguous(), value_err.contiguous(), int(eas_size))
 
 
 def gather_pack_from_packed_cuda(full_key, full_value, packed_key_all, packed_value_token, eas_indices, kept_indices, sink_size: int, local_size: int, verbose: bool = False):
-    ext = load_quanpc_prefill_extension(verbose)
-    return ext.quanpc_prefill_gather_pack_from_packed_fn(
+    ext = load_picokv_prefill_extension(verbose)
+    return ext.picokv_prefill_gather_pack_from_packed_fn(
         full_key.contiguous(),
         full_value.contiguous(),
         packed_key_all.contiguous(),
@@ -288,7 +288,7 @@ def prepare_prefill_cuda(
 ) -> PrefillCudaOutput:
     glob_len = _check_full_inputs(full_key, full_value, key_projection, value_projection, sink_size, local_size)
     eas_size = max(1, int(glob_len * float(eas)))
-    load_quanpc_prefill_extension(verbose)
+    load_picokv_prefill_extension(verbose)
 
     if overlap_quant and full_key.device == full_value.device and full_key.is_cuda:
         current = torch.cuda.current_stream(full_key.device)

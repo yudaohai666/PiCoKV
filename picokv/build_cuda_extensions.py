@@ -1,8 +1,8 @@
-"""Build the QuantPC CUDA extensions for use at model-load time.
+"""Build the PiCoKV CUDA extensions for use at model-load time.
 
 Run this once after installing the Python/CUDA environment:
 
-    python quantpc/build_cuda_extensions.py
+    python picokv/build_cuda_extensions.py
 
 The generated shared objects are written below ``build/`` (which is ignored by
 git).  Runtime loaders prefer these artifacts and only fall back to the legacy
@@ -21,7 +21,7 @@ from torch.utils.cpp_extension import load
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUTPUT = REPO_ROOT / "build" / "quantpc_extensions"
+DEFAULT_OUTPUT = REPO_ROOT / "build" / "picokv_extensions"
 
 
 def _set_arch_list() -> None:
@@ -60,13 +60,13 @@ def main() -> None:
     args = parser.parse_args()
     _set_arch_list()
     _build(
-        "_quanpc_prefill_cuda",
-        REPO_ROOT / "quantpc" / "quanpc_prefill_cuda_extension",
+        "_picokv_prefill_cuda",
+        REPO_ROOT / "picokv" / "picokv_prefill_cuda_extension",
         args.output_dir,
     )
     _build(
-        "_quanpc_cuda",
-        REPO_ROOT / "quantpc" / "quanpc_cuda_extension",
+        "_picokv_cuda",
+        REPO_ROOT / "picokv" / "picokv_cuda_extension",
         args.output_dir,
     )
 

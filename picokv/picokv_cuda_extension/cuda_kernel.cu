@@ -19,7 +19,7 @@ constexpr int kTileSize = 256;
 constexpr int kGroupSize = 4;
 constexpr int kQMagBits = 7;
 
-__device__ __forceinline__ float quanpc_fast_expf(float x) {
+__device__ __forceinline__ float picokv_fast_expf(float x) {
   float y;
   asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x * 1.4426950408889634f));
   return y;
@@ -44,7 +44,7 @@ __device__ __forceinline__ unsigned long long load_packed_key_word(
 
 
 template <int ExpBits>
-__device__ __forceinline__ int quanpc_weighted_popc64(
+__device__ __forceinline__ int picokv_weighted_popc64(
   const unsigned long long value_word,
   const unsigned long long *__restrict__ planes
 ) {
@@ -69,56 +69,56 @@ __device__ __forceinline__ int quanpc_weighted_popc64(
 }
 
 template <typename scalar_t>
-__device__ __forceinline__ float quanpc_to_float(scalar_t value) {
+__device__ __forceinline__ float picokv_to_float(scalar_t value) {
   return (float)value;
 }
 
 template <>
-__device__ __forceinline__ float quanpc_to_float<__nv_bfloat16>(__nv_bfloat16 value) {
+__device__ __forceinline__ float picokv_to_float<__nv_bfloat16>(__nv_bfloat16 value) {
   return __bfloat162float(value);
 }
 
 template <typename scalar_t>
-__device__ __forceinline__ scalar_t quanpc_from_float(float value) {
+__device__ __forceinline__ scalar_t picokv_from_float(float value) {
   return (scalar_t)value;
 }
 
 template <>
-__device__ __forceinline__ __nv_bfloat16 quanpc_from_float<__nv_bfloat16>(float value) {
+__device__ __forceinline__ __nv_bfloat16 picokv_from_float<__nv_bfloat16>(float value) {
   return __float2bfloat16(value);
 }
 
 template <typename scalar_t>
-__device__ __forceinline__ float quanpc_weight_for_matmul(float value) {
+__device__ __forceinline__ float picokv_weight_for_matmul(float value) {
   return value;
 }
 
 template <>
-__device__ __forceinline__ float quanpc_weight_for_matmul<__nv_bfloat16>(float value) {
+__device__ __forceinline__ float picokv_weight_for_matmul<__nv_bfloat16>(float value) {
   return __bfloat162float(__float2bfloat16(value));
 }
 
 template <typename scalar_t>
-__device__ __forceinline__ float quanpc_score_for_softmax(float dot, float attention_scale) {
+__device__ __forceinline__ float picokv_score_for_softmax(float dot, float attention_scale) {
   return dot * attention_scale;
 }
 
 template <>
-__device__ __forceinline__ float quanpc_score_for_softmax<__nv_bfloat16>(float dot, float attention_scale) {
+__device__ __forceinline__ float picokv_score_for_softmax<__nv_bfloat16>(float dot, float attention_scale) {
   const float rounded_dot = __bfloat162float(__float2bfloat16(dot));
   return __bfloat162float(__float2bfloat16(rounded_dot * attention_scale));
 }
 
-// Dense retained-KV numerator used as the softmax anchor for global QuanPC.
+// Dense retained-KV numerator used as the softmax anchor for global PiCoKV.
 // One block handles one [B, QH, S] query row. Scores are cached once in shared
 // memory so the value pass does not recompute q dot k for every output dimension.
 template <typename scalar_t>
-__device__ __forceinline__ float quanpc_code_for_projection(float value) {
+__device__ __forceinline__ float picokv_code_for_projection(float value) {
   return value;
 }
 
 template <>
-__device__ __forceinline__ float quanpc_code_for_projection<__nv_bfloat16>(float value) {
+__device__ __forceinline__ float picokv_code_for_projection<__nv_bfloat16>(float value) {
   return __bfloat162float(__float2bfloat16(value));
 }
 
@@ -126,7 +126,7 @@ __device__ __forceinline__ float quanpc_code_for_projection<__nv_bfloat16>(float
 // the shared normalization denominator in one pass. This avoids materializing
 // repeated value projection heads and a separate torch matmul for tiny S=1 rows.
 template <typename scalar_t>
-__global__ void quanpc_fused_output_projection_kernel(
+__global__ void picokv_fused_output_projection_kernel(
   const scalar_t *__restrict__ dense_output,      // [B,QH,S,D]
   const float *__restrict__ glob_code_output,     // [B,QH,S,Cv]
   const float *__restrict__ glob_den,             // [B,QH,S]
@@ -156,17 +156,17 @@ __global__ void quanpc_fused_output_projection_kernel(
   for (int d = thread_idx; d < D; d += blockDim.x) {
     float glob_acc = 0.0f;
     for (int c = 0; c < Cv; c++) {
-      const float code_value = quanpc_code_for_projection<scalar_t>(glob_code_output[code_base + c]);
-      glob_acc += code_value * quanpc_to_float(value_proj[proj_base + (long)c * D + d]);
+      const float code_value = picokv_code_for_projection<scalar_t>(glob_code_output[code_base + c]);
+      glob_acc += code_value * picokv_to_float(value_proj[proj_base + (long)c * D + d]);
     }
-    const float numerator = quanpc_to_float(dense_output[dense_base + d]) + glob_acc;
-    attn_output[dense_base + d] = quanpc_from_float<scalar_t>(numerator * inv_den);
+    const float numerator = picokv_to_float(dense_output[dense_base + d]) + glob_acc;
+    attn_output[dense_base + d] = picokv_from_float<scalar_t>(numerator * inv_den);
   }
 
 }
 
 template <typename scalar_t>
-__global__ void quanpc_dense_attention_numerator_kernel(
+__global__ void picokv_dense_attention_numerator_kernel(
   const scalar_t *__restrict__ query,       // [B,QH,S,D]
   const scalar_t *__restrict__ dense_key,   // [B,KVH,L,D]
   const scalar_t *__restrict__ dense_value, // [B,KVH,L,D]
@@ -202,9 +202,9 @@ __global__ void quanpc_dense_attention_numerator_kernel(
     const long k_base = kv_base + (long)l_idx * D;
     #pragma unroll 4
     for (int d = 0; d < D; d++) {
-      dot += quanpc_to_float(query[q_base + d]) * quanpc_to_float(dense_key[k_base + d]);
+      dot += picokv_to_float(query[q_base + d]) * picokv_to_float(dense_key[k_base + d]);
     }
-    const float score = quanpc_score_for_softmax<scalar_t>(dot, attention_scale);
+    const float score = picokv_score_for_softmax<scalar_t>(dot, attention_scale);
     scores[l_idx] = score;
     local_max = fmaxf(local_max, score);
   }
@@ -247,15 +247,15 @@ __global__ void quanpc_dense_attention_numerator_kernel(
     float acc = 0.0f;
     for (int l_idx = 0; l_idx < L; l_idx++) {
       float weight = scores[l_idx] * row_inv_den;
-      weight = quanpc_weight_for_matmul<scalar_t>(weight);
+      weight = picokv_weight_for_matmul<scalar_t>(weight);
       const long v_idx = kv_base + (long)l_idx * D + d;
-      acc += weight * quanpc_to_float(dense_value[v_idx]);
+      acc += weight * picokv_to_float(dense_value[v_idx]);
     }
-    dense_output[q_base + d] = quanpc_from_float<scalar_t>(acc);
+    dense_output[q_base + d] = picokv_from_float<scalar_t>(acc);
   }
 }
 
-__global__ void quanpc_global_code_output_packed_value_tiled_reduce_kernel(
+__global__ void picokv_global_code_output_packed_value_tiled_reduce_kernel(
   const __nv_bfloat16 *__restrict__ partial_code_output, // [B,H,S,num_tiles,Cv]
   const float *__restrict__ partial_den,                 // [B,H,S,num_tiles]
   __nv_bfloat16 *__restrict__ glob_code_output,          // [B,H,S,Cv]
@@ -314,7 +314,7 @@ __global__ void quanpc_global_code_output_packed_value_tiled_reduce_kernel(
 }
 
 template <int KBlocks, bool KeyTransposedFixed>
-__global__ void quanpc_packed_value_partial_kernel(
+__global__ void picokv_packed_value_partial_kernel(
   const long *__restrict__ packed_projected_query,
   const long *__restrict__ packed_key,
   const long *__restrict__ packed_value,
@@ -399,7 +399,7 @@ __global__ void quanpc_packed_value_partial_kernel(
         }
       }
       const int dot = query_base_dot[hrel] - (negative_dot << 1);
-      local_weights[hrel] = quanpc_fast_expf((float)dot * scale_cache[hrel] - lse_cache[hrel]);
+      local_weights[hrel] = picokv_fast_expf((float)dot * scale_cache[hrel] - lse_cache[hrel]);
     }
   }
 
@@ -465,7 +465,7 @@ __global__ void quanpc_packed_value_partial_kernel(
 
 
 template <typename scalar_t>
-__global__ void quanpc_project_quantize_pack_query_kernel(
+__global__ void picokv_project_quantize_pack_query_kernel(
   const scalar_t *__restrict__ query,        // [B,QH,S,D]
   const scalar_t *__restrict__ key_proj,     // [B,KVH,C,D]
   long *__restrict__ packed_projected_query, // [B,QH,S,C/64,8]
@@ -499,7 +499,7 @@ __global__ void quanpc_project_quantize_pack_query_kernel(
     const long c_base = proj_base + (long)c * D;
     #pragma unroll 4
     for (int d = 0; d < D; d++) {
-      dot += quanpc_to_float(query[q_base + d]) * quanpc_to_float(key_proj[c_base + d]);
+      dot += picokv_to_float(query[q_base + d]) * picokv_to_float(key_proj[c_base + d]);
     }
     projected_cache[c] = dot;
     local_max = fmaxf(local_max, fabsf(dot));
@@ -552,7 +552,7 @@ __global__ void quanpc_project_quantize_pack_query_kernel(
 }
 
 template <typename scalar_t>
-__global__ void quanpc_quantize_pack_projected_query_kernel(
+__global__ void picokv_quantize_pack_projected_query_kernel(
   const scalar_t *__restrict__ projected_query, // [B,H,S,C]
   long *__restrict__ packed_projected_query,    // [B,H,S,C/64,8]
   float *__restrict__ query_scale,              // [B,H,S]
@@ -572,7 +572,7 @@ __global__ void quanpc_quantize_pack_projected_query_kernel(
 
   float local_max = 0.0f;
   for (int c = thread_idx; c < C; c += blockDim.x) {
-    local_max = fmaxf(local_max, fabsf(quanpc_to_float(projected_query[row_base + c])));
+    local_max = fmaxf(local_max, fabsf(picokv_to_float(projected_query[row_base + c])));
   }
 
   reduce_cache[thread_idx] = local_max;
@@ -592,7 +592,7 @@ __global__ void quanpc_quantize_pack_projected_query_kernel(
   __syncthreads();
 
   for (int c = thread_idx; c < C; c += blockDim.x) {
-    int q = (int)nearbyintf(quanpc_to_float(projected_query[row_base + c]) / row_scale);
+    int q = (int)nearbyintf(picokv_to_float(projected_query[row_base + c]) / row_scale);
     q = q < -127 ? -127 : q;
     q = q > 127 ? 127 : q;
     quant_cache[c] = (int8_t)q;
@@ -622,7 +622,7 @@ __global__ void quanpc_quantize_pack_projected_query_kernel(
 }
 
 
-__global__ void quanpc_pack_projected_query_kernel(
+__global__ void picokv_pack_projected_query_kernel(
   const int8_t *__restrict__ quant_projected_query, // [B,H,S,C]
   long *__restrict__ packed_projected_query,        // [B,H,S,C/64,8]
   const int total_words
@@ -659,7 +659,7 @@ __global__ void quanpc_pack_projected_query_kernel(
 }
 
 template <int GroupSize, int KBlocks, int Cv, bool KeyTransposedFixed, bool AtomicOutputFixed, int ExpBits>
-__global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_partial_kernel(
+__global__ void __launch_bounds__(256, 6) picokv_v1_expbits_partial_kernel(
   const long *__restrict__ packed_projected_query,
   const long *__restrict__ packed_key,
   const long *__restrict__ packed_value_sign,
@@ -754,7 +754,7 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_partial_kernel(
         }
       }
       const int dot = query_base_dot[hrel] - (negative_dot << 1);
-      local_weights[hrel] = quanpc_fast_expf((float)dot * scale_cache[hrel] - lse_cache[hrel]);
+      local_weights[hrel] = picokv_fast_expf((float)dot * scale_cache[hrel] - lse_cache[hrel]);
     }
   }
 
@@ -878,7 +878,7 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_partial_kernel(
 // and atomic traffic for the runtime-bit exp
 // / 1-bit value popcount accumulator.
 template <bool KeyTransposedFixed, int ExpBits>
-__global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_kernel(
+__global__ void __launch_bounds__(256, 8) picokv_v1_expbits_atomic2_kernel(
   const long *__restrict__ packed_projected_query,
   const long *__restrict__ packed_key,
   const long *__restrict__ packed_value_sign,
@@ -997,7 +997,7 @@ __global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_kernel(
         if constexpr (ExpBits <= 2) {
           local_weights[hrel] = score;
         } else {
-          local_weights[hrel] = quanpc_fast_expf(score - lse_cache[hrel]);
+          local_weights[hrel] = picokv_fast_expf(score - lse_cache[hrel]);
         }
       }
     }
@@ -1029,7 +1029,7 @@ __global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_kernel(
       float scale = 0.0f;
       if constexpr (ExpBits <= 2) {
         const float max_score = group_max;
-        const float max_weight = max_score > -3.0e38f ? quanpc_fast_expf(max_score - lse_cache[hrel]) : 0.0f;
+        const float max_weight = max_score > -3.0e38f ? picokv_fast_expf(max_score - lse_cache[hrel]) : 0.0f;
         if (max_weight > 0.0f) {
           const float d0 = w0 - max_score;
           const float d1 = w1 - max_score;
@@ -1097,8 +1097,8 @@ __global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_kernel(
         const float bias0 = exp_bias[hrel0][local_group];
         if (scale20 > 0.0f) {
           const unsigned long long *planes0 = &exp_planes[hrel0][local_group][0];
-          const int pos00 = quanpc_weighted_popc64<ExpBits>(value_words.x, planes0);
-          const int pos01 = quanpc_weighted_popc64<ExpBits>(value_words.y, planes0);
+          const int pos00 = picokv_weighted_popc64<ExpBits>(value_words.x, planes0);
+          const int pos01 = picokv_weighted_popc64<ExpBits>(value_words.y, planes0);
           acc00 += scale20 * (float)pos00 + bias0;
           acc01 += scale20 * (float)pos01 + bias0;
         }
@@ -1107,8 +1107,8 @@ __global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_kernel(
         const float bias1 = exp_bias[hrel1][local_group];
         if (scale21 > 0.0f) {
           const unsigned long long *planes1 = &exp_planes[hrel1][local_group][0];
-          const int pos10 = quanpc_weighted_popc64<ExpBits>(value_words.x, planes1);
-          const int pos11 = quanpc_weighted_popc64<ExpBits>(value_words.y, planes1);
+          const int pos10 = picokv_weighted_popc64<ExpBits>(value_words.x, planes1);
+          const int pos11 = picokv_weighted_popc64<ExpBits>(value_words.y, planes1);
           acc10 += scale21 * (float)pos10 + bias1;
           acc11 += scale21 * (float)pos11 + bias1;
         }
@@ -1137,9 +1137,9 @@ __global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_kernel(
 // GQA=4 Ck=256/Cv=256 pruning experiment.  PruneMode bit 0 enables
 // 64-token group pruning after group max; bit 1 enables cascaded prefix-dim
 // token pruning at 64/128/192 code dims.  The output format matches
-// quanpc_v1_expbits_atomic2_kernel so callers can compare against baseline.
+// picokv_v1_expbits_atomic2_kernel so callers can compare against baseline.
 template <bool KeyTransposedFixed, int ExpBits, int PruneMode>
-__global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_pruned_kernel(
+__global__ void __launch_bounds__(256, 8) picokv_v1_expbits_atomic2_pruned_kernel(
   const long *__restrict__ packed_projected_query,
   const long *__restrict__ packed_key,
   const long *__restrict__ packed_value_sign,
@@ -1286,7 +1286,7 @@ __global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_pruned_kerne
           if constexpr (ExpBits <= 2) {
             local_weights[hrel] = score;
           } else {
-            local_weights[hrel] = quanpc_fast_expf(score - lse_cache[hrel]);
+            local_weights[hrel] = picokv_fast_expf(score - lse_cache[hrel]);
           }
         }
       }
@@ -1322,13 +1322,13 @@ __global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_pruned_kerne
         if constexpr (ExpBits <= 2) {
           block_pruned = group_max <= lse_cache[hrel] + prune_log_eps;
         } else {
-          block_pruned = group_max <= quanpc_fast_expf(prune_log_eps);
+          block_pruned = group_max <= picokv_fast_expf(prune_log_eps);
         }
       }
       if (!block_pruned) {
         if constexpr (ExpBits <= 2) {
           const float max_score = group_max;
-          const float max_weight = max_score > -3.0e38f ? quanpc_fast_expf(max_score - lse_cache[hrel]) : 0.0f;
+          const float max_weight = max_score > -3.0e38f ? picokv_fast_expf(max_score - lse_cache[hrel]) : 0.0f;
           if (max_weight > 0.0f) {
             const float d0 = w0 - max_score;
             const float d1 = w1 - max_score;
@@ -1397,8 +1397,8 @@ __global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_pruned_kerne
         const float bias0 = exp_bias[hrel0][local_group];
         if (scale20 > 0.0f) {
           const unsigned long long *planes0 = &exp_planes[hrel0][local_group][0];
-          const int pos00 = quanpc_weighted_popc64<ExpBits>(value_words.x, planes0);
-          const int pos01 = quanpc_weighted_popc64<ExpBits>(value_words.y, planes0);
+          const int pos00 = picokv_weighted_popc64<ExpBits>(value_words.x, planes0);
+          const int pos01 = picokv_weighted_popc64<ExpBits>(value_words.y, planes0);
           acc00 += scale20 * (float)pos00 + bias0;
           acc01 += scale20 * (float)pos01 + bias0;
         }
@@ -1407,8 +1407,8 @@ __global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_pruned_kerne
         const float bias1 = exp_bias[hrel1][local_group];
         if (scale21 > 0.0f) {
           const unsigned long long *planes1 = &exp_planes[hrel1][local_group][0];
-          const int pos10 = quanpc_weighted_popc64<ExpBits>(value_words.x, planes1);
-          const int pos11 = quanpc_weighted_popc64<ExpBits>(value_words.y, planes1);
+          const int pos10 = picokv_weighted_popc64<ExpBits>(value_words.x, planes1);
+          const int pos11 = picokv_weighted_popc64<ExpBits>(value_words.y, planes1);
           acc10 += scale21 * (float)pos10 + bias1;
           acc11 += scale21 * (float)pos11 + bias1;
         }
@@ -1435,11 +1435,11 @@ __global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_pruned_kerne
 
 
 
-// Runtime-Ck/Cv path for variable QuanPC code dimensions and templated GQA
+// Runtime-Ck/Cv path for variable PiCoKV code dimensions and templated GQA
 // group size. It keeps the current Ck=256/Cv=256 specialized kernels untouched,
 // and covers Ck/Cv in {128,192,256,320,384,448,512}.
 template <int GroupSize, bool KeyTransposedFixed, int ExpBits, int PruneMode>
-__global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_runtime_kernel(
+__global__ void __launch_bounds__(256, 6) picokv_v1_expbits_atomic2_runtime_kernel(
   const long *__restrict__ packed_projected_query,
   const long *__restrict__ packed_key,
   const long *__restrict__ packed_value_sign,
@@ -1597,7 +1597,7 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_runtime_kern
           if constexpr (ExpBits <= 2) {
             local_weights[hrel] = score;
           } else {
-            local_weights[hrel] = quanpc_fast_expf(score - lse_cache[hrel]);
+            local_weights[hrel] = picokv_fast_expf(score - lse_cache[hrel]);
           }
         }
       }
@@ -1636,13 +1636,13 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_runtime_kern
         if constexpr (ExpBits <= 2) {
           block_pruned = group_max <= lse_cache[hrel] + prune_log_eps;
         } else {
-          block_pruned = group_max <= quanpc_fast_expf(prune_log_eps);
+          block_pruned = group_max <= picokv_fast_expf(prune_log_eps);
         }
       }
       if (!block_pruned) {
         if constexpr (ExpBits <= 2) {
           const float max_score = group_max;
-          const float max_weight = max_score > -3.0e38f ? quanpc_fast_expf(max_score - lse_cache[hrel]) : 0.0f;
+          const float max_weight = max_score > -3.0e38f ? picokv_fast_expf(max_score - lse_cache[hrel]) : 0.0f;
           if (max_weight > 0.0f) {
             const float d0 = w0 - max_score;
             const float d1 = w1 - max_score;
@@ -1724,8 +1724,8 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_runtime_kern
                 if (scale20 > 0.0f) {
                   const float bias0 = exp_bias[hrel0][local_group];
                   const unsigned long long *planes0 = &exp_planes[hrel0][local_group][0];
-                  const int pos00 = quanpc_weighted_popc64<ExpBits>(value_words.x, planes0);
-                  const int pos01 = quanpc_weighted_popc64<ExpBits>(value_words.y, planes0);
+                  const int pos00 = picokv_weighted_popc64<ExpBits>(value_words.x, planes0);
+                  const int pos01 = picokv_weighted_popc64<ExpBits>(value_words.y, planes0);
                   acc0[slot] += scale20 * (float)pos00 + bias0;
                   acc1[slot] += scale20 * (float)pos01 + bias0;
                 }
@@ -1733,8 +1733,8 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_runtime_kern
                 if (scale21 > 0.0f) {
                   const float bias1 = exp_bias[hrel1][local_group];
                   const unsigned long long *planes1 = &exp_planes[hrel1][local_group][0];
-                  const int pos10 = quanpc_weighted_popc64<ExpBits>(value_words.x, planes1);
-                  const int pos11 = quanpc_weighted_popc64<ExpBits>(value_words.y, planes1);
+                  const int pos10 = picokv_weighted_popc64<ExpBits>(value_words.x, planes1);
+                  const int pos11 = picokv_weighted_popc64<ExpBits>(value_words.y, planes1);
                   acc2[slot] += scale21 * (float)pos10 + bias1;
                   acc3[slot] += scale21 * (float)pos11 + bias1;
                 }
@@ -1761,8 +1761,8 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_runtime_kern
                 const long value_idx0 = (((long)(B_idx * KVH + KVH_idx) * LGroups + global_group) * Cv + c);
                 const ulonglong2 value_words = *((const ulonglong2*)(&packed_value_sign[value_idx0]));
                 const unsigned long long *planes = &exp_planes[hrel][local_group][0];
-                const int pos0 = quanpc_weighted_popc64<ExpBits>(value_words.x, planes);
-                const int pos1 = quanpc_weighted_popc64<ExpBits>(value_words.y, planes);
+                const int pos0 = picokv_weighted_popc64<ExpBits>(value_words.x, planes);
+                const int pos1 = picokv_weighted_popc64<ExpBits>(value_words.y, planes);
                 acc0[slot] += scale2 * (float)pos0 + bias;
                 acc1[slot] += scale2 * (float)pos1 + bias;
               }
@@ -1816,7 +1816,7 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_runtime_kern
   }
 }
 template <int GroupSize, int KBlocks, int Cv, bool KeyTransposedFixed, int ExpBits, int PruneMode>
-__global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_fixed_kernel(
+__global__ void __launch_bounds__(256, 6) picokv_v1_expbits_atomic2_fixed_kernel(
   const long *__restrict__ packed_projected_query,
   const long *__restrict__ packed_key,
   const long *__restrict__ packed_value_sign,
@@ -1975,7 +1975,7 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_fixed_kernel
           if constexpr (ExpBits <= 2) {
             local_weights[hrel] = score;
           } else {
-            local_weights[hrel] = quanpc_fast_expf(score - lse_cache[hrel]);
+            local_weights[hrel] = picokv_fast_expf(score - lse_cache[hrel]);
           }
         }
       }
@@ -2014,13 +2014,13 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_fixed_kernel
         if constexpr (ExpBits <= 2) {
           block_pruned = group_max <= lse_cache[hrel] + prune_log_eps;
         } else {
-          block_pruned = group_max <= quanpc_fast_expf(prune_log_eps);
+          block_pruned = group_max <= picokv_fast_expf(prune_log_eps);
         }
       }
       if (!block_pruned) {
         if constexpr (ExpBits <= 2) {
           const float max_score = group_max;
-          const float max_weight = max_score > -3.0e38f ? quanpc_fast_expf(max_score - lse_cache[hrel]) : 0.0f;
+          const float max_weight = max_score > -3.0e38f ? picokv_fast_expf(max_score - lse_cache[hrel]) : 0.0f;
           if (max_weight > 0.0f) {
             const float d0 = w0 - max_score;
             const float d1 = w1 - max_score;
@@ -2102,8 +2102,8 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_fixed_kernel
                 if (scale20 > 0.0f) {
                   const float bias0 = exp_bias[hrel0][local_group];
                   const unsigned long long *planes0 = &exp_planes[hrel0][local_group][0];
-                  const int pos00 = quanpc_weighted_popc64<ExpBits>(value_words.x, planes0);
-                  const int pos01 = quanpc_weighted_popc64<ExpBits>(value_words.y, planes0);
+                  const int pos00 = picokv_weighted_popc64<ExpBits>(value_words.x, planes0);
+                  const int pos01 = picokv_weighted_popc64<ExpBits>(value_words.y, planes0);
                   acc0[slot] += scale20 * (float)pos00 + bias0;
                   acc1[slot] += scale20 * (float)pos01 + bias0;
                 }
@@ -2111,8 +2111,8 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_fixed_kernel
                 if (scale21 > 0.0f) {
                   const float bias1 = exp_bias[hrel1][local_group];
                   const unsigned long long *planes1 = &exp_planes[hrel1][local_group][0];
-                  const int pos10 = quanpc_weighted_popc64<ExpBits>(value_words.x, planes1);
-                  const int pos11 = quanpc_weighted_popc64<ExpBits>(value_words.y, planes1);
+                  const int pos10 = picokv_weighted_popc64<ExpBits>(value_words.x, planes1);
+                  const int pos11 = picokv_weighted_popc64<ExpBits>(value_words.y, planes1);
                   acc2[slot] += scale21 * (float)pos10 + bias1;
                   acc3[slot] += scale21 * (float)pos11 + bias1;
                 }
@@ -2139,8 +2139,8 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_fixed_kernel
                 const long value_idx0 = (((long)(B_idx * KVH + KVH_idx) * LGroups + global_group) * Cv + c);
                 const ulonglong2 value_words = *((const ulonglong2*)(&packed_value_sign[value_idx0]));
                 const unsigned long long *planes = &exp_planes[hrel][local_group][0];
-                const int pos0 = quanpc_weighted_popc64<ExpBits>(value_words.x, planes);
-                const int pos1 = quanpc_weighted_popc64<ExpBits>(value_words.y, planes);
+                const int pos0 = picokv_weighted_popc64<ExpBits>(value_words.x, planes);
+                const int pos1 = picokv_weighted_popc64<ExpBits>(value_words.y, planes);
                 acc0[slot] += scale2 * (float)pos0 + bias;
                 acc1[slot] += scale2 * (float)pos1 + bias;
               }
@@ -2202,7 +2202,7 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_fixed_kernel
 // It keeps the current Ck=256/Cv=256 specialized kernels untouched, and covers
 // Ck/Cv in {128,192,256,320,384,448,512}.
 template <int GroupSize, bool KeyTransposedFixed, int ExpBits, int PruneMode>
-__global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_runtime_unrolled_kernel(
+__global__ void __launch_bounds__(256, 6) picokv_v1_expbits_atomic2_runtime_unrolled_kernel(
   const long *__restrict__ packed_projected_query,
   const long *__restrict__ packed_key,
   const long *__restrict__ packed_value_sign,
@@ -2361,7 +2361,7 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_runtime_unro
           if constexpr (ExpBits <= 2) {
             local_weights[hrel] = score;
           } else {
-            local_weights[hrel] = quanpc_fast_expf(score - lse_cache[hrel]);
+            local_weights[hrel] = picokv_fast_expf(score - lse_cache[hrel]);
           }
         }
       }
@@ -2400,13 +2400,13 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_runtime_unro
         if constexpr (ExpBits <= 2) {
           block_pruned = group_max <= lse_cache[hrel] + prune_log_eps;
         } else {
-          block_pruned = group_max <= quanpc_fast_expf(prune_log_eps);
+          block_pruned = group_max <= picokv_fast_expf(prune_log_eps);
         }
       }
       if (!block_pruned) {
         if constexpr (ExpBits <= 2) {
           const float max_score = group_max;
-          const float max_weight = max_score > -3.0e38f ? quanpc_fast_expf(max_score - lse_cache[hrel]) : 0.0f;
+          const float max_weight = max_score > -3.0e38f ? picokv_fast_expf(max_score - lse_cache[hrel]) : 0.0f;
           if (max_weight > 0.0f) {
             const float d0 = w0 - max_score;
             const float d1 = w1 - max_score;
@@ -2481,8 +2481,8 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_runtime_unro
               const long value_idx0 = (((long)(B_idx * KVH + KVH_idx) * LGroups + global_group) * Cv + c);
               const ulonglong2 value_words = *((const ulonglong2*)(&packed_value_sign[value_idx0]));
               const unsigned long long *planes = &exp_planes[hrel][local_group][0];
-              const int pos0 = quanpc_weighted_popc64<ExpBits>(value_words.x, planes);
-              const int pos1 = quanpc_weighted_popc64<ExpBits>(value_words.y, planes);
+              const int pos0 = picokv_weighted_popc64<ExpBits>(value_words.x, planes);
+              const int pos1 = picokv_weighted_popc64<ExpBits>(value_words.y, planes);
               acc0[slot] += scale2 * (float)pos0 + bias;
               acc1[slot] += scale2 * (float)pos1 + bias;
             }
@@ -2517,7 +2517,7 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_runtime_unro
 
 // Experimental GQA=8 split path: two GQA4-sized blocks per KV head.
 template <bool KeyTransposedFixed, int ExpBits>
-__global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_gqa8_split4_kernel(
+__global__ void __launch_bounds__(256, 8) picokv_v1_expbits_atomic2_gqa8_split4_kernel(
   const long *__restrict__ packed_projected_query,
   const long *__restrict__ packed_key,
   const long *__restrict__ packed_value_sign,
@@ -2638,7 +2638,7 @@ __global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_gqa8_split4_
         if constexpr (ExpBits <= 2) {
           local_weights[hrel] = score;
         } else {
-          local_weights[hrel] = quanpc_fast_expf(score - lse_cache[hrel]);
+          local_weights[hrel] = picokv_fast_expf(score - lse_cache[hrel]);
         }
       }
     }
@@ -2670,7 +2670,7 @@ __global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_gqa8_split4_
       float scale = 0.0f;
       if constexpr (ExpBits <= 2) {
         const float max_score = group_max;
-        const float max_weight = max_score > -3.0e38f ? quanpc_fast_expf(max_score - lse_cache[hrel]) : 0.0f;
+        const float max_weight = max_score > -3.0e38f ? picokv_fast_expf(max_score - lse_cache[hrel]) : 0.0f;
         if (max_weight > 0.0f) {
           const float d0 = w0 - max_score;
           const float d1 = w1 - max_score;
@@ -2738,8 +2738,8 @@ __global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_gqa8_split4_
         const float bias0 = exp_bias[hrel0][local_group];
         if (scale20 > 0.0f) {
           const unsigned long long *planes0 = &exp_planes[hrel0][local_group][0];
-          const int pos00 = quanpc_weighted_popc64<ExpBits>(value_words.x, planes0);
-          const int pos01 = quanpc_weighted_popc64<ExpBits>(value_words.y, planes0);
+          const int pos00 = picokv_weighted_popc64<ExpBits>(value_words.x, planes0);
+          const int pos01 = picokv_weighted_popc64<ExpBits>(value_words.y, planes0);
           acc00 += scale20 * (float)pos00 + bias0;
           acc01 += scale20 * (float)pos01 + bias0;
         }
@@ -2748,8 +2748,8 @@ __global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_gqa8_split4_
         const float bias1 = exp_bias[hrel1][local_group];
         if (scale21 > 0.0f) {
           const unsigned long long *planes1 = &exp_planes[hrel1][local_group][0];
-          const int pos10 = quanpc_weighted_popc64<ExpBits>(value_words.x, planes1);
-          const int pos11 = quanpc_weighted_popc64<ExpBits>(value_words.y, planes1);
+          const int pos10 = picokv_weighted_popc64<ExpBits>(value_words.x, planes1);
+          const int pos11 = picokv_weighted_popc64<ExpBits>(value_words.y, planes1);
           acc10 += scale21 * (float)pos10 + bias1;
           acc11 += scale21 * (float)pos11 + bias1;
         }
@@ -2779,7 +2779,7 @@ __global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_gqa8_split4_
 // the GQA=4/8 atomic2 paths, but only one query head is attached to each KV
 // head.  This reduces tile-level query reloads and atomic writes for MHA/GQA=1.
 template <bool KeyTransposedFixed, int ExpBits, int BlockTiles>
-__global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_gqa1_kernel(
+__global__ void __launch_bounds__(256, 8) picokv_v1_expbits_atomic2_gqa1_kernel(
   const long *__restrict__ packed_projected_query,
   const long *__restrict__ packed_key,
   const long *__restrict__ packed_value_sign,
@@ -2883,7 +2883,7 @@ __global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_gqa1_kernel(
       if constexpr (ExpBits <= 2) {
         local_weight = score;
       } else {
-        local_weight = quanpc_fast_expf(score - lse_cache);
+        local_weight = picokv_fast_expf(score - lse_cache);
       }
     }
 
@@ -2907,7 +2907,7 @@ __global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_gqa1_kernel(
       float scale = 0.0f;
       if constexpr (ExpBits <= 2) {
         const float max_score = group_max;
-        const float max_weight = max_score > -3.0e38f ? quanpc_fast_expf(max_score - lse_cache) : 0.0f;
+        const float max_weight = max_score > -3.0e38f ? picokv_fast_expf(max_score - lse_cache) : 0.0f;
         if (max_weight > 0.0f) {
           const float d0 = w0 - max_score;
           const float d1 = w1 - max_score;
@@ -2975,8 +2975,8 @@ __global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_gqa1_kernel(
             const long value_idx0 = (((long)(B_idx * KVH + KVH_idx) * LGroups + global_group) * Cv + c);
             const ulonglong2 value_words = *((const ulonglong2*)(&packed_value_sign[value_idx0]));
             const unsigned long long *planes = &exp_planes[local_group][0];
-            const int pos0 = quanpc_weighted_popc64<ExpBits>(value_words.x, planes);
-            const int pos1 = quanpc_weighted_popc64<ExpBits>(value_words.y, planes);
+            const int pos0 = picokv_weighted_popc64<ExpBits>(value_words.x, planes);
+            const int pos1 = picokv_weighted_popc64<ExpBits>(value_words.y, planes);
             acc0 += scale2 * (float)pos0 + bias;
             acc1 += scale2 * (float)pos1 + bias;
           }
@@ -3004,7 +3004,7 @@ __global__ void __launch_bounds__(256, 8) quanpc_v1_expbits_atomic2_gqa1_kernel(
 // query heads handled by the same thread.  This keeps the existing exact
 // bitwise score/value math while reducing query reloads and atomic traffic.
 template <bool KeyTransposedFixed, int ExpBits>
-__global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_gqa8_kernel(
+__global__ void __launch_bounds__(256, 6) picokv_v1_expbits_atomic2_gqa8_kernel(
   const long *__restrict__ packed_projected_query,
   const long *__restrict__ packed_key,
   const long *__restrict__ packed_value_sign,
@@ -3121,7 +3121,7 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_gqa8_kernel(
         if constexpr (ExpBits <= 2) {
           local_weights[hrel] = score;
         } else {
-          local_weights[hrel] = quanpc_fast_expf(score - lse_cache[hrel]);
+          local_weights[hrel] = picokv_fast_expf(score - lse_cache[hrel]);
         }
       }
     }
@@ -3153,7 +3153,7 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_gqa8_kernel(
       float scale = 0.0f;
       if constexpr (ExpBits <= 2) {
         const float max_score = group_max;
-        const float max_weight = max_score > -3.0e38f ? quanpc_fast_expf(max_score - lse_cache[hrel]) : 0.0f;
+        const float max_weight = max_score > -3.0e38f ? picokv_fast_expf(max_score - lse_cache[hrel]) : 0.0f;
         if (max_weight > 0.0f) {
           const float d0 = w0 - max_score;
           const float d1 = w1 - max_score;
@@ -3224,8 +3224,8 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_gqa8_kernel(
           const float bias = exp_bias[hrel][local_group];
           if (scale2 > 0.0f) {
             const unsigned long long *planes = &exp_planes[hrel][local_group][0];
-            const int pos0 = quanpc_weighted_popc64<ExpBits>(value_words.x, planes);
-            const int pos1 = quanpc_weighted_popc64<ExpBits>(value_words.y, planes);
+            const int pos0 = picokv_weighted_popc64<ExpBits>(value_words.x, planes);
+            const int pos1 = picokv_weighted_popc64<ExpBits>(value_words.y, planes);
             acc0[slot] += scale2 * (float)pos0 + bias;
             acc1[slot] += scale2 * (float)pos1 + bias;
           }
@@ -3253,10 +3253,10 @@ __global__ void __launch_bounds__(256, 6) quanpc_v1_expbits_atomic2_gqa8_kernel(
 
 // Prototype GQA=8 Ck=256/Cv=256 path that uses BMMA m8n8k128 for score
 // generation only.  The exp quantization, packed-value accumulation, and atomic
-// output path intentionally match quanpc_v1_expbits_atomic2_gqa8_kernel so the
+// output path intentionally match picokv_v1_expbits_atomic2_gqa8_kernel so the
 // benchmark isolates whether BMMA score calculation is useful.
 template <bool KeyTransposedFixed, int ExpBits>
-__global__ void __launch_bounds__(256, 4) quanpc_v1_expbits_atomic2_gqa8_bmma_score_kernel(
+__global__ void __launch_bounds__(256, 4) picokv_v1_expbits_atomic2_gqa8_bmma_score_kernel(
   const long *__restrict__ packed_projected_query,
   const long *__restrict__ packed_key,
   const long *__restrict__ packed_value_sign,
@@ -3454,7 +3454,7 @@ __global__ void __launch_bounds__(256, 4) quanpc_v1_expbits_atomic2_gqa8_bmma_sc
         if constexpr (ExpBits <= 2) {
           out0 = score0;
         } else {
-          out0 = quanpc_fast_expf(score0 - lse_cache[h0]);
+          out0 = picokv_fast_expf(score0 - lse_cache[h0]);
         }
       }
       if (l1 < L) {
@@ -3462,7 +3462,7 @@ __global__ void __launch_bounds__(256, 4) quanpc_v1_expbits_atomic2_gqa8_bmma_sc
         if constexpr (ExpBits <= 2) {
           out1 = score1;
         } else {
-          out1 = quanpc_fast_expf(score1 - lse_cache[h1]);
+          out1 = picokv_fast_expf(score1 - lse_cache[h1]);
         }
       }
       weights[h0][local0] = out0;
@@ -3491,7 +3491,7 @@ __global__ void __launch_bounds__(256, 4) quanpc_v1_expbits_atomic2_gqa8_bmma_sc
       float scale = 0.0f;
       if constexpr (ExpBits <= 2) {
         const float max_score = group_max;
-        const float max_weight = max_score > -3.0e38f ? quanpc_fast_expf(max_score - lse_cache[hrel]) : 0.0f;
+        const float max_weight = max_score > -3.0e38f ? picokv_fast_expf(max_score - lse_cache[hrel]) : 0.0f;
         if (max_weight > 0.0f) {
           const float d0 = w0 - max_score;
           const float d1 = w1 - max_score;
@@ -3562,8 +3562,8 @@ __global__ void __launch_bounds__(256, 4) quanpc_v1_expbits_atomic2_gqa8_bmma_sc
           const float bias = exp_bias[hrel][local_group];
           if (scale2 > 0.0f) {
             const unsigned long long *planes = &exp_planes[hrel][local_group][0];
-            const int pos0 = quanpc_weighted_popc64<ExpBits>(value_words.x, planes);
-            const int pos1 = quanpc_weighted_popc64<ExpBits>(value_words.y, planes);
+            const int pos0 = picokv_weighted_popc64<ExpBits>(value_words.x, planes);
+            const int pos1 = picokv_weighted_popc64<ExpBits>(value_words.y, planes);
             acc0[slot] += scale2 * (float)pos0 + bias;
             acc1[slot] += scale2 * (float)pos1 + bias;
           }
@@ -3590,7 +3590,7 @@ __global__ void __launch_bounds__(256, 4) quanpc_v1_expbits_atomic2_gqa8_bmma_sc
 
 
 template <typename scalar_t>
-__global__ void quanpc_v1_fused_reduce_output_projection_kernel(
+__global__ void picokv_v1_fused_reduce_output_projection_kernel(
   const __nv_bfloat16 *__restrict__ partial_code_output, // [B,QH,S,num_tiles,Cv]
   const float *__restrict__ partial_den,                 // [B,QH,S,num_tiles]
   const scalar_t *__restrict__ dense_output,             // [B,QH,S,D]
@@ -3643,17 +3643,17 @@ __global__ void quanpc_v1_fused_reduce_output_projection_kernel(
     float glob_acc = 0.0f;
     #pragma unroll 4
     for (int c = 0; c < Cv; c++) {
-      glob_acc += code_acc[c] * quanpc_to_float(value_proj[proj_base + (long)c * D + d]);
+      glob_acc += code_acc[c] * picokv_to_float(value_proj[proj_base + (long)c * D + d]);
     }
-    const float numerator = quanpc_to_float(dense_output[dense_base + d]) + glob_acc;
-    attn_output[dense_base + d] = quanpc_from_float<scalar_t>(numerator * inv_den);
+    const float numerator = picokv_to_float(dense_output[dense_base + d]) + glob_acc;
+    attn_output[dense_base + d] = picokv_from_float<scalar_t>(numerator * inv_den);
   }
 }
 
 
 } // namespace
 
-void quanpc_dense_attention_numerator(
+void picokv_dense_attention_numerator(
   at::Tensor query,
   at::Tensor dense_key,
   at::Tensor dense_value,
@@ -3699,7 +3699,7 @@ void quanpc_dense_attention_numerator(
   const int rows = B * QH * S;
   const size_t shared_bytes = (size_t)L * sizeof(float);
   if (query.scalar_type() == at::kBFloat16) {
-    quanpc_dense_attention_numerator_kernel<__nv_bfloat16><<<rows, threads, shared_bytes, stream>>>(
+    picokv_dense_attention_numerator_kernel<__nv_bfloat16><<<rows, threads, shared_bytes, stream>>>(
       (const __nv_bfloat16*)query.data_ptr<at::BFloat16>(),
       (const __nv_bfloat16*)dense_key.data_ptr<at::BFloat16>(),
       (const __nv_bfloat16*)dense_value.data_ptr<at::BFloat16>(),
@@ -3709,7 +3709,7 @@ void quanpc_dense_attention_numerator(
       (float)attention_scale
     );
   } else if (query.scalar_type() == at::kFloat) {
-    quanpc_dense_attention_numerator_kernel<float><<<rows, threads, shared_bytes, stream>>>(
+    picokv_dense_attention_numerator_kernel<float><<<rows, threads, shared_bytes, stream>>>(
       query.data_ptr<float>(),
       dense_key.data_ptr<float>(),
       dense_value.data_ptr<float>(),
@@ -3724,7 +3724,7 @@ void quanpc_dense_attention_numerator(
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void quanpc_fused_output_projection(
+void picokv_fused_output_projection(
   at::Tensor dense_output,
   at::Tensor glob_code_output,
   at::Tensor glob_den,
@@ -3766,7 +3766,7 @@ void quanpc_fused_output_projection(
   const int rows = B * QH * S;
   const int threads = 128;
   if (dense_output.scalar_type() == at::kBFloat16) {
-    quanpc_fused_output_projection_kernel<__nv_bfloat16><<<rows, threads, 0, stream>>>(
+    picokv_fused_output_projection_kernel<__nv_bfloat16><<<rows, threads, 0, stream>>>(
       (const __nv_bfloat16*)dense_output.data_ptr<at::BFloat16>(),
       glob_code_output.data_ptr<float>(),
       glob_den.data_ptr<float>(),
@@ -3775,7 +3775,7 @@ void quanpc_fused_output_projection(
       B, QH, KVH, S, Cv, D
     );
   } else if (dense_output.scalar_type() == at::kFloat) {
-    quanpc_fused_output_projection_kernel<float><<<rows, threads, 0, stream>>>(
+    picokv_fused_output_projection_kernel<float><<<rows, threads, 0, stream>>>(
       dense_output.data_ptr<float>(),
       glob_code_output.data_ptr<float>(),
       glob_den.data_ptr<float>(),
@@ -3792,7 +3792,7 @@ void quanpc_fused_output_projection(
 
 
 
-void quanpc_project_quantize_pack_query(
+void picokv_project_quantize_pack_query(
   at::Tensor query,
   at::Tensor key_proj,
   at::Tensor packed_projected_query,
@@ -3836,7 +3836,7 @@ void quanpc_project_quantize_pack_query(
   const int rows = B * QH * S;
   const int threads = 256;
   if (query.scalar_type() == at::kBFloat16) {
-    quanpc_project_quantize_pack_query_kernel<__nv_bfloat16><<<rows, threads, 0, stream>>>(
+    picokv_project_quantize_pack_query_kernel<__nv_bfloat16><<<rows, threads, 0, stream>>>(
       (const __nv_bfloat16*)query.data_ptr<at::BFloat16>(),
       (const __nv_bfloat16*)key_proj.data_ptr<at::BFloat16>(),
       packed_projected_query.data_ptr<long>(),
@@ -3844,7 +3844,7 @@ void quanpc_project_quantize_pack_query(
       B, QH, KVH, S, C, D
     );
   } else {
-    quanpc_project_quantize_pack_query_kernel<float><<<rows, threads, 0, stream>>>(
+    picokv_project_quantize_pack_query_kernel<float><<<rows, threads, 0, stream>>>(
       query.data_ptr<float>(),
       key_proj.data_ptr<float>(),
       packed_projected_query.data_ptr<long>(),
@@ -3855,7 +3855,7 @@ void quanpc_project_quantize_pack_query(
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void quanpc_quantize_pack_projected_query(
+void picokv_quantize_pack_projected_query(
   at::Tensor projected_query,
   at::Tensor packed_projected_query,
   at::Tensor query_scale
@@ -3892,14 +3892,14 @@ void quanpc_quantize_pack_projected_query(
   const int rows = B * H * S;
   const int threads = 256;
   if (projected_query.scalar_type() == at::kBFloat16) {
-    quanpc_quantize_pack_projected_query_kernel<__nv_bfloat16><<<rows, threads, 0, stream>>>(
+    picokv_quantize_pack_projected_query_kernel<__nv_bfloat16><<<rows, threads, 0, stream>>>(
       (const __nv_bfloat16*)projected_query.data_ptr<at::BFloat16>(),
       packed_projected_query.data_ptr<long>(),
       query_scale.data_ptr<float>(),
       B, H, S, C
     );
   } else {
-    quanpc_quantize_pack_projected_query_kernel<float><<<rows, threads, 0, stream>>>(
+    picokv_quantize_pack_projected_query_kernel<float><<<rows, threads, 0, stream>>>(
       projected_query.data_ptr<float>(),
       packed_projected_query.data_ptr<long>(),
       query_scale.data_ptr<float>(),
@@ -3909,7 +3909,7 @@ void quanpc_quantize_pack_projected_query(
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void quanpc_pack_projected_query(
+void picokv_pack_projected_query(
   at::Tensor quant_projected_query,
   at::Tensor packed_projected_query
 ) {
@@ -3937,7 +3937,7 @@ void quanpc_pack_projected_query(
   const int total_words = B * H * S * KBlocks;
   const int threads = 256;
   const int blocks = (total_words + threads - 1) / threads;
-  quanpc_pack_projected_query_kernel<<<blocks, threads, 0, stream>>>(
+  picokv_pack_projected_query_kernel<<<blocks, threads, 0, stream>>>(
     quant_projected_query.data_ptr<int8_t>(),
     packed_projected_query.data_ptr<long>(),
     total_words
@@ -3946,7 +3946,7 @@ void quanpc_pack_projected_query(
 }
 
 
-void quanpc_global_code_output_packed_value_tiled_gqa4(
+void picokv_global_code_output_packed_value_tiled_gqa4(
   at::Tensor packed_projected_query,
   at::Tensor packed_key,
   at::Tensor packed_value,
@@ -3982,7 +3982,7 @@ void quanpc_global_code_output_packed_value_tiled_gqa4(
   dim3 partial_threads(kTileSize);
   dim3 partial_blocks(num_tiles, S, B * KVH);
 #define LAUNCH_PACKED_VALUE(KB, KEY_T) \
-  quanpc_packed_value_partial_kernel<KB, KEY_T><<<partial_blocks, partial_threads, 0, stream>>>( \
+  picokv_packed_value_partial_kernel<KB, KEY_T><<<partial_blocks, partial_threads, 0, stream>>>( \
     packed_projected_query.data_ptr<long>(), \
     packed_key.data_ptr<long>(), \
     packed_value.data_ptr<long>(), \
@@ -4007,7 +4007,7 @@ void quanpc_global_code_output_packed_value_tiled_gqa4(
 
   dim3 reduce_threads(512);
   dim3 reduce_blocks(S, B * QH);
-  quanpc_global_code_output_packed_value_tiled_reduce_kernel<<<reduce_blocks, reduce_threads, 0, stream>>>(
+  picokv_global_code_output_packed_value_tiled_reduce_kernel<<<reduce_blocks, reduce_threads, 0, stream>>>(
     (__nv_bfloat16*)partial_code_output.data_ptr<at::BFloat16>(),
     partial_den.data_ptr<float>(),
     (__nv_bfloat16*)glob_code_output.data_ptr<at::BFloat16>(),
@@ -4017,7 +4017,7 @@ void quanpc_global_code_output_packed_value_tiled_gqa4(
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void quanpc_global_code_output_packed_value_tiled_gqa4_tensorcore(
+void picokv_global_code_output_packed_value_tiled_gqa4_tensorcore(
   at::Tensor packed_projected_query,
   at::Tensor packed_key,
   at::Tensor packed_value,
@@ -4032,7 +4032,7 @@ void quanpc_global_code_output_packed_value_tiled_gqa4_tensorcore(
   int key_transposed,
   double attention_scale
 ) {
-  quanpc_global_code_output_packed_value_tiled_gqa4(
+  picokv_global_code_output_packed_value_tiled_gqa4(
     packed_projected_query,
     packed_key,
     packed_value,
@@ -4049,7 +4049,7 @@ void quanpc_global_code_output_packed_value_tiled_gqa4_tensorcore(
   );
 }
 
-void quanpc_global_code_output_v1_exp8_tiled_gqa4(
+void picokv_global_code_output_v1_exp8_tiled_gqa4(
   at::Tensor packed_projected_query,
   at::Tensor packed_key,
   at::Tensor packed_value_sign,
@@ -4088,7 +4088,7 @@ void quanpc_global_code_output_v1_exp8_tiled_gqa4(
   dim3 partial_threads(kTileSize);
   dim3 partial_blocks(num_tiles, S, B * KVH);
 #define LAUNCH_V1_EXP_BITS(EB, GS, KB, CV, KEY_T) \
-  quanpc_v1_expbits_partial_kernel<GS, KB, CV, KEY_T, false, EB><<<partial_blocks, partial_threads, 0, stream>>>( \
+  picokv_v1_expbits_partial_kernel<GS, KB, CV, KEY_T, false, EB><<<partial_blocks, partial_threads, 0, stream>>>( \
     packed_projected_query.data_ptr<long>(), \
     packed_key.data_ptr<long>(), \
     packed_value_sign.data_ptr<long>(), \
@@ -4138,7 +4138,7 @@ void quanpc_global_code_output_v1_exp8_tiled_gqa4(
 
   dim3 reduce_threads(512);
   dim3 reduce_blocks(S, B * QH);
-  quanpc_global_code_output_packed_value_tiled_reduce_kernel<<<reduce_blocks, reduce_threads, 0, stream>>>(
+  picokv_global_code_output_packed_value_tiled_reduce_kernel<<<reduce_blocks, reduce_threads, 0, stream>>>(
     (__nv_bfloat16*)partial_code_output.data_ptr<at::BFloat16>(),
     partial_den.data_ptr<float>(),
     (__nv_bfloat16*)glob_code_output.data_ptr<at::BFloat16>(),
@@ -4149,7 +4149,7 @@ void quanpc_global_code_output_v1_exp8_tiled_gqa4(
 }
 
 
-void quanpc_global_output_v1_exp8_tiled_gqa4_fused_reduce(
+void picokv_global_output_v1_exp8_tiled_gqa4_fused_reduce(
   at::Tensor packed_projected_query,
   at::Tensor packed_key,
   at::Tensor packed_value_sign,
@@ -4198,7 +4198,7 @@ void quanpc_global_output_v1_exp8_tiled_gqa4_fused_reduce(
   dim3 partial_threads(kTileSize);
   dim3 partial_blocks(num_tiles, S, B * KVH);
 #define LAUNCH_V1_EXP_BITS_FUSED_REDUCE(EB, GS, KB, CV, KEY_T) \
-  quanpc_v1_expbits_partial_kernel<GS, KB, CV, KEY_T, false, EB><<<partial_blocks, partial_threads, 0, stream>>>( \
+  picokv_v1_expbits_partial_kernel<GS, KB, CV, KEY_T, false, EB><<<partial_blocks, partial_threads, 0, stream>>>( \
     packed_projected_query.data_ptr<long>(), \
     packed_key.data_ptr<long>(), \
     packed_value_sign.data_ptr<long>(), \
@@ -4249,7 +4249,7 @@ void quanpc_global_output_v1_exp8_tiled_gqa4_fused_reduce(
   dim3 reduce_threads(256);
   dim3 reduce_blocks(S, B * QH);
   if (dense_output.scalar_type() == at::kBFloat16) {
-    quanpc_v1_fused_reduce_output_projection_kernel<__nv_bfloat16><<<reduce_blocks, reduce_threads, 0, stream>>>(
+    picokv_v1_fused_reduce_output_projection_kernel<__nv_bfloat16><<<reduce_blocks, reduce_threads, 0, stream>>>(
       (__nv_bfloat16*)partial_code_output.data_ptr<at::BFloat16>(),
       partial_den.data_ptr<float>(),
       (const __nv_bfloat16*)dense_output.data_ptr<at::BFloat16>(),
@@ -4258,7 +4258,7 @@ void quanpc_global_output_v1_exp8_tiled_gqa4_fused_reduce(
       B, QH, KVH, S, num_tiles, Cv, D
     );
   } else if (dense_output.scalar_type() == at::kFloat) {
-    quanpc_v1_fused_reduce_output_projection_kernel<float><<<reduce_blocks, reduce_threads, 0, stream>>>(
+    picokv_v1_fused_reduce_output_projection_kernel<float><<<reduce_blocks, reduce_threads, 0, stream>>>(
       (__nv_bfloat16*)partial_code_output.data_ptr<at::BFloat16>(),
       partial_den.data_ptr<float>(),
       dense_output.data_ptr<float>(),
@@ -4273,7 +4273,7 @@ void quanpc_global_output_v1_exp8_tiled_gqa4_fused_reduce(
 }
 
 
-void quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic(
+void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
   at::Tensor packed_projected_query,
   at::Tensor packed_key,
   at::Tensor packed_value_sign,
@@ -4311,7 +4311,7 @@ void quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic(
 
   dim3 partial_threads(kTileSize);
 #define LAUNCH_V1_EXP_BITS_ATOMIC(EB, GS, KB, CV, KEY_T) \
-  quanpc_v1_expbits_partial_kernel<GS, KB, CV, KEY_T, true, EB><<<dim3(num_tiles, S, B * KVH), partial_threads, 0, stream>>>( \
+  picokv_v1_expbits_partial_kernel<GS, KB, CV, KEY_T, true, EB><<<dim3(num_tiles, S, B * KVH), partial_threads, 0, stream>>>( \
     packed_projected_query.data_ptr<long>(), \
     packed_key.data_ptr<long>(), \
     packed_value_sign.data_ptr<long>(), \
@@ -4326,7 +4326,7 @@ void quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic(
     (float)attention_scale \
   )
 #define LAUNCH_V1_EXP_BITS_ATOMIC2(EB, KEY_T) \
-  quanpc_v1_expbits_atomic2_kernel<KEY_T, EB><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>( \
+  picokv_v1_expbits_atomic2_kernel<KEY_T, EB><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>( \
     packed_projected_query.data_ptr<long>(), \
     packed_key.data_ptr<long>(), \
     packed_value_sign.data_ptr<long>(), \
@@ -4339,7 +4339,7 @@ void quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic(
     (float)attention_scale \
   )
 #define LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME(EB, GS, KEY_T) \
-  quanpc_v1_expbits_atomic2_runtime_kernel<GS, KEY_T, EB, 0><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>( \
+  picokv_v1_expbits_atomic2_runtime_kernel<GS, KEY_T, EB, 0><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>( \
     packed_projected_query.data_ptr<long>(), \
     packed_key.data_ptr<long>(), \
     packed_value_sign.data_ptr<long>(), \
@@ -4353,7 +4353,7 @@ void quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic(
     0.0f \
   )
 #define LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED(EB, GS, KEY_T) \
-  quanpc_v1_expbits_atomic2_runtime_unrolled_kernel<GS, KEY_T, EB, 0><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>( \
+  picokv_v1_expbits_atomic2_runtime_unrolled_kernel<GS, KEY_T, EB, 0><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>( \
     packed_projected_query.data_ptr<long>(), \
     packed_key.data_ptr<long>(), \
     packed_value_sign.data_ptr<long>(), \
@@ -4367,7 +4367,7 @@ void quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic(
     0.0f \
   )
 #define LAUNCH_V1_EXP_BITS_ATOMIC2_GQA1_BT(EB, KEY_T, BT, DIV) \
-  quanpc_v1_expbits_atomic2_gqa1_kernel<KEY_T, EB, BT><<<dim3((L + (DIV - 1)) / DIV, S, B * KVH), partial_threads, 0, stream>>>( \
+  picokv_v1_expbits_atomic2_gqa1_kernel<KEY_T, EB, BT><<<dim3((L + (DIV - 1)) / DIV, S, B * KVH), partial_threads, 0, stream>>>( \
     packed_projected_query.data_ptr<long>(), \
     packed_key.data_ptr<long>(), \
     packed_value_sign.data_ptr<long>(), \
@@ -4385,7 +4385,7 @@ void quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic(
     else { LAUNCH_V1_EXP_BITS_ATOMIC2_GQA1_BT(EB, KEY_T, 4, 1024); } \
   } while (0)
 #define LAUNCH_V1_EXP_BITS_ATOMIC2_GQA8_BASE(EB, KEY_T) \
-  quanpc_v1_expbits_atomic2_gqa8_kernel<KEY_T, EB><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>( \
+  picokv_v1_expbits_atomic2_gqa8_kernel<KEY_T, EB><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>( \
     packed_projected_query.data_ptr<long>(), \
     packed_key.data_ptr<long>(), \
     packed_value_sign.data_ptr<long>(), \
@@ -4398,7 +4398,7 @@ void quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic(
     (float)attention_scale \
   )
 #define LAUNCH_V1_EXP_BITS_ATOMIC2_GQA8_SPLIT4(EB, KEY_T) \
-  quanpc_v1_expbits_atomic2_gqa8_split4_kernel<KEY_T, EB><<<dim3((L + 511) / 512, S, B * KVH * 2), partial_threads, 0, stream>>>( \
+  picokv_v1_expbits_atomic2_gqa8_split4_kernel<KEY_T, EB><<<dim3((L + 511) / 512, S, B * KVH * 2), partial_threads, 0, stream>>>( \
     packed_projected_query.data_ptr<long>(), \
     packed_key.data_ptr<long>(), \
     packed_value_sign.data_ptr<long>(), \
@@ -4487,7 +4487,7 @@ void quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic(
 }
 
 
-void quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned(
+void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned(
   at::Tensor packed_projected_query,
   at::Tensor packed_key,
   at::Tensor packed_value_sign,
@@ -4527,7 +4527,7 @@ void quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned(
 
   dim3 partial_threads(kTileSize);
 #define LAUNCH_PRUNED(EB, KEY_T, MODE) \
-  quanpc_v1_expbits_atomic2_pruned_kernel<KEY_T, EB, MODE><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>( \
+  picokv_v1_expbits_atomic2_pruned_kernel<KEY_T, EB, MODE><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>( \
     packed_projected_query.data_ptr<long>(), \
     packed_key.data_ptr<long>(), \
     packed_value_sign.data_ptr<long>(), \
@@ -4541,7 +4541,7 @@ void quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned(
     (float)prune_log_eps \
   )
 #define LAUNCH_PRUNED_RUNTIME(EB, KEY_T, MODE) \
-  quanpc_v1_expbits_atomic2_runtime_kernel<4, KEY_T, EB, MODE><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>( \
+  picokv_v1_expbits_atomic2_runtime_kernel<4, KEY_T, EB, MODE><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>( \
     packed_projected_query.data_ptr<long>(), \
     packed_key.data_ptr<long>(), \
     packed_value_sign.data_ptr<long>(), \
@@ -4555,7 +4555,7 @@ void quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned(
     (float)prune_log_eps \
   )
 #define LAUNCH_PRUNED_RUNTIME_UNROLLED(EB, KEY_T, MODE) \
-  quanpc_v1_expbits_atomic2_runtime_unrolled_kernel<4, KEY_T, EB, MODE><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>( \
+  picokv_v1_expbits_atomic2_runtime_unrolled_kernel<4, KEY_T, EB, MODE><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>( \
     packed_projected_query.data_ptr<long>(), \
     packed_key.data_ptr<long>(), \
     packed_value_sign.data_ptr<long>(), \
@@ -4569,7 +4569,7 @@ void quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned(
     (float)prune_log_eps \
   )
 #define LAUNCH_PRUNED_FIXED43(KB, CV) \
-  quanpc_v1_expbits_atomic2_fixed_kernel<4, KB, CV, true, 4, 3><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>( \
+  picokv_v1_expbits_atomic2_fixed_kernel<4, KB, CV, true, 4, 3><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>( \
     packed_projected_query.data_ptr<long>(), \
     packed_key.data_ptr<long>(), \
     packed_value_sign.data_ptr<long>(), \
@@ -4662,7 +4662,7 @@ void quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned(
 }
 
 
-void quanpc_decode_tail_packed_v1_exp8_tiled_gqa4_atomic_pruned(
+void picokv_decode_tail_packed_v1_exp8_tiled_gqa4_atomic_pruned(
   at::Tensor packed_projected_query,
   at::Tensor packed_key,
   at::Tensor packed_value_sign,
@@ -4717,7 +4717,7 @@ void quanpc_decode_tail_packed_v1_exp8_tiled_gqa4_atomic_pruned(
     C10_CUDA_CHECK(cudaMemsetAsync(den_ptr, 0, den_numel * sizeof(float), stream));
   }
 
-  quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned(
+  picokv_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned(
     packed_projected_query,
     packed_key,
     packed_value_sign,
@@ -4732,7 +4732,7 @@ void quanpc_decode_tail_packed_v1_exp8_tiled_gqa4_atomic_pruned(
     prune_mode,
     prune_log_eps
   );
-  quanpc_fused_output_projection(
+  picokv_fused_output_projection(
     dense_output,
     glob_code_output,
     glob_den,
@@ -4743,7 +4743,7 @@ void quanpc_decode_tail_packed_v1_exp8_tiled_gqa4_atomic_pruned(
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned(
+void picokv_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned(
   at::Tensor projected_query,
   at::Tensor packed_projected_query,
   at::Tensor packed_key,
@@ -4771,8 +4771,8 @@ void quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned(
   TORCH_CHECK(C == 128 || C == 192 || C == 256 || C == 320 || C == 384 || C == 448 || C == 512, "pruned decode tail currently requires projected-query Ck in {128,192,256,320,384,448,512}");
   dim3 pack_blocks(B * QH * S);
   dim3 pack_threads(256);
-  AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16, projected_query.scalar_type(), "quanpc_quantize_pack_projected_query", [&] {
-    quanpc_quantize_pack_projected_query_kernel<scalar_t><<<pack_blocks, pack_threads, 0, stream>>>(
+  AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16, projected_query.scalar_type(), "picokv_quantize_pack_projected_query", [&] {
+    picokv_quantize_pack_projected_query_kernel<scalar_t><<<pack_blocks, pack_threads, 0, stream>>>(
       (const scalar_t*)projected_query.data_ptr<scalar_t>(),
       packed_projected_query.data_ptr<long>(),
       query_scale.data_ptr<float>(),
@@ -4783,7 +4783,7 @@ void quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned(
 
   cudaMemsetAsync(glob_code_output.data_ptr<float>(), 0, glob_code_output.numel() * sizeof(float), stream);
   cudaMemsetAsync(glob_den.data_ptr<float>(), 0, glob_den.numel() * sizeof(float), stream);
-  quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned(
+  picokv_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned(
     packed_projected_query,
     packed_key,
     packed_value_sign,
@@ -4798,7 +4798,7 @@ void quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned(
     prune_mode,
     prune_log_eps
   );
-  quanpc_fused_output_projection(
+  picokv_fused_output_projection(
     dense_output,
     glob_code_output,
     glob_den,
@@ -4808,7 +4808,7 @@ void quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned(
 }
 
 
-void quanpc_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic(
+void picokv_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic(
   at::Tensor packed_projected_query,
   at::Tensor packed_key,
   at::Tensor packed_value_sign,
@@ -4844,7 +4844,7 @@ void quanpc_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic(
 
   dim3 partial_threads(kTileSize);
   if (key_transposed) {
-    quanpc_v1_expbits_atomic2_gqa8_bmma_score_kernel<true, 4><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>(
+    picokv_v1_expbits_atomic2_gqa8_bmma_score_kernel<true, 4><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>(
       packed_projected_query.data_ptr<long>(),
       packed_key.data_ptr<long>(),
       packed_value_sign.data_ptr<long>(),
@@ -4857,7 +4857,7 @@ void quanpc_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic(
       (float)attention_scale
     );
   } else {
-    quanpc_v1_expbits_atomic2_gqa8_bmma_score_kernel<false, 4><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>(
+    picokv_v1_expbits_atomic2_gqa8_bmma_score_kernel<false, 4><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>(
       packed_projected_query.data_ptr<long>(),
       packed_key.data_ptr<long>(),
       packed_value_sign.data_ptr<long>(),
@@ -4874,7 +4874,7 @@ void quanpc_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic(
 }
 
 
-void quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic(
+void picokv_decode_tail_v1_exp8_tiled_gqa4_atomic(
   at::Tensor projected_query,
   at::Tensor packed_projected_query,
   at::Tensor packed_key,
@@ -4893,7 +4893,7 @@ void quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic(
 ) {
   at::cuda::CUDAGuard device_guard(projected_query.device());
 
-  quanpc_quantize_pack_projected_query(projected_query, packed_projected_query, query_scale);
+  picokv_quantize_pack_projected_query(projected_query, packed_projected_query, query_scale);
 
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(projected_query.device().index());
   float *code_ptr = glob_code_output.data_ptr<float>();
@@ -4922,7 +4922,7 @@ void quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic(
     ));
   }
 
-  quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic(
+  picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
     packed_projected_query,
     packed_key,
     packed_value_sign,
@@ -4936,7 +4936,7 @@ void quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic(
     attention_scale
   );
 
-  quanpc_fused_output_projection(
+  picokv_fused_output_projection(
     dense_output,
     glob_code_output,
     glob_den,

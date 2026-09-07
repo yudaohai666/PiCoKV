@@ -1,7 +1,7 @@
-"""Standalone CUDA kernels for QuanPC experiments.
+"""Standalone CUDA kernels for PiCoKV experiments.
 
 This file intentionally loads separate sources from the existing binary-projection
-extension so experimental QuanPC kernels do not modify the original extension.
+extension so experimental PiCoKV kernels do not modify the original extension.
 """
 
 from __future__ import annotations
@@ -22,27 +22,27 @@ _EXTENSION = None
 
 def _prebuilt_path() -> Path:
     """Return the optional install-time build directory."""
-    configured = os.environ.get("QUANPC_PREBUILT_DIR")
+    configured = os.environ.get("PICOKV_PREBUILT_DIR")
     if configured:
         return Path(configured)
-    return Path(__file__).resolve().parents[2] / "build" / "quantpc_extensions"
+    return Path(__file__).resolve().parents[2] / "build" / "picokv_extensions"
 
 
 def _load_prebuilt_extension():
     """Load the install-time .so without invoking torch's JIT builder."""
-    if os.environ.get("QUANPC_DISABLE_PREBUILT") == "1":
+    if os.environ.get("PICOKV_DISABLE_PREBUILT") == "1":
         return None
     root = _prebuilt_path()
-    candidates = sorted(root.glob("_quanpc_cuda*.so"))
+    candidates = sorted(root.glob("_picokv_cuda*.so"))
     if not candidates:
         return None
-    module_name = "_quanpc_cuda"
+    module_name = "_picokv_cuda"
     existing = sys.modules.get(module_name)
     if existing is not None:
         return existing
     spec = importlib.util.spec_from_file_location(module_name, candidates[0])
     if spec is None or spec.loader is None:
-        raise ImportError(f"cannot load prebuilt QuanPC extension: {candidates[0]}")
+        raise ImportError(f"cannot load prebuilt PiCoKV extension: {candidates[0]}")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     try:
@@ -62,7 +62,7 @@ def _require_torch():
 def _require_cuda():
     torch_mod = _require_torch()
     if not torch_mod.cuda.is_available():
-        raise RuntimeError("CUDA is required to run the QuanPC CUDA extension.")
+        raise RuntimeError("CUDA is required to run the PiCoKV CUDA extension.")
     return torch_mod
 
 
@@ -73,7 +73,7 @@ def _ensure_build_tool_path() -> None:
         os.environ["PATH"] = python_bin + os.pathsep + os.environ.get("PATH", "")
 
 
-def load_quanpc_extension(verbose: bool = False):
+def load_picokv_extension(verbose: bool = False):
     global _EXTENSION
     if _EXTENSION is not None:
         return _EXTENSION
@@ -94,7 +94,7 @@ def load_quanpc_extension(verbose: bool = False):
         os.path.join(curr_path, "torch_extension.cpp"),
     ]
     _EXTENSION = load(
-        "quanpc_cuda",
+        "picokv_cuda",
         src_files,
         extra_cflags=["-O3"],
         extra_cuda_cflags=["-O3"],
@@ -172,7 +172,7 @@ def project_quantize_pack_query_cuda(query, key_proj, verbose: bool = False):
         raise ValueError(f"fused project+pack supports C <= 512 and D <= 256; got C={C}, D={D}.")
     packed = torch_mod.empty(B, QH, S, C // 64, 8, device=query.device, dtype=torch_mod.long)
     query_scale = torch_mod.empty(B, QH, S, device=query.device, dtype=torch_mod.float32)
-    load_quanpc_extension(verbose).quanpc_project_quantize_pack_query_fn(query, key_proj, packed, query_scale)
+    load_picokv_extension(verbose).picokv_project_quantize_pack_query_fn(query, key_proj, packed, query_scale)
     return packed, query_scale
 
 
@@ -205,7 +205,7 @@ def quantize_pack_projected_query_cuda_out(projected_query, packed, query_scale,
         raise ValueError("packed must be contiguous.")
     if not query_scale.is_contiguous():
         raise ValueError("query_scale must be contiguous.")
-    load_quanpc_extension(verbose).quanpc_quantize_pack_projected_query_fn(projected_query, packed, query_scale)
+    load_picokv_extension(verbose).picokv_quantize_pack_projected_query_fn(projected_query, packed, query_scale)
     return packed, query_scale
 
 
@@ -250,12 +250,12 @@ def pack_projected_query_cuda(quant_projected_query, verbose: bool = False):
         device=quant_projected_query.device,
         dtype=torch_mod.long,
     )
-    load_quanpc_extension(verbose).quanpc_pack_projected_query_fn(quant_projected_query, packed)
+    load_picokv_extension(verbose).picokv_pack_projected_query_fn(quant_projected_query, packed)
     return packed
 
 
-def pack_quanpc_key_torch(quant_key):
-    """Pack unpacked 1-bit QuanPC key codes into int64 words.
+def pack_picokv_key_torch(quant_key):
+    """Pack unpacked 1-bit PiCoKV key codes into int64 words.
 
     Input shape is ``[B,H,L,Ck]`` with values ``+1`` or ``-1`` and ``Ck``
     divisible by 64.  Output shape is ``[B,H,L,Ck//64]``.  Bit=1 denotes key
@@ -270,17 +270,17 @@ def pack_quanpc_key_torch(quant_key):
 
 
 
-def pack_quanpc_key_transposed_torch(quant_key):
-    """Pack 1-bit QuanPC key codes as ``[B, H, Ck//64, L]``.
+def pack_picokv_key_transposed_torch(quant_key):
+    """Pack 1-bit PiCoKV key codes as ``[B, H, Ck//64, L]``.
 
     This layout makes fixed-code-block loads contiguous across token threads in
     the tiled CUDA kernel.
     """
-    return pack_quanpc_key_torch(quant_key).transpose(2, 3).contiguous()
+    return pack_picokv_key_torch(quant_key).transpose(2, 3).contiguous()
 
 
-def pack_quanpc_value_torch(quant_value, value_bits: int):
-    """Pack QuanPC value codes as unsigned bit-planes.
+def pack_picokv_value_torch(quant_value, value_bits: int):
+    """Pack PiCoKV value codes as unsigned bit-planes.
 
     The CUDA kernel decodes each raw integer code as
     ``code - ((2 ** value_bits - 1) / 2)``.  Floating inputs are interpreted as
@@ -316,7 +316,7 @@ def pack_quanpc_value_torch(quant_value, value_bits: int):
 
 
 
-def pack_quanpc_value_1bit_transposed_torch(quant_value):
+def pack_picokv_value_1bit_transposed_torch(quant_value):
     """Pack 1-bit value signs as ``[B, H, ceil(L / 64), Cv]``.
 
     Input shape is ``[B,H,L,Cv]`` with values centered on ``-1`` and ``+1``.
@@ -376,10 +376,10 @@ def _check_dense_attention_inputs(query_states, dense_key, dense_value):
     return torch_mod, B, QH, S, D
 
 
-def quanpc_dense_attention_numerator_cuda(query_states, dense_key, dense_value, attention_scale: float, verbose: bool = False):
-    """CUDA dense retained-KV numerator and logsumexp for QuanPC decode.
+def picokv_dense_attention_numerator_cuda(query_states, dense_key, dense_value, attention_scale: float, verbose: bool = False):
+    """CUDA dense retained-KV numerator and logsumexp for PiCoKV decode.
 
-    This matches ``_dense_attention_numerator`` in ``quanpc.py`` but keeps dense
+    This matches ``_dense_attention_numerator`` in ``picokv.py`` but keeps dense
     K/V in GQA layout ``[B, KVH, L, D]`` instead of materializing repeated heads.
     Returns ``dense_output`` with query dtype and ``dense_lse`` as ``[B,QH,S]`` fp32.
     """
@@ -393,7 +393,7 @@ def quanpc_dense_attention_numerator_cuda(query_states, dense_key, dense_value, 
 
     dense_output = torch_mod.empty_like(query_states)
     dense_lse = torch_mod.empty(B, QH, S, device=query_states.device, dtype=torch_mod.float32)
-    load_quanpc_extension(verbose).quanpc_dense_attention_numerator_fn(
+    load_picokv_extension(verbose).picokv_dense_attention_numerator_fn(
         query_states,
         dense_key,
         dense_value,
@@ -444,14 +444,14 @@ def _check_fused_output_inputs(dense_output, glob_code_output, glob_den, value_p
     return torch_mod
 
 
-def quanpc_fused_output_projection_cuda_out(dense_output, glob_code_output, glob_den, value_proj, attn_output, verbose: bool = False):
+def picokv_fused_output_projection_cuda_out(dense_output, glob_code_output, glob_den, value_proj, attn_output, verbose: bool = False):
     """Write fused ``glob_code @ value_proj`` plus normalization into caller-owned output."""
     _check_fused_output_inputs(dense_output, glob_code_output, glob_den, value_proj)
     if tuple(attn_output.shape) != tuple(dense_output.shape) or attn_output.dtype != dense_output.dtype or not attn_output.is_cuda:
         raise ValueError("attn_output must be a CUDA tensor matching dense_output shape and dtype.")
     if not attn_output.is_contiguous():
         raise ValueError("attn_output must be contiguous.")
-    load_quanpc_extension(verbose).quanpc_fused_output_projection_fn(
+    load_picokv_extension(verbose).picokv_fused_output_projection_fn(
         dense_output,
         glob_code_output,
         glob_den,
@@ -461,11 +461,11 @@ def quanpc_fused_output_projection_cuda_out(dense_output, glob_code_output, glob
     return attn_output
 
 
-def quanpc_fused_output_projection_cuda(dense_output, glob_code_output, glob_den, value_proj, verbose: bool = False):
+def picokv_fused_output_projection_cuda(dense_output, glob_code_output, glob_den, value_proj, verbose: bool = False):
     """Fuse ``glob_code @ value_proj``, dense numerator add, and normalization."""
     torch_mod = _check_fused_output_inputs(dense_output, glob_code_output, glob_den, value_proj)
     attn_output = torch_mod.empty_like(dense_output)
-    return quanpc_fused_output_projection_cuda_out(
+    return picokv_fused_output_projection_cuda_out(
         dense_output,
         glob_code_output,
         glob_den,
@@ -586,7 +586,7 @@ def _validate_exp_bits(exp_bits: int) -> int:
     return exp_bits
 
 
-def quanpc_global_code_output_packed_value_tiled_gqa4_cuda(
+def picokv_global_code_output_packed_value_tiled_gqa4_cuda(
     packed_projected_query,
     packed_key,
     packed_value,
@@ -598,7 +598,7 @@ def quanpc_global_code_output_packed_value_tiled_gqa4_cuda(
     key_transposed: bool = False,
     verbose: bool = False,
 ):
-    """GQA-specialized tiled QuanPC path for ``QH / KVH == 4``."""
+    """GQA-specialized tiled PiCoKV path for ``QH / KVH == 4``."""
     torch_mod, B, QH, S, L, Cv = _check_packed_value_inputs(
         packed_projected_query, packed_key, packed_value, query_scale, dense_lse, value_bits, key_transposed=key_transposed
     )
@@ -618,7 +618,7 @@ def quanpc_global_code_output_packed_value_tiled_gqa4_cuda(
     glob_code_output = torch_mod.empty(B, QH, S, Cv, device=packed_projected_query.device, dtype=torch_mod.bfloat16)
     glob_den = torch_mod.empty(B, QH, S, device=packed_projected_query.device, dtype=torch_mod.float32)
 
-    load_quanpc_extension(verbose).quanpc_global_code_output_packed_value_tiled_gqa4_fn(
+    load_picokv_extension(verbose).picokv_global_code_output_packed_value_tiled_gqa4_fn(
         packed_projected_query,
         packed_key,
         packed_value,
@@ -638,7 +638,7 @@ def quanpc_global_code_output_packed_value_tiled_gqa4_cuda(
 
 
 
-def quanpc_global_code_output_packed_value_tiled_gqa4_tensorcore_cuda(
+def picokv_global_code_output_packed_value_tiled_gqa4_tensorcore_cuda(
     packed_projected_query,
     packed_key,
     packed_value,
@@ -670,7 +670,7 @@ def quanpc_global_code_output_packed_value_tiled_gqa4_tensorcore_cuda(
     glob_code_output = torch_mod.empty(B, QH, S, Cv, device=packed_projected_query.device, dtype=torch_mod.bfloat16)
     glob_den = torch_mod.empty(B, QH, S, device=packed_projected_query.device, dtype=torch_mod.float32)
 
-    load_quanpc_extension(verbose).quanpc_global_code_output_packed_value_tiled_gqa4_tensorcore_fn(
+    load_picokv_extension(verbose).picokv_global_code_output_packed_value_tiled_gqa4_tensorcore_fn(
         packed_projected_query,
         packed_key,
         packed_value,
@@ -688,7 +688,7 @@ def quanpc_global_code_output_packed_value_tiled_gqa4_tensorcore_cuda(
     return glob_code_output, glob_den
 
 
-def quanpc_global_code_output_v1_exp8_tiled_gqa4_cuda(
+def picokv_global_code_output_v1_exp8_tiled_gqa4_cuda(
     packed_projected_query,
     packed_key,
     packed_value_sign,
@@ -716,7 +716,7 @@ def quanpc_global_code_output_v1_exp8_tiled_gqa4_cuda(
     glob_code_output = torch_mod.empty(B, QH, S, Cv, device=packed_projected_query.device, dtype=torch_mod.bfloat16)
     glob_den = torch_mod.empty(B, QH, S, device=packed_projected_query.device, dtype=torch_mod.float32)
 
-    load_quanpc_extension(verbose).quanpc_global_code_output_v1_exp8_tiled_gqa4_fn(
+    load_picokv_extension(verbose).picokv_global_code_output_v1_exp8_tiled_gqa4_fn(
         packed_projected_query,
         packed_key,
         packed_value_sign,
@@ -736,7 +736,7 @@ def quanpc_global_code_output_v1_exp8_tiled_gqa4_cuda(
 
 
 
-def quanpc_global_output_v1_exp8_tiled_gqa4_fused_reduce_cuda(
+def picokv_global_output_v1_exp8_tiled_gqa4_fused_reduce_cuda(
     packed_projected_query,
     packed_key,
     packed_value_sign,
@@ -778,7 +778,7 @@ def quanpc_global_output_v1_exp8_tiled_gqa4_fused_reduce_cuda(
     )
     partial_den = torch_mod.empty(B, QH, S, num_tiles, device=packed_projected_query.device, dtype=torch_mod.float32)
     attn_output = torch_mod.empty_like(dense_output)
-    load_quanpc_extension(verbose).quanpc_global_output_v1_exp8_tiled_gqa4_fused_reduce_fn(
+    load_picokv_extension(verbose).picokv_global_output_v1_exp8_tiled_gqa4_fused_reduce_fn(
         packed_projected_query,
         packed_key,
         packed_value_sign,
@@ -797,7 +797,7 @@ def quanpc_global_output_v1_exp8_tiled_gqa4_fused_reduce_cuda(
     return attn_output
 
 
-def quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_cuda_out(
+def picokv_global_code_output_v1_exp8_tiled_gqa4_atomic_cuda_out(
     packed_projected_query,
     packed_key,
     packed_value_sign,
@@ -826,7 +826,7 @@ def quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_cuda_out(
         raise ValueError("global output tensors must be contiguous.")
 
     torch_mod._foreach_zero_([glob_code_output, glob_den])
-    load_quanpc_extension(verbose).quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_fn(
+    load_picokv_extension(verbose).picokv_global_code_output_v1_exp8_tiled_gqa4_atomic_fn(
         packed_projected_query,
         packed_key,
         packed_value_sign,
@@ -842,7 +842,7 @@ def quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_cuda_out(
     return glob_code_output, glob_den
 
 
-def quanpc_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic_cuda_out(
+def picokv_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic_cuda_out(
     packed_projected_query,
     packed_key,
     packed_value_sign,
@@ -877,7 +877,7 @@ def quanpc_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic_cuda_out(
         raise ValueError("global output tensors must be contiguous.")
 
     torch_mod._foreach_zero_([glob_code_output, glob_den])
-    load_quanpc_extension(verbose).quanpc_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic_fn(
+    load_picokv_extension(verbose).picokv_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic_fn(
         packed_projected_query,
         packed_key,
         packed_value_sign,
@@ -893,7 +893,7 @@ def quanpc_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic_cuda_out(
     return glob_code_output, glob_den
 
 
-def quanpc_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic_cuda(
+def picokv_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic_cuda(
     packed_projected_query,
     packed_key,
     packed_value_sign,
@@ -911,7 +911,7 @@ def quanpc_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic_cuda(
     )
     glob_code_output = torch_mod.empty(B, QH, S, Cv, device=packed_projected_query.device, dtype=torch_mod.float32)
     glob_den = torch_mod.empty(B, QH, S, device=packed_projected_query.device, dtype=torch_mod.float32)
-    return quanpc_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic_cuda_out(
+    return picokv_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic_cuda_out(
         packed_projected_query,
         packed_key,
         packed_value_sign,
@@ -927,7 +927,7 @@ def quanpc_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic_cuda(
     )
 
 
-def quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_cuda(
+def picokv_global_code_output_v1_exp8_tiled_gqa4_atomic_cuda(
     packed_projected_query,
     packed_key,
     packed_value_sign,
@@ -945,7 +945,7 @@ def quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_cuda(
     )
     glob_code_output = torch_mod.empty(B, QH, S, Cv, device=packed_projected_query.device, dtype=torch_mod.float32)
     glob_den = torch_mod.empty(B, QH, S, device=packed_projected_query.device, dtype=torch_mod.float32)
-    return quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_cuda_out(
+    return picokv_global_code_output_v1_exp8_tiled_gqa4_atomic_cuda_out(
         packed_projected_query,
         packed_key,
         packed_value_sign,
@@ -987,7 +987,7 @@ def _check_pruned_gqa4_inputs(packed_projected_query, packed_key, packed_value_s
     return torch_mod, B, QH, S, L, Cv
 
 
-def quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned_cuda_out(
+def picokv_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned_cuda_out(
     packed_projected_query,
     packed_key,
     packed_value_sign,
@@ -1024,7 +1024,7 @@ def quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned_cuda_out(
         raise ValueError("global output tensors must be contiguous.")
 
     torch_mod._foreach_zero_([glob_code_output, glob_den])
-    load_quanpc_extension(verbose).quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned_fn(
+    load_picokv_extension(verbose).picokv_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned_fn(
         packed_projected_query,
         packed_key,
         packed_value_sign,
@@ -1042,7 +1042,7 @@ def quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned_cuda_out(
     return glob_code_output, glob_den
 
 
-def quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned_cuda(
+def picokv_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned_cuda(
     packed_projected_query,
     packed_key,
     packed_value_sign,
@@ -1062,7 +1062,7 @@ def quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned_cuda(
     )
     glob_code_output = torch_mod.empty(B, QH, S, Cv, device=packed_projected_query.device, dtype=torch_mod.float32)
     glob_den = torch_mod.empty(B, QH, S, device=packed_projected_query.device, dtype=torch_mod.float32)
-    return quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned_cuda_out(
+    return picokv_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned_cuda_out(
         packed_projected_query,
         packed_key,
         packed_value_sign,
@@ -1080,7 +1080,7 @@ def quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned_cuda(
     )
 
 
-def quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned_cuda_out(
+def picokv_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned_cuda_out(
     projected_query,
     packed_projected_query,
     packed_key,
@@ -1139,7 +1139,7 @@ def quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned_cuda_out(
         if not tensor.is_contiguous():
             raise ValueError(f"{name} must be contiguous.")
 
-    load_quanpc_extension(verbose).quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned_fn(
+    load_picokv_extension(verbose).picokv_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned_fn(
         projected_query,
         packed_projected_query,
         packed_key,
@@ -1161,7 +1161,7 @@ def quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned_cuda_out(
     return attn_output
 
 
-def quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned_cuda(
+def picokv_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned_cuda(
     projected_query,
     packed_key,
     packed_value_sign,
@@ -1191,7 +1191,7 @@ def quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned_cuda(
     glob_code_output = torch_mod.empty(B, QH, S, Cv, device=projected_query.device, dtype=torch_mod.float32)
     glob_den = torch_mod.empty(B, QH, S, device=projected_query.device, dtype=torch_mod.float32)
     attn_output = torch_mod.empty_like(dense_output)
-    return quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned_cuda_out(
+    return picokv_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned_cuda_out(
         projected_query,
         packed_projected_query,
         packed_key,
@@ -1233,7 +1233,7 @@ def smoke_test(verbose: bool = False) -> None:
     dense_q = torch_mod.randn(B, QH, S, C, device="cuda", dtype=torch_mod.bfloat16).contiguous()
     dense_k = torch_mod.randn(B, KVH, 97, C, device="cuda", dtype=torch_mod.bfloat16).contiguous()
     dense_v = torch_mod.randn(B, KVH, 97, C, device="cuda", dtype=torch_mod.bfloat16).contiguous()
-    dense_cuda_out, dense_cuda_lse = quanpc_dense_attention_numerator_cuda(
+    dense_cuda_out, dense_cuda_lse = picokv_dense_attention_numerator_cuda(
         dense_q, dense_k, dense_v, attention_scale, verbose=verbose
     )
     dense_k_exp = dense_k.repeat_interleave(QH // KVH, dim=1)
@@ -1246,7 +1246,7 @@ def smoke_test(verbose: bool = False) -> None:
     fused_code = torch_mod.randn(B, QH, S, 256, device="cuda", dtype=torch_mod.float32).contiguous()
     fused_den = (torch_mod.rand(B, QH, S, device="cuda", dtype=torch_mod.float32) * 4).contiguous()
     fused_proj = (torch_mod.randn(B, KVH, 256, C, device="cuda", dtype=torch_mod.bfloat16) * 0.02).contiguous()
-    fused_cuda_out = quanpc_fused_output_projection_cuda(dense_cuda_out, fused_code, fused_den, fused_proj, verbose=verbose)
+    fused_cuda_out = picokv_fused_output_projection_cuda(dense_cuda_out, fused_code, fused_den, fused_proj, verbose=verbose)
     fused_proj_exp = fused_proj.repeat_interleave(QH // KVH, dim=1)
     fused_ref_out = (
         dense_cuda_out + torch_mod.matmul(fused_code.to(fused_proj.dtype), fused_proj_exp)
@@ -1256,19 +1256,19 @@ def smoke_test(verbose: bool = False) -> None:
     packed_q_cuda = pack_projected_query_cuda(q, verbose=verbose).contiguous()
     if not torch_mod.equal(packed_q_cuda, packed_q):
         raise AssertionError("CUDA projected-query pack mismatch")
-    packed_k = pack_quanpc_key_torch(k).contiguous()
-    packed_v = pack_quanpc_value_torch(v, 2).contiguous()
-    packed_v1 = pack_quanpc_value_1bit_transposed_torch(v1).contiguous()
-    cuda_out, cuda_den = quanpc_global_code_output_packed_value_tiled_gqa4_cuda(
+    packed_k = pack_picokv_key_torch(k).contiguous()
+    packed_v = pack_picokv_value_torch(v, 2).contiguous()
+    packed_v1 = pack_picokv_value_1bit_transposed_torch(v1).contiguous()
+    cuda_out, cuda_den = picokv_global_code_output_packed_value_tiled_gqa4_cuda(
         packed_q, packed_k, packed_v, q_scale, dense_lse, 2, attention_scale, tile_size=256, verbose=verbose
     )
-    tc_out, tc_den = quanpc_global_code_output_packed_value_tiled_gqa4_tensorcore_cuda(
+    tc_out, tc_den = picokv_global_code_output_packed_value_tiled_gqa4_tensorcore_cuda(
         packed_q, packed_k, packed_v, q_scale, dense_lse, 2, attention_scale, tile_size=256, verbose=verbose
     )
-    v1_out, v1_den = quanpc_global_code_output_v1_exp8_tiled_gqa4_cuda(
+    v1_out, v1_den = picokv_global_code_output_v1_exp8_tiled_gqa4_cuda(
         packed_q, packed_k, packed_v1, q_scale, dense_lse, attention_scale, exp_bits=4, tile_size=256, verbose=verbose
     )
-    v1_atomic_out, v1_atomic_den = quanpc_global_code_output_v1_exp8_tiled_gqa4_atomic_cuda(
+    v1_atomic_out, v1_atomic_den = picokv_global_code_output_v1_exp8_tiled_gqa4_atomic_cuda(
         packed_q, packed_k, packed_v1, q_scale, dense_lse, attention_scale, exp_bits=4, tile_size=256, verbose=verbose
     )
     torch_mod.cuda.synchronize()
@@ -1354,7 +1354,7 @@ def smoke_test(verbose: bool = False) -> None:
         raise AssertionError(f"v1_exp4 atomic denominator mismatch: max diff {v1_atomic_den_diff}")
 
     print(
-        "quanpc_cuda smoke_test passed: "
+        "picokv_cuda smoke_test passed: "
         f"dense_out_diff={dense_out_diff}, dense_out_mean_diff={dense_out_mean_diff}, dense_lse_diff={dense_lse_diff}; "
         f"fused_out_diff={fused_out_diff}, fused_out_mean_diff={fused_out_mean_diff}; "
         f"gqa4 code max diff={code_diff}, mean diff={code_mean_diff}, gqa4 den diff={den_diff}; "

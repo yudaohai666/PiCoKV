@@ -1,5 +1,5 @@
 #!/bin/bash
-# Prefill vs decode efficiency: dense baseline / quantpc / kivi / oscar / polar.
+# Prefill vs decode efficiency: dense baseline / picokv / kivi / oscar / polar.
 # Each method -> one JSON in results/efficiency/, then --compare aggregates a
 # table grouped by prompt_len. Inputs are random token ids (latency depends on
 # length/shape, not content). Select methods via the METHODS list below.
@@ -42,7 +42,7 @@ OUTPUT_PATH="${OUTPUT_PATH:-}"
 # ── methods to run (comment out to skip; METHOD=oscar forces a single one) ──
 METHODS=(
   # flash_attention_2
-  quantpc
+  picokv
   # kivi
   # oscar
   # polar
@@ -52,7 +52,7 @@ METHODS=(
 [ -n "${METHOD:-}" ] && METHODS=("${METHOD}")
 
 # ── per-method defaults (identical across all benchmark launchers) ──
-# quantpc; default = offline
+# picokv; default = offline
 K_BITS="${K_BITS:-320}"; V_BITS="${V_BITS:-320}"
 SINK="${SINK:-64}"; LOCAL="${LOCAL:-256}"
 EXP_BITS="${EXP_BITS:-4}"; EAS="${EAS:-0.01}"; ZEROROPE="${ZEROROPE:-20}"
@@ -69,12 +69,12 @@ OSCAR_KV_ROTATION="${OSCAR_KV_ROTATION:-hadamard}"; OSCAR_KV_NORM="${OSCAR_KV_NO
 POLAR_MODE="${POLAR_MODE:-mixed}"; POLAR_RBITS="${POLAR_RBITS:-3}"; POLAR_TBITS="${POLAR_TBITS:-3}"; POLAR_VBITS="${POLAR_VBITS:-2}"
 
 # Build METHOD_ARGS[] and TAG for a method. Needs REPO_ROOT, MODEL_TAG + the
-# per-method defaults above. quantpc TAG matches run_ruler/run_infinitebench's
-# python run_tag(): quantpc_{mode}_k{K}_v{V}.
+# per-method defaults above. picokv TAG matches run_ruler/run_infinitebench's
+# python run_tag(): picokv_{mode}_k{K}_v{V}.
 build_method_args() {
   METHOD_ARGS=(); TAG="$1"
   case "$1" in
-    quantpc)
+    picokv)
       METHOD_ARGS=(--k-bits "${K_BITS}" --v-bits "${V_BITS}" --sink-size "${SINK}" --local-size "${LOCAL}"
         --exp-bits "${EXP_BITS}" --eas "${EAS}" --zerorope "${ZEROROPE}")
       local mode proj
@@ -84,7 +84,7 @@ build_method_args() {
       else
         mode="online"
       fi
-      TAG="quantpc_${mode}_k${K_BITS}_v${V_BITS}"
+      TAG="picokv_${mode}_k${K_BITS}_v${V_BITS}"
       # Knobs that change the result but were missing from the tag. EAS is the
       # one that bit us on NIAH: two EAS arms shared a directory. Here TAG names
       # the result *file*, so a second arm would overwrite the first outright.

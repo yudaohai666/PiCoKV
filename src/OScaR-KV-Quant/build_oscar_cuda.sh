@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build OScaR's `oscar_cuda` CUDA extension IN-PLACE for the QuantPC venv, so that
+# Build OScaR's `oscar_cuda` CUDA extension IN-PLACE for the PiCoKV venv, so that
 # `run_efficiency.py --method oscar` (via benchmarks/common._load_oscar_model) can
 # `import oscar` / `import oscar_cuda` from this copied tree.
 #
@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV="$(cd "${SCRIPT_DIR}/../.." && pwd)/.venv"
 
 if [[ ! -f "${VENV}/bin/activate" ]]; then
-  echo "[build] ERROR: QuantPC venv not found at ${VENV}" >&2
+  echo "[build] ERROR: PiCoKV venv not found at ${VENV}" >&2
   exit 1
 fi
 # shellcheck disable=SC1091

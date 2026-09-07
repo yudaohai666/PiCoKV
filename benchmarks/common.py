@@ -19,10 +19,10 @@ from transformers import (
     PreTrainedTokenizerBase,
 )
 
-from quantpc.model_config import load_model_config
+from picokv.model_config import load_model_config
 
 # Dense-baseline attn implementations selectable via --method. Anything not in
-# this set and not "quantpc"/"kivi"/"oscar" is rejected by load_model.
+# this set and not "picokv"/"kivi"/"oscar" is rejected by load_model.
 BASELINE_ATTN = {"flash_attention_2", "sdpa", "eager"}
 
 # The KIVI reference implementation lives under src/KIVI with its own
@@ -44,7 +44,7 @@ OSCAR_SRC = Path(__file__).resolve().parents[1] / "src" / "OScaR-KV-Quant"
 # sys.path. See _load_polar_model for the (models-package) name-collision handling.
 POLAR_SRC = Path(__file__).resolve().parents[1] / "src" / "PolarQuant"
 
-# make_cache is a zero-arg callable returning a fresh QuantKVCache (quantpc), or
+# make_cache is a zero-arg callable returning a fresh QuantKVCache (picokv), or
 # None for dense baselines (the model uses its default cache).
 CacheFactory = Optional[Callable[[], object]]
 
@@ -63,11 +63,11 @@ def resolve_offline_proj_path(
     """Return the effective offline encoder .pt path, or None for online.
 
     Offline is requested when ``--offline`` is set or an explicit path is given
-    (quantpc only). With no explicit path, the default is derived from the model
+    (picokv only). With no explicit path, the default is derived from the model
     tag and bits: ``offline_projection/projections/{model_tag}_k{k}_v{v}.pt``.
     Raises a clear error when the resolved file is missing.
     """
-    if method != "quantpc":
+    if method != "picokv":
         return None
     if not offline and offline_proj_path is None:
         return None
@@ -105,7 +105,7 @@ def output_tag(
 ) -> str:
     """Directory/file tag keyed by method + KV bits, shared across runners.
 
-    ``full_tag`` switches quantpc to the full naming ``{online|offline}_k{K}_v{V}``.
+    ``full_tag`` switches picokv to the full naming ``{online|offline}_k{K}_v{V}``.
     The local window is fixed at 256 across the current experiments, so it is
     intentionally omitted.
     """
@@ -113,12 +113,12 @@ def output_tag(
         return f"kivi_k{k_bits}_v{v_bits}"
     if method == "oscar":
         return f"oscar_int{num_bits}"
-    if method != "quantpc":
+    if method != "picokv":
         return method
     if full_tag:
         mode = "offline" if offline else "online"
         return f"{mode}_k{k_bits}_v{v_bits}"
-    tag = f"quantpc_k{k_bits}_v{v_bits}"
+    tag = f"picokv_k{k_bits}_v{v_bits}"
     if offline:
         tag += "_offline"
     return tag
@@ -143,7 +143,7 @@ def _load_kivi_model(
             sys.path.insert(0, p)
 
     # Use the shared loader so Qwen3 receives the same YaRN/max-position
-    # override as the QuantPC and dense paths.  Llama/Mistral configs are
+    # override as the PiCoKV and dense paths.  Llama/Mistral configs are
     # unchanged by load_model_config.
     config = load_model_config(model_name)
     config.k_bits = k_bits
@@ -246,7 +246,7 @@ def _load_oscar_model(
     # The oscar attention backend calls `past_key_value.update_pack(...)`, which
     # only exists on oscar.DynamicCache. HF generate() would otherwise build a
     # stock transformers.DynamicCache (no update_pack), so we hand the runner a
-    # factory to inject a fresh oscar cache per call (like quantpc's make_cache).
+    # factory to inject a fresh oscar cache per call (like picokv's make_cache).
     from oscar import Cache as OscarCache, DynamicCache as OscarDynamicCache
 
     # HF generate()'s `_get_initial_cache_position` does `isinstance(cache, Cache)`
@@ -259,7 +259,7 @@ def _load_oscar_model(
     # `from ..cache_utils import Cache, DynamicCache` at import time, so patching
     # only `transformers.cache_utils.*` would be too late for its bound names.
     # Scoped to the oscar load path (one method == one process in the runners), so
-    # quantpc/kivi/dense baselines are unaffected.
+    # picokv/kivi/dense baselines are unaffected.
     import transformers.cache_utils as _tf_cache_utils
     import transformers.generation.utils as _tf_gen_utils
 
@@ -283,7 +283,7 @@ def _auto_device_map():
         return None
 
 
-def _load_quantpc_model(
+def _load_picokv_model(
     model_name: str,
     *,
     k_bits: int,
@@ -298,9 +298,9 @@ def _load_quantpc_model(
     log_eps: float,
     offline_proj_path: Optional[str] = None,
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
-    """Load a HF model patched with the quanpc_standalone online-projection path.
+    """Load a HF model patched with the picokv_standalone online-projection path.
 
-    The project ships a single production standalone path (quanpc_standalone): a
+    The project ships a single production standalone path (picokv_standalone): a
     CUDA-only online-projection decode with fixed 8-bit projected queries.
     ``make_cache`` returns a fresh ``StandaloneLlamaCache`` per call (the model
     must have been patched via the model-specific standalone adapter).
@@ -308,8 +308,8 @@ def _load_quantpc_model(
     When ``offline_proj_path`` is given, the stored block-32 pair is loaded
     once and threaded into every cache so prefill skips the online Householder QR
     """
-    from quantpc.quanpc_standalone import StandaloneConfig
-    from quantpc.quanpc_standalone.transformers import (
+    from picokv.picokv_standalone import StandaloneConfig
+    from picokv.picokv_standalone.transformers import (
         StandaloneLlamaCache,
         load_offline_projections,
         modify_llama_for_standalone,
@@ -370,20 +370,20 @@ def _load_quantpc_model(
         modify_llama_for_standalone(model)
     model.eval()
 
-    # Load both precompiled QuantPC extensions while the model is being made
+    # Load both precompiled PiCoKV extensions while the model is being made
     # ready.  This keeps request-time prefill/decode free of extension JIT or
     # shared-object loading.  The loaders still fall back to the historical
     # torch.utils.cpp_extension.load path when install-time artifacts are absent.
     if (
         torch.cuda.is_available()
-        and os.environ.get("QUANPC_PRELOAD_EXTENSIONS", "1") != "0"
+        and os.environ.get("PICOKV_PRELOAD_EXTENSIONS", "1") != "0"
     ):
-        from quantpc.quanpc_cuda_extension.quanpc_cuda import load_quanpc_extension
-        from quantpc.quanpc_prefill_cuda_extension.quanpc_prefill_cuda import (
-            load_quanpc_prefill_extension,
+        from picokv.picokv_cuda_extension.picokv_cuda import load_picokv_extension
+        from picokv.picokv_prefill_cuda_extension.picokv_prefill_cuda import (
+            load_picokv_prefill_extension,
         )
-        load_quanpc_prefill_extension()
-        load_quanpc_extension()
+        load_picokv_prefill_extension()
+        load_picokv_extension()
 
     def make_cache():
         return StandaloneLlamaCache(
@@ -534,7 +534,7 @@ def _load_baseline_model(
 
 def load_model(
     model_name: str,
-    method: str = "quantpc",
+    method: str = "picokv",
     *,
     k_bits: Optional[int] = None,
     v_bits: Optional[int] = None,
@@ -563,7 +563,7 @@ def load_model(
     """Load a HF model+tokenizer and return ``(model, tokenizer, make_cache)``.
 
     Method dispatch (each backend has its own ``_load_*`` helper):
-      * ``quantpc``           -> ``_load_quantpc_model`` (quanpc_standalone
+      * ``picokv``           -> ``_load_picokv_model`` (picokv_standalone
                                  online-projection path, CUDA-only, GQA=4, bf16;
                                  fresh ``StandaloneLlamaCache`` per call).
       * ``kivi``              -> ``_load_kivi_model``; ``k_bits`` / ``v_bits`` are
@@ -608,8 +608,8 @@ def load_model(
             offline_v_hadamard=offline_v_hadamard,
         )
 
-    if method == "quantpc":
-        return _load_quantpc_model(
+    if method == "picokv":
+        return _load_picokv_model(
             model_name,
             k_bits=k_bits,
             v_bits=v_bits,
@@ -635,6 +635,6 @@ def load_model(
 
     if method not in BASELINE_ATTN:
         raise ValueError(
-            f"Unknown method '{method}'. Supported: 'quantpc', 'kivi', 'oscar', 'polar', {sorted(BASELINE_ATTN)}."
+            f"Unknown method '{method}'. Supported: 'picokv', 'kivi', 'oscar', 'polar', {sorted(BASELINE_ATTN)}."
         )
     return _load_baseline_model(model_name, attn_implementation=method)

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""InfiniteBench evaluation runner for the QuanPC quantized KV-cache algorithm.
+"""InfiniteBench evaluation runner for the PiCoKV quantized KV-cache algorithm.
 
-Mirrors benchmarks/Ruler/run_ruler_evaluation.py in HOW the QuanPC method is
+Mirrors benchmarks/Ruler/run_ruler_evaluation.py in HOW the PiCoKV method is
 applied:
   * load a plain HF model + tokenizer via ``benchmarks.common.load_model``
-  * for ``--method quantpc``, ``modify_llama_for_standalone`` patches the
+  * for ``--method picokv``, ``modify_llama_for_standalone`` patches the
     attention and a fresh ``StandaloneLlamaCache`` is injected as
     ``past_key_values`` for every generation
   * baseline methods (flash_attention_2 / sdpa / eager / kivi / oscar / polar)
@@ -34,7 +34,7 @@ import torch  # noqa: F401  (kept for parity with run_ruler_evaluation.py)
 from lm_eval import evaluator
 from loguru import logger
 
-# Make `import src.lmeval` / `import quantpc` / `benchmarks.common` resolvable from any CWD.
+# Make `import src.lmeval` / `import picokv` / `benchmarks.common` resolvable from any CWD.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -69,22 +69,22 @@ DEFAULT_TASKS = ",".join((
 def parse_arguments():
     """Parse command line arguments (mirrors run_ruler_evaluation.parse_arguments)."""
     parser = argparse.ArgumentParser(
-        description="Run InfiniteBench evaluation with the QuanPC quantized KV cache"
+        description="Run InfiniteBench evaluation with the PiCoKV quantized KV cache"
     )
 
     # Model + method dispatch (handled by benchmarks.common.load_model).
     parser.add_argument("--model", type=str, default="/data/Llama-3.1-8B-Instruct",
                         help="Path or name of the HF model to evaluate")
-    parser.add_argument("--method", type=str, default="quantpc",
-                        help=("evaluation method: 'quantpc' / 'kivi' / 'oscar' / "
+    parser.add_argument("--method", type=str, default="picokv",
+                        help=("evaluation method: 'picokv' / 'kivi' / 'oscar' / "
                               "'polar' (quantized KV cache), or a dense baseline attn "
                               "impl 'flash_attention_2' / 'sdpa' / 'eager'"))
 
-    # ── quantpc KV-cache params (--method quantpc) ──
+    # ── picokv KV-cache params (--method picokv) ──
     parser.add_argument("--k-bits", type=int, default=None,
-                        help="QuanPC K projection bits; KIVI defaults to 2")
+                        help="PiCoKV K projection bits; KIVI defaults to 2")
     parser.add_argument("--v-bits", type=int, default=None,
-                        help="QuanPC V projection bits; KIVI defaults to 2")
+                        help="PiCoKV V projection bits; KIVI defaults to 2")
     parser.add_argument("--sink-size", type=int, default=64)
     parser.add_argument("--local-size", type=int, default=256)
     parser.add_argument("--exp-bits", type=int, default=4)
@@ -109,13 +109,13 @@ def parse_arguments():
     parser.add_argument("--offline-v-hadamard",
                         action=argparse.BooleanOptionalAction, default=True)
 
-    # ── quantpc offline block-32 encoders (--method quantpc) ──
+    # ── picokv offline block-32 encoders (--method picokv) ──
     parser.add_argument("--offline", action="store_true",
-                        help="quantpc: use offline encoders "
+                        help="picokv: use offline encoders "
                              "(default path offline_projection/projections/"
                              "{model}_k{K}_v{V}.pt)")
     parser.add_argument("--offline-proj-path", default=None,
-                        help="quantpc: explicit offline encoder .pt")
+                        help="picokv: explicit offline encoder .pt")
 
     # ── PolarQuant params (--method polar) ──
     parser.add_argument("--polar-mode", default="mixed",
@@ -167,9 +167,9 @@ def parse_arguments():
 def run_tag(args):
     """Reproducible run tag (same scheme as run_ruler_evaluation.run_tag)."""
     offline = args.offline or args.offline_proj_path is not None
-    if args.method == "quantpc":
+    if args.method == "picokv":
         mode = "offline" if offline else "online"
-        tag = f"quantpc_{mode}_k{args.k_bits}_v{args.v_bits}"
+        tag = f"picokv_{mode}_k{args.k_bits}_v{args.v_bits}"
         if args.exp_bits != 4:
             tag += f"_exp{args.exp_bits}"
         if args.zerorope != 20:
@@ -332,8 +332,8 @@ def main():
     logger.info("InfiniteBench Evaluation")
     logger.info(f"Model: {args.model}")
     logger.info(f"Method: {args.method}")
-    if args.method == "quantpc":
-        logger.info("Backend: CUDA (quantpc.quanpc_standalone)")
+    if args.method == "picokv":
+        logger.info("Backend: CUDA (picokv.picokv_standalone)")
         logger.info(f"KV cache: k_bits={args.k_bits}, v_bits={args.v_bits}, "
                     f"exp_bits={args.exp_bits}, eas={args.eas}, "
                     f"zerorope={args.zerorope}")

@@ -1,12 +1,12 @@
-"""LongBench runner for the QuanPC quantized KV-cache algorithm.
+"""LongBench runner for the PiCoKV quantized KV-cache algorithm.
 
 Adapted from ``benchmarks/Needle/run_bin.py``: loads a HuggingFace model
-directly and injects a fresh ``QuantKVCache`` per request (``quantpc`` method),
+directly and injects a fresh ``QuantKVCache`` per request (``picokv`` method),
 or runs a dense full-precision baseline attn implementation
 (``flash_attention_2`` / ``sdpa`` / ``eager``).
 
 Run from anywhere as long as the repo root is on ``PYTHONPATH`` (see
-``run_longbench.sh``) so that ``import quantpc`` resolves.
+``run_longbench.sh``) so that ``import picokv`` resolves.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import torch
 from datasets import load_dataset
 from tqdm import tqdm
 
-# Make `import quantpc` / `from benchmarks.common import ...` resolvable from any CWD.
+# Make `import picokv` / `from benchmarks.common import ...` resolvable from any CWD.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -44,18 +44,18 @@ def post_process(response: str, model_name: str) -> str:
     return response
 
 
-class QuantPCModel:
+class PiCoKVModel:
     """Thin harness wrapper: delegates model construction to the shared loader.
 
     Holds the loaded model/tokenizer plus a ``make_cache`` factory (a zero-arg
-    callable returning a fresh QuantKVCache for quantpc, or None for baselines).
+    callable returning a fresh QuantKVCache for picokv, or None for baselines).
     """
 
     def __init__(
         self,
         model_name: str,
-        method: str = "quantpc",
-        # quantpc KV-cache params (--method quantpc)
+        method: str = "picokv",
+        # picokv KV-cache params (--method picokv)
         k_bits: int = 320,
         v_bits: int = 320,
         sink_size: int = 64,
@@ -76,7 +76,7 @@ class QuantPCModel:
         kv_norm: str = "1",
         residual_evict_size: int | None = 256,
         offline_v_hadamard: bool = True,
-        # quantpc offline block-32 encoders (--method quantpc)
+        # picokv offline block-32 encoders (--method picokv)
         offline_proj_path: str | None = None,
         # PolarQuant params (--method polar)
         polar_mode: str = "mixed",
@@ -88,7 +88,7 @@ class QuantPCModel:
         self.model, self.tokenizer, self._make_cache = load_model(
             model_name,
             method=method,
-            # quantpc KV-cache params (--method quantpc)
+            # picokv KV-cache params (--method picokv)
             k_bits=k_bits,
             v_bits=v_bits,
             sink_size=sink_size,
@@ -118,11 +118,11 @@ class QuantPCModel:
         )
 
     def build_cache(self):
-        """Fresh QuantKVCache per request for quantpc; None for baselines."""
+        """Fresh QuantKVCache per request for picokv; None for baselines."""
         return self._make_cache() if self._make_cache is not None else None
 
 
-def build_input(model: QuantPCModel, prompt: str, dataset: str, device):
+def build_input(model: PiCoKVModel, prompt: str, dataset: str, device):
     """Tokenize a prompt, applying the chat template for QA-style datasets."""
     if dataset not in NO_CHAT_TEMPLATE and model.tokenizer.chat_template is not None:
         messages = [{"role": "user", "content": prompt}]
@@ -138,7 +138,7 @@ def build_input(model: QuantPCModel, prompt: str, dataset: str, device):
 
 
 @torch.no_grad()
-def generate_pred(model: QuantPCModel, prompt: str, dataset: str, max_gen: int) -> str:
+def generate_pred(model: PiCoKVModel, prompt: str, dataset: str, max_gen: int) -> str:
     device = model.model.device
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -160,7 +160,7 @@ def generate_pred(model: QuantPCModel, prompt: str, dataset: str, max_gen: int) 
             model.tokenizer.encode("\n", add_special_tokens=False)[-1],
         ]
 
-    # quantpc injects a fresh QuantKVCache per request; baselines use the
+    # picokv injects a fresh QuantKVCache per request; baselines use the
     # model's default cache (no past_key_values override).
     past_key_values = model.build_cache()
     if past_key_values is not None:
@@ -168,7 +168,7 @@ def generate_pred(model: QuantPCModel, prompt: str, dataset: str, max_gen: int) 
 
     output = model.model.generate(**generate_kwargs)[0]
 
-    # Some quantpc backends keep per-request state; reset if available.
+    # Some picokv backends keep per-request state; reset if available.
     if hasattr(model.model, "reset"):
         model.model.reset()
 
@@ -229,8 +229,8 @@ def parse_args(argv=None):
     p.add_argument("--model", default="/data/Llama-3.1-8B-Instruct")
     p.add_argument(
         "--method",
-        default="quantpc",
-        help="'quantpc' / 'kivi' / 'oscar' / 'polar' (quantized KV cache) or a dense "
+        default="picokv",
+        help="'picokv' / 'kivi' / 'oscar' / 'polar' (quantized KV cache) or a dense "
              "baseline attn impl ('flash_attention_2' / 'sdpa' / 'eager')",
     )
     p.add_argument("--save_dir", default="results/longbench", help="base output dir")
@@ -241,9 +241,9 @@ def parse_args(argv=None):
                         "Needed when one method is split across processes, which "
                         "would otherwise share a save_path.")
     p.add_argument("--seed", type=int, default=42)
-    # ── quantpc KV-cache params (--method quantpc) ──
-    p.add_argument("--k-bits", type=int, default=None, help="QuanPC K projection bits; KIVI defaults to 2")
-    p.add_argument("--v-bits", type=int, default=None, help="QuanPC V projection bits; KIVI defaults to 2")
+    # ── picokv KV-cache params (--method picokv) ──
+    p.add_argument("--k-bits", type=int, default=None, help="PiCoKV K projection bits; KIVI defaults to 2")
+    p.add_argument("--v-bits", type=int, default=None, help="PiCoKV V projection bits; KIVI defaults to 2")
     p.add_argument("--sink-size", type=int, default=64, help="initial (sink) tokens kept in full precision")
     p.add_argument("--local-size", type=int, default=256, help="most-recent (local) tokens kept in full precision")
     p.add_argument("--exp-bits", type=int, default=4)
@@ -269,8 +269,8 @@ def parse_args(argv=None):
     p.add_argument("--kv-norm", default="1", help="OScaR kv norm (INT2 默认 1)")
     p.add_argument("--residual-evict-size", type=int, default=256, help="OScaR residual evict size (INT2 默认 256)")
     p.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
-    p.add_argument("--offline", action="store_true", help="quantpc: use offline encoders (default path offline_projection/projections/{model}_k{K}_v{V}.pt)")
-    p.add_argument("--offline-proj-path", default=None, help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
+    p.add_argument("--offline", action="store_true", help="picokv: use offline encoders (default path offline_projection/projections/{model}_k{K}_v{V}.pt)")
+    p.add_argument("--offline-proj-path", default=None, help="picokv: explicit offline encoder .pt (overrides the --offline default path)")
     # ── PolarQuant params (--method polar) ──
     p.add_argument("--polar-mode", default="mixed", choices=["mixed", "group", "snapkv"],
                    help="PolarQuant attention variant")
@@ -303,7 +303,7 @@ def main() -> None:
     tag = args.output_tag or output_tag(
         args.method, args.k_bits, args.v_bits, args.num_bits,
         offline=(args.offline or args.offline_proj_path is not None),
-        full_tag=(args.method == "quantpc"),
+        full_tag=(args.method == "picokv"),
     )
     save_path = (
         Path(args.output_path)
@@ -317,10 +317,10 @@ def main() -> None:
         args.method, args.offline, args.offline_proj_path,
         model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,
     )
-    model = QuantPCModel(
+    model = PiCoKVModel(
         args.model,
         method=args.method,
-        # quantpc KV-cache params (--method quantpc)
+        # picokv KV-cache params (--method picokv)
         k_bits=args.k_bits,
         v_bits=args.v_bits,
         sink_size=args.sink_size,

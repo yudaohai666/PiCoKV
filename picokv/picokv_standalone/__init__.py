@@ -1,4 +1,4 @@
-"""Public online-projection QuanPC API.
+"""Public online-projection PiCoKV API.
 
 Importing this package does not patch Transformers models or launch CUDA work.
 """

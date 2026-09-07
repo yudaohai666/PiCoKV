@@ -5,7 +5,7 @@ under a temp directory.
 
 This is a library, not an entry point: ``create_offline_projections.py`` drives
 it and owns the fitting stages.  It used to double as a CLI that wrote
-encoder-only projections in the ``quanpc_standalone_block32_encoder_v1`` format,
+encoder-only projections in the ``picokv_standalone_block32_encoder_v1`` format,
 which the encoder+decoder artifact superseded.
 """
 from __future__ import annotations

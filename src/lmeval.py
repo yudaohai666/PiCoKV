@@ -50,7 +50,7 @@ class MyModel(TemplateLM):
             max_gen_toks: Maximum tokens to generate
             data_parallel: Enable accelerate data parallelism (multi-GPU)
             kv_cache_factory: Optional zero-arg callable returning a fresh
-                past_key_values cache (e.g. QuanPC QuantKVCache) to inject into
+                past_key_values cache (e.g. PiCoKV QuantKVCache) to inject into
                 every generation call.  When None, the model generates with its
                 default cache.
         """
@@ -396,7 +396,7 @@ class MyModel(TemplateLM):
                 generation_kwargs['top_p'] = gen_kwargs.get("top_p", 1.0)
                 generation_kwargs['top_k'] = gen_kwargs.get("top_k", 50)
 
-            # Inject a fresh KV cache (e.g. QuanPC QuantKVCache) for this request.
+            # Inject a fresh KV cache (e.g. PiCoKV QuantKVCache) for this request.
             if self.kv_cache_factory is not None:
                 generation_kwargs['past_key_values'] = self.kv_cache_factory()
                 generation_kwargs['use_cache'] = True

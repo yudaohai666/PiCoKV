@@ -30,13 +30,13 @@ except ImportError:  # pragma: no cover - falls back to SDPA when unavailable.
     _flash_attn_func = None
 
 
-OFFLINE_ENCODER_FORMAT = "quanpc_standalone_block32_encoder_v1"
-OFFLINE_DECODER_FORMAT = "quanpc_standalone_block32_encoder_decoder_v1"
+OFFLINE_ENCODER_FORMAT = "picokv_standalone_block32_encoder_v1"
+OFFLINE_DECODER_FORMAT = "picokv_standalone_block32_encoder_decoder_v1"
 # The shipped offline artifact: an encoder/decoder pair fitted together in the
 # model's own basis.  Same shapes and same runtime path as the two tags above --
 # it carries its own tag only so that files from earlier fitting pipelines cannot
 # be mistaken for it.
-OFFLINE_FOLDED_FORMAT = "quanpc_standalone_block32_folded_v1"
+OFFLINE_FOLDED_FORMAT = "picokv_standalone_block32_folded_v1"
 _FORMATS_WITH_DECODER = (OFFLINE_DECODER_FORMAT, OFFLINE_FOLDED_FORMAT)
 
 
@@ -354,7 +354,7 @@ def modify_llama_for_standalone(model, *, mlp_chunk_size: int = 8192) -> None:
     attention: prompt attention stays exact SDPA, while single-token generation
     routes through :class:`StandaloneLlamaCache`.
     """
-    # MLP chunking is orthogonal to QuanPC math; it only prevents large prompt
+    # MLP chunking is orthogonal to PiCoKV math; it only prevents large prompt
     # intermediates from dominating memory.
     for module in model.modules():
         if isinstance(module, LlamaMLP):
@@ -377,7 +377,7 @@ def modify_llama_for_standalone(model, *, mlp_chunk_size: int = 8192) -> None:
             cache_position: Optional[torch.LongTensor] = None,
             **kwargs,
         ):
-            """Dispatch a Llama attention call to exact prefill or QuanPC decode."""
+            """Dispatch a Llama attention call to exact prefill or PiCoKV decode."""
             # Match the original Llama projection and RoPE ordering exactly.
             input_shape = hidden_states.shape[:-1]
             hidden_shape = (*input_shape, -1, self.head_dim)

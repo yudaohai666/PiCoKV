@@ -11,7 +11,7 @@
 #
 # ============================ EXAMPLE: QWEN3 ============================
 # Qwen3-8B.
-#   cd /home/zxh/zxh/QuantPC &&
+#   cd /home/zxh/zxh/PiCoKV &&
 #   . .venv/bin/activate &&
 #   MODEL_NAME=/home/zxh/zxh/models/Qwen3-8B \
 #   GPUS=0,1 \
@@ -22,7 +22,7 @@
 #
 # ============================ EXAMPLE: LLAMA ============================
 # Llama-3.1-8B-Instruct.
-#   cd /home/zxh/zxh/QuantPC &&
+#   cd /home/zxh/zxh/PiCoKV &&
 #   . .venv/bin/activate &&
 #   MODEL_NAME=/data/zxh/models/Llama-3.1-8B-Instruct \
 #   GPUS=0,1 \
@@ -32,7 +32,7 @@
 #
 # Build both offline matrices in one pass: encoder and decoder.
 # Output: {MODEL_TAG}_k{K}_v{V}.pt under OUTPUT_DIR, in format
-# quanpc_standalone_block32_folded_v1.
+# picokv_standalone_block32_folded_v1.
 #
 # Consume it with:
 #   benchmarks/Needle/run_bin.py --offline-proj-path <file>

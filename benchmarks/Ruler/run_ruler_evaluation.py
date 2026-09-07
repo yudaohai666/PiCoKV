@@ -1,13 +1,13 @@
 
 #!/usr/bin/env python3
-"""RULER evaluation runner for the QuanPC quantized KV-cache algorithm.
+"""RULER evaluation runner for the PiCoKV quantized KV-cache algorithm.
 
-Mirrors benchmarks/Needle/run_bin.py in HOW the QuanPC method is applied:
+Mirrors benchmarks/Needle/run_bin.py in HOW the PiCoKV method is applied:
   * load a plain HF model + tokenizer
   * modify(model) monkey-patches the attention
   * a fresh QuantKVCache is injected as past_key_values for every generation
 
-The QuanPC method uses the CUDA-only quanpc_standalone backend.
+The PiCoKV method uses the CUDA-only picokv_standalone backend.
 
 Usage:
     python benchmarks/Ruler/run_ruler_evaluation.py \
@@ -29,7 +29,7 @@ import torch
 from lm_eval import evaluator
 from loguru import logger
 
-# Make `import src.lmeval` / `import quantpc` / `benchmarks.common` resolvable from any CWD.
+# Make `import src.lmeval` / `import picokv` / `benchmarks.common` resolvable from any CWD.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -121,7 +121,7 @@ def patch_ruler_hotpotqa_local():
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Run RULER evaluation with the QuanPC quantized KV cache"
+        description="Run RULER evaluation with the PiCoKV quantized KV cache"
     )
 
     # Model
@@ -133,7 +133,7 @@ def parse_arguments():
     )
 
     # Method dispatch (handled by benchmarks.common.load_model):
-    #   quantpc            -> quantized KV-cache method (modify + StandaloneLlamaCache)
+    #   picokv            -> quantized KV-cache method (modify + StandaloneLlamaCache)
     #   kivi               -> KIVI quantized KV cache
     #   oscar              -> OScaR quantized KV cache
     #   flash_attention_2  -> dense full-precision baseline (flash-attn-2)
@@ -141,16 +141,16 @@ def parse_arguments():
     parser.add_argument(
         "--method",
         type=str,
-        default="quantpc",
+        default="picokv",
         help=(
-            "evaluation method: 'quantpc' / 'kivi' / 'oscar' / 'polar' (quantized KV cache), "
+            "evaluation method: 'picokv' / 'kivi' / 'oscar' / 'polar' (quantized KV cache), "
             "or a dense baseline attn impl 'flash_attention_2' / 'sdpa' / 'eager'"
         ),
     )
 
-    # ── quantpc KV-cache params (--method quantpc) ──
-    parser.add_argument("--k-bits", type=int, default=None, help="QuanPC K projection bits; KIVI defaults to 2")
-    parser.add_argument("--v-bits", type=int, default=None, help="QuanPC V projection bits; KIVI defaults to 2")
+    # ── picokv KV-cache params (--method picokv) ──
+    parser.add_argument("--k-bits", type=int, default=None, help="PiCoKV K projection bits; KIVI defaults to 2")
+    parser.add_argument("--v-bits", type=int, default=None, help="PiCoKV V projection bits; KIVI defaults to 2")
     parser.add_argument("--sink-size", type=int, default=64, help="initial (sink) tokens kept in full precision")
     parser.add_argument("--local-size", type=int, default=256, help="most-recent (local) tokens kept in full precision")
     parser.add_argument(
@@ -182,8 +182,8 @@ def parse_arguments():
     parser.add_argument("--kv-norm", default="1", help="OScaR kv norm (INT2 默认 1)")
     parser.add_argument("--residual-evict-size", type=int, default=256, help="OScaR residual evict size (INT2 默认 256)")
     parser.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
-    parser.add_argument("--offline", action="store_true", help="quantpc: use offline encoders (default path offline_projection/projections/{model}_k{K}_v{V}.pt)")
-    parser.add_argument("--offline-proj-path", default=None, help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
+    parser.add_argument("--offline", action="store_true", help="picokv: use offline encoders (default path offline_projection/projections/{model}_k{K}_v{V}.pt)")
+    parser.add_argument("--offline-proj-path", default=None, help="picokv: explicit offline encoder .pt (overrides the --offline default path)")
 
     # ── PolarQuant params (--method polar) ──
     parser.add_argument("--polar-mode", default="mixed", choices=["mixed", "group", "snapkv"], help="PolarQuant attention variant: mixed (K polar + V KIVI-quant) | group (K-only) | snapkv")
@@ -244,9 +244,9 @@ def parse_arguments():
 def run_tag(args):
     """Return a reproducible tag for this evaluation configuration."""
     offline = args.offline or args.offline_proj_path is not None
-    if args.method == "quantpc":
+    if args.method == "picokv":
         mode = "offline" if offline else "online"
-        tag = f"quantpc_{mode}_k{args.k_bits}_v{args.v_bits}"
+        tag = f"picokv_{mode}_k{args.k_bits}_v{args.v_bits}"
         if args.exp_bits != 4:
             tag += f"_exp{args.exp_bits}"
         if args.zerorope != 20:
@@ -266,7 +266,7 @@ def get_output_path(args):
 
 
 def create_ruler_model(model, tokenizer, kv_cache_factory, args):
-    """Create the MyModel wrapper wired with the QuanPC KV-cache factory."""
+    """Create the MyModel wrapper wired with the PiCoKV KV-cache factory."""
     ruler_model = MyModel(
         model=model,
         tokenizer=tokenizer,
@@ -423,8 +423,8 @@ def main():
     logger.info("RULER Evaluation")
     logger.info(f"Model: {args.model}")
     logger.info(f"Method: {args.method}")
-    if args.method == "quantpc":
-        logger.info("Backend: CUDA (quantpc.quanpc_standalone)")
+    if args.method == "picokv":
+        logger.info("Backend: CUDA (picokv.picokv_standalone)")
         logger.info(f"KV cache: k_bits={args.k_bits}, v_bits={args.v_bits}, "
                     f"exp_bits={args.exp_bits}, eas={args.eas}, zerorope={args.zerorope}")
     logger.info(f"Tasks: {args.tasks}")
@@ -439,7 +439,7 @@ def main():
         model, tokenizer, kv_cache_factory = load_model(
             args.model,
             method=args.method,
-            # quantpc KV-cache params (--method quantpc)
+            # picokv KV-cache params (--method picokv)
             k_bits=args.k_bits,
             v_bits=args.v_bits,
             sink_size=args.sink_size,

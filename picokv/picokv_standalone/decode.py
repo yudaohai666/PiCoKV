@@ -11,9 +11,9 @@ from .cache import PreparedKVCache
 from .constants import PROJECTED_QUERY_BITS
 
 try:
-    from quantpc.quanpc_cuda_extension.quanpc_cuda import load_quanpc_extension
+    from picokv.picokv_cuda_extension.picokv_cuda import load_picokv_extension
 except Exception:  # pragma: no cover - reported by _decode_cuda
-    load_quanpc_extension = None
+    load_picokv_extension = None
 
 
 def _append_decode_tokens(
@@ -194,9 +194,9 @@ def _decode_cuda(
     log_eps: float,
 ) -> torch.Tensor:
     """Launch the measured GQA-4 CUDA decode path."""
-    if load_quanpc_extension is None:
-        raise RuntimeError("QuanPC decode CUDA extension is unavailable")
-    extension = load_quanpc_extension()
+    if load_picokv_extension is None:
+        raise RuntimeError("PiCoKV decode CUDA extension is unavailable")
+    extension = load_picokv_extension()
     projected_query, packed_query, query_scale, global_code, global_den, output = (
         _get_workspace(cache, query)
     )
@@ -204,9 +204,9 @@ def _decode_cuda(
     if use_pruning:
         if not hasattr(
             extension,
-            "quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned_fn",
+            "picokv_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned_fn",
         ):
-            raise RuntimeError("loaded QuanPC CUDA extension lacks the pruning kernel")
+            raise RuntimeError("loaded PiCoKV CUDA extension lacks the pruning kernel")
 
         # Dense retained attention and query projection are independent.  Their
         # existing two-stream overlap is kept verbatim because it is part of
@@ -225,7 +225,7 @@ def _decode_cuda(
         _project_query_into_workspace(query, cache, projected_query)
         current_stream.wait_stream(cache._dense_stream)
 
-        extension.quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned_fn(
+        extension.picokv_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned_fn(
             projected_query,
             packed_query,
             cache.packed_key,
@@ -250,7 +250,7 @@ def _decode_cuda(
     # non-pruned CUDA tail kernel for accuracy/performance comparisons.
     dense_output, dense_lse = _dense_attention(query, dense_key, dense_value, scale)
     _project_query_into_workspace(query, cache, projected_query)
-    extension.quanpc_decode_tail_v1_exp8_tiled_gqa4_atomic_fn(
+    extension.picokv_decode_tail_v1_exp8_tiled_gqa4_atomic_fn(
         projected_query,
         packed_query,
         cache.packed_key,

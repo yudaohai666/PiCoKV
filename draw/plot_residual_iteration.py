@@ -1,9 +1,9 @@
-"""Plot how QuantPC's online block-32 residual iteration flattens |K| / |V|.
+"""Plot how PiCoKV's online block-32 residual iteration flattens |K| / |V|.
 
 Runs the same needle-in-a-haystack prompt as ``plot_kv_distribution.py``, takes
-one layer's KV cache, feeds the *global* segment (the part QuantPC actually
+one layer's KV cache, feeds the *global* segment (the part PiCoKV actually
 compresses, i.e. tokens ``[SINK, L-LOCAL)``) through
-``quantpc.quanpc_standalone.online.quantize_block32_online``, and renders the
+``picokv.picokv_standalone.online.quantize_block32_online``, and renders the
 residual surface after each 32-bit group.
 
 Why the residual is *replayed* instead of re-running the quantizer per bit
@@ -45,8 +45,8 @@ import torch  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
 from plot_kv_distribution import NEEDLE, build_niah_context, surface  # noqa: E402
-from quantpc.quanpc_standalone.constants import ONLINE_GROUP_BITS  # noqa: E402
-from quantpc.quanpc_standalone.online import quantize_block32_online  # noqa: E402
+from picokv.picokv_standalone.constants import ONLINE_GROUP_BITS  # noqa: E402
+from picokv.picokv_standalone.online import quantize_block32_online  # noqa: E402
 
 
 def parse_args():
@@ -66,7 +66,7 @@ def parse_args():
     # sm_100 GPUs on this box cannot run torch 2.6+cu124, so CPU is default.
     p.add_argument("--device", default="cpu")
 
-    # QuantPC parameters (run_niah.sh defaults).
+    # PiCoKV parameters (run_niah.sh defaults).
     p.add_argument("--k-bits", type=int, default=int(os.environ.get("K_BITS", 320)))
     p.add_argument("--v-bits", type=int, default=int(os.environ.get("V_BITS", 320)))
     p.add_argument("--sink", type=int, default=int(os.environ.get("SINK", 64)))

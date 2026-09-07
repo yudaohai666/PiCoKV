@@ -2426,7 +2426,7 @@ void launch_learn_projection_typed(
 
 }  // namespace
 
-std::vector<at::Tensor> quanpc_prefill_learn_projection(
+std::vector<at::Tensor> picokv_prefill_learn_projection(
     at::Tensor full_states,
     at::Tensor init_vectors,
     int64_t glob_start,
@@ -2555,7 +2555,7 @@ std::vector<at::Tensor> quanpc_prefill_learn_projection(
   return {projection};
 }
 
-std::vector<at::Tensor> quanpc_prefill_quantize(
+std::vector<at::Tensor> picokv_prefill_quantize(
     at::Tensor full_states,
     at::Tensor projection,
     int64_t glob_start,
@@ -2636,7 +2636,7 @@ std::vector<at::Tensor> quanpc_prefill_quantize(
 }
 
 
-std::vector<at::Tensor> quanpc_prefill_quantize_pack(
+std::vector<at::Tensor> picokv_prefill_quantize_pack(
     at::Tensor full_states,
     at::Tensor projection,
     int64_t glob_start,
@@ -3332,7 +3332,7 @@ blockk_fixed_frag_d128_kernel(
   }
 }
 
-std::vector<at::Tensor> quanpc_prefill_blockk_fixed(
+std::vector<at::Tensor> picokv_prefill_blockk_fixed(
     at::Tensor full_states,
     at::Tensor encoders,
     at::Tensor decoders,
@@ -3389,7 +3389,7 @@ std::vector<at::Tensor> quanpc_prefill_blockk_fixed(
       wmma_smem_ready = true;
     }
     static const int phase_mask = [] {
-      const char *s = getenv("QUANPC_FIXED_PHASE_MASK");
+      const char *s = getenv("PICOKV_FIXED_PHASE_MASK");
       return s ? atoi(s) : 0x1f;
     }();
     constexpr int kFragSmemBytes = kFixedFragTile * 136 * 2;
@@ -3438,7 +3438,7 @@ std::vector<at::Tensor> quanpc_prefill_blockk_fixed(
   return {packed, err};
 }
 
-std::vector<at::Tensor> quanpc_prefill_blockk_fast(
+std::vector<at::Tensor> picokv_prefill_blockk_fast(
     at::Tensor full_states,
     at::Tensor init_vectors,
     int64_t glob_start,
@@ -3574,7 +3574,7 @@ std::vector<at::Tensor> quanpc_prefill_blockk_fast(
   return {codes, encoder, decoder, err};
 }
 
-std::vector<at::Tensor> quanpc_prefill_select_eas(
+std::vector<at::Tensor> picokv_prefill_select_eas(
     at::Tensor key_err,
     at::Tensor value_err,
     int64_t eas_size) {
@@ -3737,7 +3737,7 @@ __global__ void pack_value_token_i8_kernel(
   }
 }
 
-at::Tensor quanpc_prefill_pack_key_transposed(at::Tensor codes) {
+at::Tensor picokv_prefill_pack_key_transposed(at::Tensor codes) {
   TORCH_CHECK(codes.is_cuda(), "key codes must be CUDA");
   TORCH_CHECK(codes.is_contiguous(), "key codes must be contiguous");
   TORCH_CHECK(codes.scalar_type() == at::kChar, "key codes must be int8");
@@ -3766,7 +3766,7 @@ at::Tensor quanpc_prefill_pack_key_transposed(at::Tensor codes) {
   return out;
 }
 
-at::Tensor quanpc_prefill_pack_value_token(at::Tensor codes) {
+at::Tensor picokv_prefill_pack_value_token(at::Tensor codes) {
   TORCH_CHECK(codes.is_cuda(), "value codes must be CUDA");
   TORCH_CHECK(codes.is_contiguous(), "value codes must be contiguous");
   TORCH_CHECK(codes.scalar_type() == at::kChar, "value codes must be int8");
@@ -3795,7 +3795,7 @@ at::Tensor quanpc_prefill_pack_value_token(at::Tensor codes) {
   return out;
 }
 
-std::vector<at::Tensor> quanpc_prefill_gather_pack(
+std::vector<at::Tensor> picokv_prefill_gather_pack(
     at::Tensor full_key,
     at::Tensor full_value,
     at::Tensor key_codes,
@@ -3936,7 +3936,7 @@ std::vector<at::Tensor> quanpc_prefill_gather_pack(
 }
 
 
-std::vector<at::Tensor> quanpc_prefill_gather_pack_from_packed(
+std::vector<at::Tensor> picokv_prefill_gather_pack_from_packed(
     at::Tensor full_key,
     at::Tensor full_value,
     at::Tensor packed_key_all,

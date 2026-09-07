@@ -8,15 +8,15 @@
     fallbacks, python/launch overhead).
   * ``prefill`` — run ``--prefill-warmup`` untimed prefill passes to absorb
     first-call cuBLAS autotune / kernel init, then profile one full-prompt prefill.
-    Useful for explaining why quantpc's prefill is slower/faster than a dense
+    Useful for explaining why picokv's prefill is slower/faster than a dense
     baseline (projection/quantize/pack kernels vs a single flash-attn prefill).
   * ``both`` — profile prefill, then reuse that cache to profile decode. Two tables
     are printed; if ``--trace`` is set, ``.prefill``/``.decode`` are appended.
 
 Examples:
-    python profile_decode.py --method quantpc --stage prefill --length 32768
+    python profile_decode.py --method picokv --stage prefill --length 32768
     python profile_decode.py --method flash_attention_2 --stage prefill --length 32768
-    python profile_decode.py --method quantpc --stage both --length 32768 --active 24 \
+    python profile_decode.py --method picokv --stage both --length 32768 --active 24 \
         --trace results/efficiency/prof/qpc.json
     python profile_decode.py --method flash_attention_2 --length 32768 --active 24
 """
@@ -93,7 +93,7 @@ def _report(prof, args, stage, extra):
 def main() -> None:
     p = argparse.ArgumentParser(description="Profile the decode stage of a KV-cache method.")
     p.add_argument("--model", default="/data/Llama-3.1-8B-Instruct")
-    p.add_argument("--method", default="quantpc", help="quantpc | kivi | oscar | flash_attention_2 | sdpa | eager")
+    p.add_argument("--method", default="picokv", help="picokv | kivi | oscar | flash_attention_2 | sdpa | eager")
     p.add_argument("--stage", default="decode", choices=["decode", "prefill", "both"],
                    help="which stage to profile: decode (default) | prefill | both")
     p.add_argument("--length", type=int, default=32768, help="prompt length to prefill before decoding")
@@ -106,9 +106,9 @@ def main() -> None:
     p.add_argument("--group-by-shape", action="store_true", help="group ops by input shape in the table")
     p.add_argument("--record-shapes", action="store_true", help="record op input shapes (adds overhead)")
     p.add_argument("--trace", default=None, help="export a chrome trace to this path")
-    # ── quantpc KV-cache params (--method quantpc) ──
-    p.add_argument("--k-bits", type=int, default=None, help="QuanPC K projection bits; KIVI defaults to 2")
-    p.add_argument("--v-bits", type=int, default=None, help="QuanPC V projection bits; KIVI defaults to 2")
+    # ── picokv KV-cache params (--method picokv) ──
+    p.add_argument("--k-bits", type=int, default=None, help="PiCoKV K projection bits; KIVI defaults to 2")
+    p.add_argument("--v-bits", type=int, default=None, help="PiCoKV V projection bits; KIVI defaults to 2")
     p.add_argument("--sink-size", type=int, default=64, help="initial (sink) tokens kept in full precision")
     p.add_argument("--local-size", type=int, default=256, help="most-recent (local) tokens kept in full precision")
     p.add_argument("--exp-bits", type=int, default=4)
@@ -119,9 +119,9 @@ def main() -> None:
     p.add_argument("--prune-mode", type=int, default=3)
     p.add_argument("--log-eps", type=float, default=-10.0)
     p.add_argument("--offline", action="store_true",
-                   help="quantpc: use offline encoders (skip online QR at prefill); path defaults to offline_projection/projections/{model}_k{K}_v{V}.pt")
+                   help="picokv: use offline encoders (skip online QR at prefill); path defaults to offline_projection/projections/{model}_k{K}_v{V}.pt")
     p.add_argument("--offline-proj-path", default=None,
-                   help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
+                   help="picokv: explicit offline encoder .pt (overrides the --offline default path)")
     # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
     p.add_argument("--group-size", type=int, default=32, help="KIVI per-group quant size; OScaR group size (INT2 必须=32)")
     p.add_argument("--residual-length", type=int, default=32, help="KIVI recent fp16 tokens kept unquantized")
@@ -155,7 +155,7 @@ def main() -> None:
     model, tokenizer, make_cache = load_model(
         args.model,
         method=args.method,
-        # quantpc KV-cache params (--method quantpc)
+        # picokv KV-cache params (--method picokv)
         k_bits=args.k_bits,
         v_bits=args.v_bits,
         sink_size=args.sink_size,

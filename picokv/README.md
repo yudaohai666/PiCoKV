@@ -1,19 +1,19 @@
-# QuanPC Standalone
+# PiCoKV Standalone
 
-`quanpc_standalone` is the production online-projection path for compressed
+`picokv_standalone` is the production online-projection path for compressed
 KV-cache preparation and single-token CUDA decode attention.
 
-> Repository integration: this package lives under `quantpc/`, together with
+> Repository integration: this package lives under `picokv/`, together with
 > its two JIT CUDA extensions, and is imported as
-> `quantpc.quanpc_standalone`. Put the repository root on `PYTHONPATH`
+> `picokv.picokv_standalone`. Put the repository root on `PYTHONPATH`
 > (`export PYTHONPATH="$PWD:$PYTHONPATH"`) and lock a single GPU
 > (`export CUDA_VISIBLE_DEVICES=0`) before running any check below.
 >
 > ```
-> quantpc/
->   quanpc_standalone/            # this package
->   quanpc_cuda_extension/        # decode CUDA kernels
->   quanpc_prefill_cuda_extension/  # cache-packing / gather CUDA kernels
+> picokv/
+>   picokv_standalone/            # this package
+>   picokv_cuda_extension/        # decode CUDA kernels
+>   picokv_prefill_cuda_extension/  # cache-packing / gather CUDA kernels
 > ```
 
 ## Scope
@@ -50,7 +50,7 @@ paths are not supported.
 ## API
 
 ```python
-from quantpc.quanpc_standalone import (
+from picokv.picokv_standalone import (
     StandaloneConfig,
     decode_attention,
     prepare_kv_cache,
@@ -103,8 +103,8 @@ not yet evicted or re-quantized into the global cache.
 ## Hugging Face Llama
 
 ```python
-from quantpc.quanpc_standalone import StandaloneConfig
-from quantpc.quanpc_standalone.transformers import (
+from picokv.picokv_standalone import StandaloneConfig
+from picokv.picokv_standalone.transformers import (
     StandaloneLlamaCache,
     modify_llama_for_standalone,
 )
@@ -128,9 +128,9 @@ cache.
 Run from the repository root with the environment configured as above:
 
 ```bash
-python quantpc/test_quanpc_standalone_online.py
+python picokv/test_picokv_standalone_online.py
 
-python benchmarks/Needle/run_bin.py --method quantpc \
+python benchmarks/Needle/run_bin.py --method picokv \
   --k-bits 320 --v-bits 320 --local-size 256 --zerorope 20 \
   --lengths 64000,110000 --depths 50
 ```

@@ -27,7 +27,7 @@ class StandaloneConfig:
 
     # Use the fully fused CUDA cascade kernel for sides with a stored decoder.
     # Numerically equivalent to the reference loop up to fp32 accumulation
-    # order; ~5x faster prefill preparation.  QUANPC_DISABLE_FUSED_QUANT=1
+    # order; ~5x faster prefill preparation.  PICOKV_DISABLE_FUSED_QUANT=1
     # overrides this globally.
     use_fused_quant: bool = True
 
