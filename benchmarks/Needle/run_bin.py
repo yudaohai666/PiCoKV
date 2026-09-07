@@ -32,7 +32,7 @@ class Transformer(ModelProvider):
         exp_bits: int = 4,
         eas: float = 0.01,
         zerorope: int = 20,
-        use_pruning: bool = True,
+        use_pruning: bool = False,
         prune_mode: int = 3,
         log_eps: float = -10.0,
         # KIVI params (--method kivi)
@@ -171,7 +171,7 @@ def run_experiment(
     exp_bits: int,
     eas: float,
     zerorope: int,
-    use_pruning: bool = True,
+    use_pruning: bool = False,
     prune_mode: int = 3,
     log_eps: float = -10.0,
     # KIVI params (--method kivi)
@@ -294,14 +294,14 @@ def main() -> None:
     parser.add_argument("--eas", type=float, default=0.01)
     parser.add_argument("--zerorope", type=int, default=20)
     parser.add_argument(
-        "--no-pruning",
+        "--pruning",
         dest="use_pruning",
-        action="store_false",
-        help="关闭解码时的 global 剪枝（gqa4 CUDA 路径），默认开启",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="解码时的 global 剪枝（gqa4 CUDA 路径），默认关闭",
     )
     parser.add_argument("--prune-mode", type=int, default=3, help="解码剪枝模式（CUDA v1_exp8 路径）")
     parser.add_argument("--log-eps", type=float, default=-10.0, help="解码剪枝 log-epsilon 阈值")
-    parser.set_defaults(use_pruning=True)
     # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
     parser.add_argument(
         "--group-size",
@@ -344,18 +344,11 @@ def main() -> None:
     parser.add_argument("--polar-rbits", type=int, default=3)
     parser.add_argument("--polar-tbits", type=int, default=3)
     parser.add_argument("--polar-vbits", type=int, default=2)
-    parser.add_argument("--decoder-ridge", type=float, default=1e-2,
-                        help="override the online decoder ridge (default 1e-2; offline PTs are fitted with 1e-3)")
     args = parser.parse_args()
     if args.k_bits is None:
         args.k_bits = 2 if args.method == "kivi" else 320
     if args.v_bits is None:
         args.v_bits = 2 if args.method == "kivi" else 320
-
-    if args.method == "quantpc":
-        import quantpc.quanpc_standalone.online as online_mod
-        online_mod.ONLINE_DECODER_RIDGE = float(args.decoder_ridge)
-        print(f"online decoder ridge set to {args.decoder_ridge}", flush=True)
 
     seed_everything(args.seed)
     offline_proj_path = resolve_offline_proj_path(

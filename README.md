@@ -271,9 +271,15 @@ Each launcher exposes a `METHODS=(...)` list near the top (comment methods in
 or out, or force one with `METHOD=quantpc`) and shares the same tunables:
 `K_BITS`/`V_BITS` (320), `SINK` (64), `LOCAL` (256), `EXP_BITS` (4),
 `EAS` (0.01), `ZEROROPE` (20), `USE_OFFLINE` (0, except 1 in
-`run_efficiency.sh`), `DECODER_RIDGE` (1e-3). The resolved quantpc tag is
-`quantpc_{mode}_k{K}_v{V}`, plus a `_ridge{value}` suffix whenever the ridge
-differs from the python default 1e-2 (so the shipped 1e-3 does add one). Note the default
+`run_efficiency.sh`). The decoder ridge is fixed at
+`constants.ONLINE_DECODER_RIDGE = 1e-3` for both the online solve and the
+offline fits, and decode-time pruning is off everywhere by default
+(`run_efficiency.sh` can re-enable it with `PRUNING=1`, which adds a `_prune`
+tag suffix). The fused prefill cascade is on by default
+(`QUANPC_DISABLE_FUSED_QUANT` is unset, i.e. read as `0`); no launcher sets it,
+and `=1` forces the reference PyTorch loop for A/B runs. It only applies to
+sides that carry a stored decoder, so it is a no-op unless `USE_OFFLINE=1`.
+The resolved quantpc tag is `quantpc_{mode}_k{K}_v{V}`. Note the default
 `MODEL` path differs per launcher (`/data/Llama-3.1-8B-Instruct` for
 Ruler/InfiniteBench/Longbench/Needle vs the full share-storage path for
 Efficiency) — override `MODEL=...` as needed.

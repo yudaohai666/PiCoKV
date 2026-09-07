@@ -161,8 +161,8 @@ def main() -> None:
     parser.add_argument("--exp-bits", type=int, default=4)
     parser.add_argument("--prune-mode", type=int, default=3)
     parser.add_argument("--log-eps", type=float, default=-10.0)
-    parser.add_argument("--no-pruning", dest="use_pruning", action="store_false")
-    parser.set_defaults(use_pruning=True)
+    parser.add_argument("--pruning", dest="use_pruning",
+                        action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--mlp-chunk-size", type=int, default=8192)
     # 50 matches benchmarks/Needle/run_bin.py; at 30 the model was still
     # mid-preamble on several cells and got cut off before naming the needle.

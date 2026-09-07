@@ -543,7 +543,7 @@ def load_model(
     exp_bits: int = 4,
     eas: float = 0.01,
     zerorope: int = 20,
-    use_pruning: bool = True,
+    use_pruning: bool = False,
     prune_mode: int = 3,
     log_eps: float = -10.0,
     group_size: int = 32,

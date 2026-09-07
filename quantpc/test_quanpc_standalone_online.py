@@ -53,10 +53,11 @@ def main() -> None:
         "zerorope": 20,
         "exp_bits": 4,
         "seed": 0,
+        "use_fused_quant": True,
     }:
         raise AssertionError(f"unexpected prepare defaults: {config.prepare_kwargs()}")
     if config.decode_kwargs() != {
-        "use_pruning": True,
+        "use_pruning": False,
         "prune_mode": 3,
         "log_eps": -10.0,
     }:

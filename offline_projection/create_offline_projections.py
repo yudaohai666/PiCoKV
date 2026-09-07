@@ -359,21 +359,7 @@ def main():
     parser.add_argument("--block32-learn-tokens", dest="block32_learn_tokens",
                         type=int, default=DEFAULT_BLOCK32_LEARN_TOKENS)
     parser.add_argument("--verbose_fit", action="store_true")
-    parser.add_argument("--decoder_ridge", type=float, default=1e-3,
-                        help="block-32 decoder ridge for this fit (default 1e-3). "
-                             "Recorded in the artifact meta.")
     args = parser.parse_args()
-
-    if args.decoder_ridge is not None:
-        # Both this module and quanpc_standalone.online read the constant as a
-        # module global; learn_pair goes through the latter for its initial
-        # encoders, so both bindings have to move together.
-        import quantpc.quanpc_standalone.online as online_mod
-
-        global ONLINE_DECODER_RIDGE
-        ONLINE_DECODER_RIDGE = float(args.decoder_ridge)
-        online_mod.ONLINE_DECODER_RIDGE = float(args.decoder_ridge)
-        print(f"block-32 decoder ridge overridden to {args.decoder_ridge}", flush=True)
 
     # The collector reads sink/local off its own module globals: the attention
     # hook it installs has no argument channel.

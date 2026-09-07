@@ -438,11 +438,10 @@ def main() -> None:
     parser.add_argument("--exp-bits", type=int, default=4)
     parser.add_argument("--eas", type=float, default=0.01)
     parser.add_argument("--zerorope", type=int, default=20)
-    parser.add_argument("--no-pruning", dest="use_pruning", action="store_false",
-                        help="disable decode-time global pruning (gqa4 CUDA path); pruning is on by default")
+    parser.add_argument("--pruning", dest="use_pruning", action=argparse.BooleanOptionalAction, default=False,
+                        help="decode-time global pruning (gqa4 CUDA path); off by default")
     parser.add_argument("--prune-mode", type=int, default=3, help="decode pruning mode (CUDA v1_exp8 path)")
     parser.add_argument("--log-eps", type=float, default=-10.0, help="decode pruning log-epsilon threshold")
-    parser.set_defaults(use_pruning=True)
     # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
     parser.add_argument("--group-size", type=int, default=32, help="KIVI per-group quant size; OScaR group size (INT2 必须=32)")
     parser.add_argument("--residual-length", type=int, default=32, help="KIVI recent fp16 tokens kept unquantized")
@@ -460,18 +459,11 @@ def main() -> None:
     parser.add_argument("--polar-rbits", type=int, default=3, help="PolarQuant K radius bits (rbits+tbits<=8)")
     parser.add_argument("--polar-tbits", type=int, default=3, help="PolarQuant K angle bits (rbits+tbits<=8)")
     parser.add_argument("--polar-vbits", type=int, default=2, help="PolarQuant V bits (mixed only; KIVI kernel supports 2 or 4)")
-    parser.add_argument("--decoder-ridge", type=float, default=1e-2,
-                        help="override the online decoder ridge (default 1e-2; offline PTs are fitted with 1e-3)")
     args = parser.parse_args()
     if args.k_bits is None:
         args.k_bits = 2 if args.method == "kivi" else 320
     if args.v_bits is None:
         args.v_bits = 2 if args.method == "kivi" else 320
-
-    if args.method == "quantpc":
-        import quantpc.quanpc_standalone.online as online_mod
-        online_mod.ONLINE_DECODER_RIDGE = float(args.decoder_ridge)
-        print(f"online decoder ridge set to {args.decoder_ridge}", flush=True)
 
     if args.compare:
         compare(args.compare)

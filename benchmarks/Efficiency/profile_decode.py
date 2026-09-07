@@ -114,17 +114,14 @@ def main() -> None:
     p.add_argument("--exp-bits", type=int, default=4)
     p.add_argument("--eas", type=float, default=0.01)
     p.add_argument("--zerorope", type=int, default=20)
-    p.add_argument("--no-pruning", dest="use_pruning", action="store_false",
-                   help="disable decode-time global pruning (gqa4 CUDA path); pruning is on by default")
+    p.add_argument("--pruning", dest="use_pruning", action=argparse.BooleanOptionalAction, default=False,
+                   help="decode-time global pruning (gqa4 CUDA path); off by default")
     p.add_argument("--prune-mode", type=int, default=3)
     p.add_argument("--log-eps", type=float, default=-10.0)
     p.add_argument("--offline", action="store_true",
                    help="quantpc: use offline encoders (skip online QR at prefill); path defaults to offline_projection/projections/{model}_k{K}_v{V}.pt")
     p.add_argument("--offline-proj-path", default=None,
                    help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
-    p.add_argument("--decoder-ridge", type=float, default=1e-2,
-                   help="override the online decoder ridge (default 1e-2; offline PTs are fitted with 1e-3)")
-    p.set_defaults(use_pruning=True)
     # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
     p.add_argument("--group-size", type=int, default=32, help="KIVI per-group quant size; OScaR group size (INT2 必须=32)")
     p.add_argument("--residual-length", type=int, default=32, help="KIVI recent fp16 tokens kept unquantized")
@@ -151,10 +148,6 @@ def main() -> None:
         args.v_bits = 2 if args.method == "kivi" else 320
 
     seed_everything(42)
-    if args.method == "quantpc":
-        import quantpc.quanpc_standalone.online as online_mod
-        online_mod.ONLINE_DECODER_RIDGE = float(args.decoder_ridge)
-        print(f"online decoder ridge set to {args.decoder_ridge}", flush=True)
     offline_proj_path = resolve_offline_proj_path(
         args.method, args.offline, args.offline_proj_path,
         model_name=args.model, k_bits=args.k_bits, v_bits=args.v_bits,

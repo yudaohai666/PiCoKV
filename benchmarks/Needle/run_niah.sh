@@ -46,8 +46,6 @@ K_BITS="${K_BITS:-320}"; V_BITS="${V_BITS:-320}"
 SINK="${SINK:-64}"; LOCAL="${LOCAL:-256}"
 EXP_BITS="${EXP_BITS:-4}"; EAS="${EAS:-0.01}"; ZEROROPE="${ZEROROPE:-20}"
 USE_OFFLINE="${USE_OFFLINE:-0}"
-# 1e-3 == constants.ONLINE_DECODER_RIDGE, i.e. the shipped path.
-DECODER_RIDGE="${DECODER_RIDGE:-1e-3}"
 OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
 # kivi (2/4-bit KV)
 KIVI_K="${KIVI_K:-2}"; KIVI_V="${KIVI_V:-2}"; KIVI_GROUP="${KIVI_GROUP:-32}"; KIVI_RESIDUAL="${KIVI_RESIDUAL:-128}"
@@ -65,8 +63,7 @@ build_method_args() {
   case "$1" in
     quantpc)
       METHOD_ARGS=(--k-bits "${K_BITS}" --v-bits "${V_BITS}" --sink-size "${SINK}" --local-size "${LOCAL}"
-        --exp-bits "${EXP_BITS}" --eas "${EAS}" --zerorope "${ZEROROPE}"
-        --decoder-ridge "${DECODER_RIDGE}")
+        --exp-bits "${EXP_BITS}" --eas "${EAS}" --zerorope "${ZEROROPE}")
       local mode proj
       if [ "${USE_OFFLINE}" = "1" ] || [ -n "${OFFLINE_PROJ_PATH}" ]; then
         mode="offline"; METHOD_ARGS+=(--offline); proj="${OFFLINE_PROJ_PATH}"
@@ -75,13 +72,6 @@ build_method_args() {
         mode="online"
       fi
       TAG="quantpc_${mode}_k${K_BITS}_v${V_BITS}"
-      # Ridge always goes in the tag. run_ruler_evaluation.run_tag() omits it at
-      # the 1e-2 default, but NIAH is where that bit us: an archived Qwen3-8B
-      # online k320/v320 run was actually fitted at ridge 1e-3 and its dir name
-      # doesn't say so. Ridge is model-dependent and changes the result,
-      # and run_bin.py resumes from results.json by (length, depth) -- a shared
-      # dir silently mixes two ridges into one heatmap.
-      TAG+="_ridge${DECODER_RIDGE}"
       # Knobs that change the result but were missing from the tag. EAS is the
       # one that bit us: an EAS=0.01 and an EAS=0.001 run shared a directory, and
       # since run_bin.py resumes by (length, depth) from that one results.json,

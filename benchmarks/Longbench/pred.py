@@ -63,7 +63,7 @@ class QuantPCModel:
         exp_bits: int = 4,
         eas: float = 0.01,
         zerorope: int = 20,
-        use_pruning: bool = True,
+        use_pruning: bool = False,
         prune_mode: int = 3,
         log_eps: float = -10.0,
         # KIVI params (--method kivi)
@@ -249,8 +249,8 @@ def parse_args(argv=None):
     p.add_argument("--exp-bits", type=int, default=4)
     p.add_argument("--eas", type=float, default=0.01)
     p.add_argument("--zerorope", type=int, default=20)
-    p.add_argument("--no-pruning", dest="use_pruning", action="store_false",
-                   help="disable decode-time global pruning (gqa4 CUDA path); pruning is on by default")
+    p.add_argument("--pruning", dest="use_pruning", action=argparse.BooleanOptionalAction, default=False,
+                   help="decode-time global pruning (gqa4 CUDA path); off by default")
     p.add_argument("--prune-mode", type=int, default=3, help="decode pruning mode (CUDA v1_exp8 path)")
     p.add_argument("--log-eps", type=float, default=-10.0, help="decode pruning log-epsilon threshold")
     p.add_argument("--limit", type=int, default=None,
@@ -259,7 +259,6 @@ def parse_args(argv=None):
                    help="comma-separated dataset subset (default: config file list)")
     p.add_argument("--data-dir", required=True,
                    help="directory holding the unzipped LongBench *.jsonl files")
-    p.set_defaults(use_pruning=True)
     # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
     p.add_argument("--group-size", type=int, default=32, help="KIVI per-group quant size; OScaR group size (INT2 必须=32)")
     p.add_argument("--residual-length", type=int, default=32, help="KIVI recent fp16 tokens kept unquantized")
@@ -272,8 +271,6 @@ def parse_args(argv=None):
     p.add_argument("--offline-v-hadamard", action=argparse.BooleanOptionalAction, default=True, help="OScaR: offline per-head Hadamard into v_proj/o_proj (INT2 默认开启)")
     p.add_argument("--offline", action="store_true", help="quantpc: use offline encoders (default path offline_projection/projections/{model}_k{K}_v{V}.pt)")
     p.add_argument("--offline-proj-path", default=None, help="quantpc: explicit offline encoder .pt (overrides the --offline default path)")
-    p.add_argument("--decoder-ridge", type=float, default=1e-2,
-                   help="override the online decoder ridge (default 1e-2; offline PTs are fitted with 1e-3)")
     # ── PolarQuant params (--method polar) ──
     p.add_argument("--polar-mode", default="mixed", choices=["mixed", "group", "snapkv"],
                    help="PolarQuant attention variant")
@@ -290,9 +287,6 @@ def parse_args(argv=None):
 
 def main() -> None:
     args = parse_args()
-    if args.method == "quantpc":
-        import quantpc.quanpc_standalone.online as online_mod
-        online_mod.ONLINE_DECODER_RIDGE = float(args.decoder_ridge)
     seed_everything(args.seed)
 
     model2maxlen = json.load(open(CONFIG_DIR / "model2maxlen.json"))

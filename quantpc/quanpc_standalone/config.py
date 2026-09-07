@@ -31,8 +31,9 @@ class StandaloneConfig:
     # overrides this globally.
     use_fused_quant: bool = True
 
-    # Per-token CUDA decode.
-    use_pruning: bool = True
+    # Per-token CUDA decode. Pruning is off by default: it is a decode-time
+    # approximation, and every benchmark run keeps the global scan exact.
+    use_pruning: bool = False
     prune_mode: int = 3
     log_eps: float = -10.0
 

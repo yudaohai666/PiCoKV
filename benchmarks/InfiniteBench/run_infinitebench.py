@@ -90,10 +90,11 @@ def parse_arguments():
     parser.add_argument("--exp-bits", type=int, default=4)
     parser.add_argument("--eas", type=float, default=0.01)
     parser.add_argument("--zerorope", type=int, default=20)
-    parser.add_argument("--no-pruning", dest="use_pruning", action="store_false")
+    parser.add_argument("--pruning", dest="use_pruning",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="decode-time global pruning; off by default")
     parser.add_argument("--prune-mode", type=int, default=3)
     parser.add_argument("--log-eps", type=float, default=-10.0)
-    parser.set_defaults(use_pruning=True)
 
     # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
     parser.add_argument("--group-size", type=int, default=32)
@@ -155,10 +156,6 @@ def parse_arguments():
     parser.add_argument("--add_bos_token", action="store_true")
     parser.add_argument("--prefix_token_id", type=int, default=None)
 
-    # Match run_ruler_evaluation: allow overriding the online block-32 decoder
-    # ridge without editing the shipped constant.
-    parser.add_argument("--decoder-ridge", type=float, default=1e-2)
-
     args = parser.parse_args()
     if args.k_bits is None:
         args.k_bits = 2 if args.method == "kivi" else 320
@@ -173,8 +170,6 @@ def run_tag(args):
     if args.method == "quantpc":
         mode = "offline" if offline else "online"
         tag = f"quantpc_{mode}_k{args.k_bits}_v{args.v_bits}"
-        if float(args.decoder_ridge) != 1e-2:
-            tag += f"_ridge{float(args.decoder_ridge):g}"
         if args.exp_bits != 4:
             tag += f"_exp{args.exp_bits}"
         if args.zerorope != 20:
@@ -333,13 +328,6 @@ def main():
     """Load model, run InfiniteBench, and persist results."""
     args = parse_arguments()
     seed_everything(args.seed)
-
-    if args.method == "quantpc":
-        # The online solve reads this as a module global; rebinding leaves
-        # the shipped constant alone but changes what this run fits.
-        import quantpc.quanpc_standalone.online as online_mod
-        online_mod.ONLINE_DECODER_RIDGE = float(args.decoder_ridge)
-        logger.info(f"online decoder ridge overridden to {args.decoder_ridge}")
 
     logger.info("InfiniteBench Evaluation")
     logger.info(f"Model: {args.model}")

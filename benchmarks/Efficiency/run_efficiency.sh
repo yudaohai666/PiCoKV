@@ -56,10 +56,9 @@ METHODS=(
 K_BITS="${K_BITS:-320}"; V_BITS="${V_BITS:-320}"
 SINK="${SINK:-64}"; LOCAL="${LOCAL:-256}"
 EXP_BITS="${EXP_BITS:-4}"; EAS="${EAS:-0.01}"; ZEROROPE="${ZEROROPE:-20}"
-NO_PRUNING="${NO_PRUNING:-0}"
+# Decode-time pruning, off by default; PRUNING=1 turns it back on.
+PRUNING="${PRUNING:-0}"
 USE_OFFLINE="${USE_OFFLINE:-1}"
-# 1e-3 == constants.ONLINE_DECODER_RIDGE, i.e. the shipped path.
-DECODER_RIDGE="${DECODER_RIDGE:-1e-3}"
 OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
 # kivi (2/4-bit KV)
 KIVI_K="${KIVI_K:-2}"; KIVI_V="${KIVI_V:-2}"; KIVI_GROUP="${KIVI_GROUP:-32}"; KIVI_RESIDUAL="${KIVI_RESIDUAL:-128}"
@@ -77,8 +76,7 @@ build_method_args() {
   case "$1" in
     quantpc)
       METHOD_ARGS=(--k-bits "${K_BITS}" --v-bits "${V_BITS}" --sink-size "${SINK}" --local-size "${LOCAL}"
-        --exp-bits "${EXP_BITS}" --eas "${EAS}" --zerorope "${ZEROROPE}"
-        --decoder-ridge "${DECODER_RIDGE}")
+        --exp-bits "${EXP_BITS}" --eas "${EAS}" --zerorope "${ZEROROPE}")
       local mode proj
       if [ "${USE_OFFLINE}" = "1" ] || [ -n "${OFFLINE_PROJ_PATH}" ]; then
         mode="offline"; METHOD_ARGS+=(--offline); proj="${OFFLINE_PROJ_PATH}"
@@ -97,7 +95,7 @@ build_method_args() {
       [ "${EXP_BITS}" != "4" ]  && TAG+="_exp${EXP_BITS}"
       [ "${ZEROROPE}" != "20" ] && TAG+="_zr${ZEROROPE}"
       [ "${EAS}" != "0.01" ]    && TAG+="_eas${EAS}"
-      [ "${NO_PRUNING}" = "1" ] && METHOD_ARGS+=(--no-pruning) && TAG+="_noprune"
+      [ "${PRUNING}" = "1" ]    && METHOD_ARGS+=(--pruning) && TAG+="_prune"
       # A false `[ ]` above leaves the branch's status at 1, which would trip
       # `set -e` at the call site if this script ever gains it. `:` resets it.
       :

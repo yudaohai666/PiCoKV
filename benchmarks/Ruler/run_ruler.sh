@@ -51,10 +51,6 @@ K_BITS="${K_BITS:-320}"; V_BITS="${V_BITS:-320}"
 SINK="${SINK:-64}"; LOCAL="${LOCAL:-256}"
 EXP_BITS="${EXP_BITS:-4}"; EAS="${EAS:-0.01}"; ZEROROPE="${ZEROROPE:-20}"
 USE_OFFLINE="${USE_OFFLINE:-0}"
-# 1e-3 == constants.ONLINE_DECODER_RIDGE, i.e. the shipped path.
-DECODER_RIDGE="${DECODER_RIDGE:-1e-3}"
-# run_tag() only appends a ridge suffix when it differs from 1e-2, so these runs
-# land in .../{TAG}_ridge0.001/ and cannot collide with older 1e-2 results.
 OFFLINE_PROJ_PATH="${OFFLINE_PROJ_PATH:-}"
 # kivi (2/4-bit KV)
 KIVI_K="${KIVI_K:-2}"; KIVI_V="${KIVI_V:-2}"; KIVI_GROUP="${KIVI_GROUP:-32}"; KIVI_RESIDUAL="${KIVI_RESIDUAL:-128}"
@@ -73,8 +69,7 @@ build_method_args() {
   case "$1" in
     quantpc)
       METHOD_ARGS=(--k-bits "${K_BITS}" --v-bits "${V_BITS}" --sink-size "${SINK}" --local-size "${LOCAL}"
-        --exp-bits "${EXP_BITS}" --eas "${EAS}" --zerorope "${ZEROROPE}"
-        --decoder-ridge "${DECODER_RIDGE}")
+        --exp-bits "${EXP_BITS}" --eas "${EAS}" --zerorope "${ZEROROPE}")
       local mode proj
       if [ "${USE_OFFLINE}" = "1" ] || [ -n "${OFFLINE_PROJ_PATH}" ]; then
         mode="offline"; METHOD_ARGS+=(--offline); proj="${OFFLINE_PROJ_PATH}"

@@ -277,7 +277,7 @@ def decode_attention(
     decode_key: Optional[torch.Tensor] = None,
     decode_value: Optional[torch.Tensor] = None,
     update_cache: bool = False,
-    use_pruning: bool = True,
+    use_pruning: bool = False,
     prune_mode: int = 3,
     log_eps: float = -10.0,
     attention_scale: Optional[float] = None,

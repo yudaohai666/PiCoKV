@@ -55,7 +55,6 @@ ZEROROPE=${ZEROROPE:-20}
 SINK_SIZE=${SINK_SIZE:-64}
 LOCAL_SIZE=${LOCAL_SIZE:-256}
 DECODER_ITERS=${DECODER_ITERS:-5}
-DECODER_RIDGE=${DECODER_RIDGE:-1e-3}
 # Block-32 learning subsamples to BLOCK32_LEARN_TOKENS anyway, so striding at
 # collect time costs no fit quality and cuts shard bytes proportionally.
 COLLECT_STRIDE=${COLLECT_STRIDE:-8}
@@ -83,7 +82,6 @@ python create_offline_projections.py \
     --v_bits "${V_BITS}" \
     --zerorope "${ZEROROPE}" \
     --decoder_iters "${DECODER_ITERS}" \
-    --decoder_ridge "${DECODER_RIDGE}" \
     --collect_stride "${COLLECT_STRIDE}" \
     --collect_layers_per_forward "${COLLECT_LAYERS_PER_FORWARD}" \
     --block32-learn-tokens "${BLOCK32_LEARN_TOKENS}" \
