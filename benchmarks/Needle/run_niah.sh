@@ -2,7 +2,7 @@
 set -euo pipefail
 # NIAH (needle-in-a-haystack): picokv / kivi / oscar / polar / dense, then visualize.
 # Select methods via the METHODS list below (METHOD=kivi forces a single one).
-# Output: results/niah/<MODEL>/<TAG>/results.json ; images in results/niah/vis/<MODEL>/
+# Output: results/niah/<MODEL>/<TAG>/results.json ; PNG+PDF in results/niah/vis/<MODEL>/
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -128,4 +128,4 @@ for method in "${METHODS[@]}"; do
     --save_dir "${VIS_DIR}" --expected_answer "${EXPECTED_ANSWER}"
 done
 
-echo "All done. Images saved to: ${VIS_DIR}/${MODEL_TAG}/"
+echo "All done. PNG+PDF saved to: ${VIS_DIR}/${MODEL_TAG}/"

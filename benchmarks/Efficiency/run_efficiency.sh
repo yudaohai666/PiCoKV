@@ -20,13 +20,14 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 GPU="${GPU:-0}"
 MODEL="${MODEL:-/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct}"
+# MODEL="${MODEL:-/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Qwen3-8B}"
 MODEL_TAG="$(basename "${MODEL%/}")"
 RESULT_DIR="results/efficiency"
 mkdir -p "${RESULT_DIR}"
 
 # ── benchmark runtime params ──
 # LENGTHS="${LENGTHS:-131072}"
-LENGTHS="${LENGTHS:-8192,16384,32768,65536,131072}"
+LENGTHS="${LENGTHS:-8192,16384,32768,65536,131072,262144,524288}"
 
 DECODE_TOKENS="${DECODE_TOKENS:-64}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
@@ -41,11 +42,11 @@ OUTPUT_PATH="${OUTPUT_PATH:-}"
 
 # ── methods to run (comment out to skip; METHOD=oscar forces a single one) ──
 METHODS=(
-  # flash_attention_2
+  flash_attention_2
   picokv
-  # kivi
-  # oscar
-  # polar
+  kivi
+  oscar
+  polar
   # sdpa
   # eager
 )

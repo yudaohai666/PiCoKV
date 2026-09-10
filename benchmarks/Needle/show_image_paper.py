@@ -11,7 +11,6 @@ from matplotlib.colors import LinearSegmentedColormap
 from matplotlib import font_manager
 
 # Use default fonts (fallback if custom fonts not available)
-prop_bold_16 = font_manager.FontProperties(weight='bold', size=45)
 prop_16 = font_manager.FontProperties(size=45)
 prop_13 = font_manager.FontProperties(size=38)
 
@@ -26,61 +25,25 @@ def main(args):
     path = args.eval_path
     save_dir = args.save_dir
 
-    # Parse the current layout:
-    #   results/niah/<model>/<method>/results.json
-    # In this layout the parent directory is the model and the leaf directory
-    # is the method tag. Keep the legacy flat-layout parser below as fallback.
+    # Two layouts are produced in this repo, both naming the model in --model:
+    #   results/niah/<model>/<TAG>/         (run_niah.sh)
+    #   results/niah/<model>_<TAG>/         (run_bin.py invoked by hand)
+    # So strip the model prefix and let the method tag keep its underscores.
     path = os.path.normpath(path)
     dir_name = os.path.basename(path)
-    parent_name = os.path.basename(os.path.dirname(path))
-    dir_name_lower = dir_name.lower()
 
-    # Preferred split: --model already names the model, so strip that prefix and
-    # let the method keep its underscores.  The rsplit heuristics below can only
-    # recover one trailing token, which forces run tags to be crammed together
-    # (k320foldedlocal256) and drops fields like the local-window size from the
-    # title.  Legacy directory names still fall through to them.
-    model_tag = args.model.rstrip('/').split('/')[-1]
-    if parent_name == model_tag:
-        model = model_tag
-        method = dir_name.lower()
-    elif dir_name.startswith(model_tag + '_'):
-        model = model_tag
-        method = dir_name[len(model_tag) + 1:].lower()
-    elif dir_name_lower.endswith('_offline'):
-        # e.g. Llama-3.1-8B-Instruct_bpc_offline
-        parts = dir_name.rsplit('_', 2)
-        if len(parts) >= 3:
-            model = parts[0]
-            method = f"{parts[-2]}_{parts[-1]}".lower()
-        else:
-            model = args.model.split('/')[-1]
-            method = f"{parts[-2]}_{parts[-1]}".lower() if len(parts) >= 2 else "unknown"
-    else:
-        parts = dir_name.rsplit('_', 1)
-        if len(parts) >= 2:
-            # Trailing numeric suffix is a budget, e.g. snapkv_2048
-            if parts[-1].isdigit():
-                sub_parts = parts[0].rsplit('_', 1)
-                if len(sub_parts) >= 2:
-                    model = sub_parts[0]
-                    method = f"{sub_parts[-1]}-{parts[-1]}".lower()
-                else:
-                    model = args.model.split('/')[-1]
-                    method = f"{parts[-1]}".lower()
-            else:
-                model = parts[0]
-                method = parts[-1].lower()
-        else:
-            model = args.model.split('/')[-1]
-            method = "unknown"
-    
+    model = args.model.rstrip('/').split('/')[-1]
+    method = dir_name.lower()
+    if method.startswith(model.lower() + '_'):
+        method = method[len(model) + 1:]
+
     save_dir = os.path.join(save_dir, model)
     os.makedirs(save_dir, exist_ok=True)
-    if args.pdf:
-        save_path = os.path.join(save_dir, f"{dir_name}.pdf")
-    else:
-        save_path = os.path.join(save_dir, f"{dir_name}.png")
+    # Always emit both: the PNG for quick eyeballing, the PDF for the paper.
+    save_paths = [
+        os.path.join(save_dir, f"{dir_name}.png"),
+        os.path.join(save_dir, f"{dir_name}.pdf"),
+    ]
 
     data = []
 
@@ -89,8 +52,6 @@ def main(args):
         round_k = 4096
     elif "llama-3-8b" in model.lower() or "llama3-8b" in model.lower():
         round_k = 512  # llama3-8b uses 512-step intervals
-    elif "llama" in model.lower():
-        round_k = 8192
 
     expected_answer = tokenize(args.expected_answer)
 
@@ -162,7 +123,6 @@ def main(args):
     plt.figure(figsize=(21, 15))
     ax = sns.heatmap(
         pivot_table,
-        # annot=True,
         fmt="g",
         cmap=cmap,
         cbar_kws={'shrink': 0.4, 'location': 'right', 'pad':0.02},
@@ -173,7 +133,6 @@ def main(args):
     )
     ax.set_aspect('auto')
 
-    # tick_labels = [f"{x//1024}k" for x in locations]
     if "mistral" in model.lower():
         tick_labels = [f"{x/1024:.1f}k" if x % 1024 != 0 else f"{int(x/1024)}k" for x in locations]
     else:
@@ -183,84 +142,66 @@ def main(args):
     cbar = ax.collections[0].colorbar
     cbar.ax.tick_params(labelsize=38)  
 
+    # Method name only -- no bit budget or window size. Run tags stay in the file
+    # name (results/niah/vis/<model>/<TAG>.{png,pdf}), so ablation figures are
+    # still told apart on disk; the title is what goes in the paper. The one
+    # config that DOES reach the title is the projection mode, because online vs
+    # offline are two named methods in the paper, not two settings of one.
+    # Keys are matched as a prefix of the run tag, longest first, so
+    # picokv_offline_k320_v320 -> PiCoKV-Fixed while picokv_online_k320_v320 and
+    # any other picokv_* tag fall through to PiCoKV.
     name_map = {
-        'origin': 'FullAttenion',
-        'streamingllm': 'StreamingLLM',
-        'snapkv': 'SnapKV',
-        'pyramidkv': 'PyramidKV',
-        'cakekv': 'CAKE',
-        'compresskv': 'CompressKV',
-        'spotlight': 'Spotlight',
-        'quest': 'Quest',
-        'rocketkv': 'RocketKV',
-        'clusterkv': 'ClusterKV',
-        'magicpig': 'MagicPIG',
-        'bpc': 'BinaryPC',
-        'bpc_offline': 'BinaryPC w/ OPC',
-        'k320online': 'PiCoKV k320/v320 (online)',
-        'k320offdec': 'PiCoKV k320/v320 (offline decoder)',
-        # Encoder and decoder both offline, folded into one stored pair; plus the
-        # local-window ablation.
-        'k320folded': 'PiCoKV k320/v320 (all-offline, folded W)',
-        'k320foldedlocal256': 'PiCoKV k320/v320 (all-offline, local 256)',
-        'k320onlinelocal256': 'PiCoKV k320/v320 (online, local 256)',
-        'k256folded': 'PiCoKV k256/v256 (all-offline, folded W)',
-        'k256online': 'PiCoKV k256/v256 (online)',
-        'k256offdec': 'PiCoKV k256/v256 (offline decoder)',
+        'picokv_offline': 'PiCoKV-Fixed',
+        'picokv_online': 'PiCoKV',
+        'picokv': 'PiCoKV',
+        'kivi': 'KIVI',
+        'oscar': 'OSCAR',
+        'polar': 'PolarQuant',
+        # Dense baselines: the attention implementation is not a KV method.
+        'flash_attention_2': 'Full Attention',
+        'sdpa': 'Full Attention',
+        'eager': 'Full Attention',
     }
 
-    # Structured PiCoKV run tags carry every field that distinguishes a sweep, so
-    # build the title from them instead of adding a name_map row per config --
-    # that is how earlier plots ended up titled "(online)" for a local-256 run.
-    structured = re.fullmatch(
-        r'(?:picokv_)?(online|offline)_k(\d+)_v(\d+)'
-        r'(?:_local(\d+))?'
-        # Archived dirs from before whitening was dropped still carry the token;
-        # swallow it so those runs keep plotting.
-        r'(?:_(?:whiten|nowhiten))?',
-        method, re.IGNORECASE,
+    method_lower = method.lower()
+    method_title = None
+    for key in sorted(name_map, key=len, reverse=True):
+        if method_lower == key or re.match(rf'{re.escape(key)}[_-]', method_lower):
+            method_title = name_map[key]
+            break
+    if method_title is None:
+        # Unknown tag: drop whatever config tokens trail the name.
+        method_title = re.split(r'[_-]', method)[0].title()
+
+    # Bold the method name, leave the score readout at regular weight.
+    # Matplotlib mixes weights inside one string only via mathtext, which needs
+    # two escapes: it drops plain spaces (hence `\ ` for "Full Attention"), and it
+    # reads `-` as the minus operator, which renders as a spaced en-dash --
+    # "PiCoKV - Fixed" instead of "PiCoKV-Fixed". So close the math group around
+    # each hyphen and let the hyphen be plain text; at title size its regular
+    # weight is imperceptible next to the bold words.
+    bold_name = '-'.join(
+        rf"$\bf{{{seg.replace(' ', r'\ ')}}}$" for seg in method_title.split('-')
     )
-    if structured:
-        mode, k, v, local = structured.groups()
-        local_text = f", local {local}" if local else ""
-        method_title = f"PiCoKV k{k}/v{v} ({mode.lower()}{local_text})"
-    # Match method names with budget suffix, e.g. snapkv-2048
-    elif re.match(r'([^-]+)-(\d+)', method, re.IGNORECASE):
-        method_name = re.match(r'([^-]+)-(\d+)', method, re.IGNORECASE).group(1)
-        method_title = name_map.get(method_name.lower(), method_name.capitalize())
-    else:
-        method_title = name_map.get(method.lower(), method.replace('_', ' ').title())
-
-    # Use regular text instead of math mode: method tags contain underscores,
-    # which Matplotlib would otherwise render as subscript expressions.
-    title_str = f"{method_title} Average Score : {df['Score'].mean():.2f}"
-
+    title_str = rf"{bold_name} Average Score : {df['Score'].mean():.2f}"
 
     plt.title(title_str,fontproperties=prop_16)
-    ax.set_xticklabels(tick_labels, rotation=45,fontproperties=prop_13)
-    ax.set_yticklabels(ax.get_yticklabels(), fontproperties=prop_13)
-    plt.ylabel('Depth Percent',fontproperties=prop_16) 
+    plt.ylabel('Depth Percent',fontproperties=prop_16)
     plt.xlabel("Context Length", fontproperties=prop_16)
-    # if "compresskv" in save_path or "pyramid" in save_path or "streaming" in save_path:
-    #     ax.set_ylabel('', fontproperties=prop_16)
-    # else:
-    #     plt.ylabel('Depth Percent',fontproperties=prop_16) 
-    # if "cake" in save_path or "compresskv" in save_path:
-    #     plt.xlabel("Context Length", fontproperties=prop_16)
-    # else:
-    #     plt.xlabel(' ', fontproperties=prop_16)  
     plt.yticks(rotation=0)
     plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    for out in save_paths:
+        plt.savefig(out, dpi=300, bbox_inches='tight')
+        print(f"saved {out}")
     plt.close()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, default="/data/Llama-3.1-8B-Instruct", help="model name or local model path")
-    parser.add_argument("--save_dir", default="outputs/needle_results_vis", type=str, help="Path to save the output")
-    parser.add_argument("--eval_path", default="", type=str, help="Path to save the output")
-    parser.add_argument("--pdf", action='store_true', help="save as .pdf")
-    parser.add_argument("--expected_answer", type=str, 
-                        default="eat a sandwich and sit in Dolores Park on a sunny day.", help="Path to save the output")
+    parser.add_argument("--save_dir", default="outputs/needle_results_vis", type=str, help="Directory the .png/.pdf pair is written to")
+    parser.add_argument("--eval_path", default="", type=str, help="Result directory holding results.json / *_results.json")
+    parser.add_argument("--expected_answer", type=str,
+                        default="eat a sandwich and sit in Dolores Park on a sunny day.",
+                        help="Needle answer; must match the one run_bin.py was given")
     args = parser.parse_args()
     main(args)

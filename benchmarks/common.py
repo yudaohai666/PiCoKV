@@ -475,12 +475,21 @@ def _load_polar_model(
     def _generate(
         input_ids=None,
         attention_mask=None,
-        max_new_tokens=32,
+        max_new_tokens=None,
+        max_length=None,
         do_sample=False,
         eos_token_id=None,
         return_dict_in_generate=False,
         **_ignored,
     ):
+        # src/lmeval.py states the budget as max_length = len(context) + max_gen_toks
+        # and never passes max_new_tokens. Swallowing max_length in **_ignored capped
+        # every polar generation at 32 tokens regardless of the task yaml.
+        if max_new_tokens is None:
+            if max_length is not None and input_ids is not None:
+                max_new_tokens = max(1, int(max_length) - int(input_ids.shape[-1]))
+            else:
+                max_new_tokens = 32
         cfg = gen_cfg
         if eos_token_id is not None:
             cfg = copy.deepcopy(gen_cfg)
