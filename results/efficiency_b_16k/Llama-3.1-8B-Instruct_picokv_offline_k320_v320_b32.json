@@ -1,0 +1,26 @@
+{
+  "method": "picokv",
+  "tag": "picokv_k320_v320_offline",
+  "model": "/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct",
+  "batch_size": 32,
+  "decode_tokens": 64,
+  "config": {
+    "k_bits": 320,
+    "v_bits": 320,
+    "group_size": 32,
+    "residual_length": 32,
+    "exp_bits": 4,
+    "eas": 0.01,
+    "zerorope": 20
+  },
+  "results": {
+    "16384": {
+      "prompt_len": 16384,
+      "prefill_ms": 22458.127,
+      "decode_ms_per_token": 40.05,
+      "decode_toks_per_s": 799.0,
+      "prefill_peak_gb": 69.489,
+      "decode_peak_gb": 30.664
+    }
+  }
+}

@@ -131,7 +131,7 @@ def _time_generate(model, input_ids, max_new_tokens, make_cache) -> float:
     return elapsed
 
 
-def _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats, decode_warmup=2) -> float:
+def _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats, decode_warmup=2, track_peak: bool = False) -> float:
     """Median per-token STEADY-STATE decode latency, timing ONLY the decode steps.
 
     Prefill once (untimed) to populate the KV cache, run ``decode_warmup`` untimed
@@ -141,6 +141,11 @@ def _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats, d
     goes negative). Each step goes through ``prepare_inputs_for_generation`` so
     position_ids / cache_position / logits_to_keep match ``generate`` exactly,
     uniformly across picokv / kivi / dense.
+
+    ``track_peak`` resets the peak counter right after the untimed prefill, so
+    the caller's ``_peak_gb()`` after this function returns is the decode-phase
+    peak (mirrors ``_decode_peak_gb``). Counter ops are host-side and do not
+    touch the timed region, so latency numbers are unaffected.
 
     The first decode step after a long prefill can be 10-50x a steady step (one-off
     workspace allocation / cuBLAS autotune / kernel init, and cudaMalloc under a
@@ -171,6 +176,11 @@ def _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats, d
             gen_ids = torch.cat([gen_ids, next_tok], dim=1)
             attn = torch.cat([attn, torch.ones_like(next_tok)], dim=1)
             pos = prompt_len  # absolute position of the next token to feed
+            # Reset AFTER the untimed prefill so only decode-step allocations
+            # are counted (mirrors _decode_peak_gb); caller reads _peak_gb()
+            # after this function returns.
+            if track_peak and torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
             # Warmup decode (NOT timed): absorb the one-time post-prefill startup
             # transient so the timed loop reflects STEADY-STATE decode.
             for _ in range(decode_warmup):
@@ -247,8 +257,8 @@ def measure(model, make_cache, vocab_size, batch_size, prompt_len, decode_tokens
     """Benchmark one prompt length.
 
     ``mem_only=True``  -> memory-only mode: measure peak GPU memory, skip latency.
-    ``mem_only=False`` -> latency-only mode: measure prefill/decode latency, skip
-                          peak memory (avoids the extra reset+generate passes).
+    ``mem_only=False`` -> latency + peak GPU memory in the same pass (peaks come
+                          from host-side counter reads; no extra generate passes).
     ``input_ids``      -> pre-built real-text token ids; falls back to random if None.
     """
     if input_ids is None:
@@ -271,10 +281,17 @@ def measure(model, make_cache, vocab_size, batch_size, prompt_len, decode_tokens
         # Decode-phase peak: prefill (untimed) -> reset -> decode loop.
         decode_peak = _decode_peak_gb(model, input_ids, decode_tokens, make_cache, device)
     else:
-        # Latency-only: prefill (time-to-first-token) + decode per-token, no peak.
+        # Latency + peaks in one pass: reset before the TTFT loop so the
+        # prefill peak excludes weights/warmup; _decode_ms_per_token resets
+        # after its untimed prefill for the decode peak. Both are host-side
+        # counter ops — no extra generate passes, latency untouched.
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
         ttft = [_time_generate(model, input_ids, 1, make_cache) for _ in range(repeats)]
         ttft_ms = statistics.median(ttft)
-        decode_ms_per_token = _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats)
+        prefill_peak = _peak_gb()
+        decode_ms_per_token = _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats, track_peak=True)
+        decode_peak = _peak_gb()
         decode_toks_per_s = (1000.0 / decode_ms_per_token * batch_size) if decode_ms_per_token > 0 else float("nan")
 
     return {
@@ -335,29 +352,22 @@ def run(args) -> None:
                 args.dataset, tokenizer, args.batch_size, length, device,
             )
 
-    results = {}
-    for length in parse_int_list(args.lengths):
-        real_ids = dataset_input_ids.get(length) if args.dataset else None
-        r = measure(
-            model, make_cache, vocab_size, args.batch_size, length,
-            args.decode_tokens, args.warmup, args.repeats, device,
-            mem_only=args.mem_only,
-            input_ids=real_ids,
-        )
-        results[str(length)] = r
-        if args.mem_only:
-            print(
-                f"[{args.method}] L={length}: "
-                f"peak prefill/decode={r['prefill_peak_gb']}/{r['decode_peak_gb']}GB"
-            )
-        else:
-            print(
-                f"[{args.method}] L={length}: prefill={r['prefill_ms']}ms  "
-                f"decode={r['decode_ms_per_token']}ms/tok ({r['decode_toks_per_s']} tok/s)"
-            )
-
     tag = output_tag(args.method, args.k_bits, args.v_bits, args.num_bits,
                      offline=(args.offline or args.offline_proj_path is not None))
+    results = {}
+    out = Path(args.output)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # Resume: the length-outer launcher calls this process once per length, so
+    # keep results from previous invocations instead of dropping them. An OOM
+    # entry for the same length gets re-measured and replaced on a re-run.
+    if out.exists():
+        try:
+            with open(out, "r", encoding="utf-8") as f:
+                prev = json.load(f)
+            if isinstance(prev, dict) and "results" in prev:
+                results = {str(k): v for k, v in prev["results"].items()}
+        except (json.JSONDecodeError, OSError):
+            pass
     payload = {
         "method": args.method,
         "tag": tag,
@@ -371,10 +381,55 @@ def run(args) -> None:
         },
         "results": results,
     }
-    out = Path(args.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+
+    def _save() -> None:
+        # Incremental persistence: every completed length is written immediately,
+        # so an OOM / Ctrl-C / preemption mid-run keeps all results so far.
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+    for length in parse_int_list(args.lengths):
+        real_ids = dataset_input_ids.get(length) if args.dataset else None
+        try:
+            r = measure(
+                model, make_cache, vocab_size, args.batch_size, length,
+                args.decode_tokens, args.warmup, args.repeats, device,
+                mem_only=args.mem_only,
+                input_ids=real_ids,
+            )
+        except torch.cuda.OutOfMemoryError:
+            # Hard-fail used to lose the whole run: the JSON below is only
+            # written after the loop, so one OOM at a long length killed every
+            # result for the method. Record the OOM (compare() renders None
+            # fields as "-") and keep going so the file is still saved.
+            _free()
+            r = {
+                "prompt_len": length,
+                "error": "out_of_memory",
+                "prefill_ms": None,
+                "decode_ms_per_token": None,
+                "decode_toks_per_s": None,
+                "prefill_peak_gb": None,
+                "decode_peak_gb": None,
+            }
+            print(f"[{args.method}] L={length}: OUT OF MEMORY (recorded, continuing)")
+        results[str(length)] = r
+        _save()
+        if r.get("error"):
+            continue
+        if args.mem_only:
+            print(
+                f"[{args.method}] L={length}: "
+                f"peak prefill/decode={r['prefill_peak_gb']}/{r['decode_peak_gb']}GB"
+            )
+        else:
+            print(
+                f"[{args.method}] L={length}: prefill={r['prefill_ms']}ms  "
+                f"decode={r['decode_ms_per_token']}ms/tok ({r['decode_toks_per_s']} tok/s)  "
+                f"peak={r['prefill_peak_gb']}/{r['decode_peak_gb']}GB"
+            )
+
+    _save()
     print(f"[saved] {out}")
 
 
@@ -384,9 +439,12 @@ def compare(directory: str) -> None:
     for fp in sorted(d.glob("*.json")):
         try:
             with open(fp, "r", encoding="utf-8") as f:
-                data.append(json.load(f))
+                p = json.load(f)
         except (json.JSONDecodeError, OSError):
             continue
+        if "results" not in p:  # skip the merged length->method file
+            continue
+        data.append(p)
     if not data:
         print(f"[compare] no result JSONs found under {d}")
         return
@@ -407,16 +465,59 @@ def compare(directory: str) -> None:
             def _c(key, width):
                 v = r.get(key)
                 return f"{('-' if v is None else v):>{width}}"
+            label = p.get("tag", p.get("method", "?"))
+            if p.get("batch_size", 1) != 1:
+                label = f"{label} b{p['batch_size']}"
             print(
-                f"{p.get('tag', p.get('method', '?')):<22}"
+                f"{label:<22}"
                 f"{_c('prefill_ms', 12)}{_c('decode_ms_per_token', 12)}"
                 f"{_c('decode_toks_per_s', 10)}{_c('prefill_peak_gb', 12)}{_c('decode_peak_gb', 10)}"
             )
 
 
+def merge(directory: str, out_path: str) -> None:
+    """Transpose per-method JSONs into one length -> method file.
+
+    Each per-method file is ``{model, batch_size, ..., results: {L: metrics}}``.
+    This writes ``{model, batch_size, decode_tokens, lengths: {L: {tag: metrics}}}``
+    so all methods of the same prompt-length live in one file, e.g.
+    ``lengths["8192"] == {"picokv_offline_k320_v320": ..., "flash_attention_2": ...}``.
+    Idempotent: call again after each method finishes and the file simply grows.
+    """
+    d = Path(directory)
+    lengths: dict[str, dict] = {}
+    meta: dict = {}
+    for fp in sorted(d.glob("*.json")):
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                p = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        if "results" not in p:  # skip an existing merged file
+            continue
+        if not meta:
+            meta = {k: p.get(k) for k in ("model", "batch_size", "decode_tokens")}
+        tag = p.get("tag") or p["method"]
+        for L, r in p.get("results", {}).items():
+            lengths.setdefault(str(L), {})[tag] = r
+    if not lengths:
+        print(f"[merge] no result JSONs found under {d}")
+        return
+    payload = {**meta, "lengths": lengths}
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    n_methods = max(len(v) for v in lengths.values())
+    print(f"[merge] {out} <- {len(lengths)} lengths x up to {n_methods} methods")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prefill vs decode efficiency benchmark.")
     parser.add_argument("--compare", default=None, help="aggregate all *.json under this dir into a table and exit")
+    parser.add_argument("--merge-dir", default=None,
+                        help="transpose all per-method JSONs under this dir into one length->method file (see --merge-out)")
+    parser.add_argument("--merge-out", default=None, help="output path for --merge-dir")
     parser.add_argument("--model", default="/data/Llama-3.1-8B-Instruct")
     parser.add_argument("--method", default="picokv", help="picokv | oscar | kivi | flash_attention_2 | sdpa | eager")
     parser.add_argument("--dataset", default=None,
@@ -428,7 +529,7 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--mem-only", action="store_true",
                         help="memory-only mode: measure peak GPU memory only, skip all latency timing; "
-                             "when off, run latency benchmark only and do NO memory-related work")
+                             "when off, run latency benchmark and also record prefill/decode peak GPU memory")
     parser.add_argument("--output", default="results/efficiency/picokv.json")
     # ── picokv KV-cache params (--method picokv) ──
     parser.add_argument("--k-bits", type=int, default=None, help="PiCoKV K projection bits; KIVI defaults to 2")
@@ -465,6 +566,9 @@ def main() -> None:
     if args.v_bits is None:
         args.v_bits = 2 if args.method == "kivi" else 320
 
+    if args.merge_dir:
+        merge(args.merge_dir, args.merge_out or f"{args.merge_dir.rstrip('/')}/merged_efficiency.json")
+        return
     if args.compare:
         compare(args.compare)
         return

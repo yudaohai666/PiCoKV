@@ -34,7 +34,7 @@ offline_projection/projections/*
 *.log
 
 # Generated benchmark results.
-results/
+# results/
 
 # Generated profiler traces
 results/efficiency/prof/

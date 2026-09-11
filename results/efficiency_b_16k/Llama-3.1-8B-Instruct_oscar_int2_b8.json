@@ -1,0 +1,26 @@
+{
+  "method": "oscar",
+  "tag": "oscar_int2",
+  "model": "/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct",
+  "batch_size": 8,
+  "decode_tokens": 64,
+  "config": {
+    "k_bits": 320,
+    "v_bits": 320,
+    "group_size": 32,
+    "residual_length": 32,
+    "exp_bits": 4,
+    "eas": 0.01,
+    "zerorope": 20
+  },
+  "results": {
+    "16384": {
+      "prompt_len": 16384,
+      "prefill_ms": 5883.705,
+      "decode_ms_per_token": 27.7911,
+      "decode_toks_per_s": 287.86,
+      "prefill_peak_gb": 32.594,
+      "decode_peak_gb": 18.125
+    }
+  }
+}

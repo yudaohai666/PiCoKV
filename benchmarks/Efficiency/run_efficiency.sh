@@ -27,26 +27,37 @@ mkdir -p "${RESULT_DIR}"
 
 # ── benchmark runtime params ──
 # LENGTHS="${LENGTHS:-131072}"
-LENGTHS="${LENGTHS:-8192,16384,32768,65536,131072,262144,524288}"
+LENGTHS="${LENGTHS:-8192,16384,32768,65536,131072,262144,524288,1048576}"
 
 DECODE_TOKENS="${DECODE_TOKENS:-64}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
+# Comma-separated batch sweep: BATCHES="1,2,4,8" runs every length at each
+# batch value; defaults to the single BATCH_SIZE (old behavior unchanged).
+BATCHES="${BATCHES:-${BATCH_SIZE}}"
 WARMUP="${WARMUP:-2}"
 REPEATS="${REPEATS:-4}"
 # Optional real-text dataset (.jsonl with "text" fields). Empty = use random token ids.
 DATASET="${DATASET:-${SCRIPT_DIR}/datasets/PaulGrahamEssays.jsonl}"
-# Override the auto result file (results/efficiency/{TAG}.json). Needed when one
-# method is split across processes (e.g. one GPU per length): otherwise every
-# process writes the same file. --compare still scans the whole RESULT_DIR.
+# Override the auto result file (results/efficiency/{MODEL_TAG}_{TAG}.json).
+# The model name is part of the tag so results from different models never
+# overwrite each other. Needed when one method is split across processes
+# (e.g. one GPU per length): otherwise every process writes the same file.
+# --compare still scans the whole RESULT_DIR.
 OUTPUT_PATH="${OUTPUT_PATH:-}"
+
+# Optional explicit merged-file path (no batch suffix). When unset it is
+# derived per batch below (efficiency_b{N}.json). Do NOT share one explicit
+# path across a multi-batch sweep: methods from different batches would then
+# collide on the tag key inside the merged file.
+COMBINED_OUTPUT_BASE="${COMBINED_OUTPUT:-}"
 
 # ── methods to run (comment out to skip; METHOD=oscar forces a single one) ──
 METHODS=(
-  flash_attention_2
-  picokv
   kivi
   oscar
   polar
+  picokv
+  flash_attention_2
   # sdpa
   # eager
 )
@@ -120,16 +131,40 @@ build_method_args() {
   esac
 }
 
-for method in "${METHODS[@]}"; do
-  build_method_args "${method}"
-  out_file="${OUTPUT_PATH:-${RESULT_DIR}/${TAG}.json}"
-  echo "=== Efficiency: method=${method} -> ${out_file} ==="
-  CUDA_VISIBLE_DEVICES=${GPU} python "${SCRIPT_DIR}/run_efficiency.py" \
-    --model "${MODEL}" --method "${method}" \
-    --lengths "${LENGTHS}" --decode-tokens "${DECODE_TOKENS}" \
-    --batch-size "${BATCH_SIZE}" --warmup "${WARMUP}" --repeats "${REPEATS}" \
-    ${DATASET:+--dataset "${DATASET}"} \
-    --output "${out_file}" "${METHOD_ARGS[@]}"
+# Length-outer, then batch-outer, then method-inner: every method finishes
+# (length, batch) before the next step starts. Each (length, batch, method)
+# invocation re-loads the model, because every method patches/loads it
+# differently; run_efficiency.py resumes the method's JSON so lengths
+# accumulate across invocations. Batch-aware file names (…_b{N}.json, only
+# when batch != 1) keep a multi-batch sweep from clobbering itself.
+for length in $(echo "${LENGTHS}" | tr ',' ' '); do
+  for batch in $(echo "${BATCHES}" | tr ',' ' '); do
+    BATCH_SIZE="${batch}"
+    BATCH_TAG=""; [ "${BATCH_SIZE}" != "1" ] && BATCH_TAG="_b${BATCH_SIZE}"
+    COMBINED_OUTPUT="${COMBINED_OUTPUT_BASE:-${RESULT_DIR}/${MODEL_TAG}_efficiency${BATCH_TAG}.json}"
+    # Double repeats for short/small-batch runs (length<=128K and batch<=8) to
+    # compensate for higher measurement noise at these settings.
+    EFFECTIVE_REPEATS="${REPEATS}"
+    if [ "${length}" -le 131072 ] && [ "${BATCH_SIZE}" -le 8 ]; then
+      EFFECTIVE_REPEATS=$(( REPEATS * 2 ))
+    fi
+    for method in "${METHODS[@]}"; do
+      build_method_args "${method}"
+      out_file="${OUTPUT_PATH:-${RESULT_DIR}/${MODEL_TAG}_${TAG}${BATCH_TAG}.json}"
+      echo "=== Efficiency: L=${length} batch=${BATCH_SIZE} repeats=${EFFECTIVE_REPEATS} method=${method} -> ${out_file} ==="
+      CUDA_VISIBLE_DEVICES=${GPU} python "${SCRIPT_DIR}/run_efficiency.py" \
+        --model "${MODEL}" --method "${method}" \
+        --lengths "${length}" --decode-tokens "${DECODE_TOKENS}" \
+        --batch-size "${BATCH_SIZE}" --warmup "${WARMUP}" --repeats "${EFFECTIVE_REPEATS}" \
+        ${DATASET:+--dataset "${DATASET}"} \
+        --output "${out_file}" "${METHOD_ARGS[@]}"
+      # Refresh the length->method merged file: all methods at the same prompt
+      # length live in one JSON (regenerated after every (length, method), so an
+      # interrupted run keeps everything completed so far).
+      python "${SCRIPT_DIR}/run_efficiency.py" \
+        --merge-dir "${RESULT_DIR}" --merge-out "${COMBINED_OUTPUT}"
+    done
+  done
 done
 
 echo "=== Comparison table ==="

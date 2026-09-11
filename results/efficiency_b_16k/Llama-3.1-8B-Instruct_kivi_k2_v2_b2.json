@@ -1,0 +1,26 @@
+{
+  "method": "kivi",
+  "tag": "kivi_k2_v2",
+  "model": "/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct",
+  "batch_size": 2,
+  "decode_tokens": 64,
+  "config": {
+    "k_bits": 2,
+    "v_bits": 2,
+    "group_size": 32,
+    "residual_length": 128,
+    "exp_bits": 4,
+    "eas": 0.01,
+    "zerorope": 20
+  },
+  "results": {
+    "16384": {
+      "prompt_len": 16384,
+      "prefill_ms": 1435.143,
+      "decode_ms_per_token": 43.688,
+      "decode_toks_per_s": 45.78,
+      "prefill_peak_gb": 19.377,
+      "decode_peak_gb": 16.166
+    }
+  }
+}

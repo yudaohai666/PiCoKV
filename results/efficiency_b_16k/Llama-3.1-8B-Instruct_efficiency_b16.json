@@ -1,0 +1,49 @@
+{
+  "model": "/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct",
+  "batch_size": 1,
+  "decode_tokens": 64,
+  "lengths": {
+    "16384": {
+      "flash_attention_2": {
+        "prompt_len": 16384,
+        "prefill_ms": 5411.631,
+        "decode_ms_per_token": 47.454,
+        "decode_toks_per_s": 168.58,
+        "prefill_peak_gb": 45.555,
+        "decode_peak_gb": 31.309
+      },
+      "kivi_k2_v2": {
+        "prompt_len": 16384,
+        "prefill_ms": 5759.49,
+        "decode_ms_per_token": 51.1686,
+        "decode_toks_per_s": 156.35,
+        "prefill_peak_gb": 32.543,
+        "decode_peak_gb": 19.698
+      },
+      "oscar_int2": {
+        "prompt_len": 16384,
+        "prefill_ms": 5883.705,
+        "decode_ms_per_token": 27.7911,
+        "decode_toks_per_s": 287.86,
+        "prefill_peak_gb": 32.594,
+        "decode_peak_gb": 18.125
+      },
+      "picokv_k320_v320_offline": {
+        "prompt_len": 16384,
+        "prefill_ms": 5637.521,
+        "decode_ms_per_token": 21.7705,
+        "decode_toks_per_s": 367.47,
+        "prefill_peak_gb": 28.614,
+        "decode_peak_gb": 18.908
+      },
+      "polar": {
+        "prompt_len": 16384,
+        "prefill_ms": 6017.232,
+        "decode_ms_per_token": 38.9037,
+        "decode_toks_per_s": 205.64,
+        "prefill_peak_gb": 32.749,
+        "decode_peak_gb": 18.669
+      }
+    }
+  }
+}
