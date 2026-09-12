@@ -1,0 +1,26 @@
+{
+  "method": "flash_attention_2",
+  "tag": "flash_attention_2",
+  "model": "/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct",
+  "batch_size": 32,
+  "decode_tokens": 64,
+  "config": {
+    "k_bits": 320,
+    "v_bits": 320,
+    "group_size": 32,
+    "residual_length": 32,
+    "exp_bits": 4,
+    "eas": 0.01,
+    "zerorope": 20
+  },
+  "results": {
+    "8192": {
+      "prompt_len": 8192,
+      "prefill_ms": 9249.416,
+      "decode_ms_per_token": 85.1758,
+      "decode_toks_per_s": 375.69,
+      "prefill_peak_gb": 76.122,
+      "decode_peak_gb": 47.765
+    }
+  }
+}

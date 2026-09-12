@@ -1,0 +1,54 @@
+{
+  "model": "/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct",
+  "batch_size": 64,
+  "decode_tokens": 64,
+  "lengths": {
+    "8192": {
+      "flash_attention_2": {
+        "prompt_len": 8192,
+        "error": "out_of_memory",
+        "prefill_ms": null,
+        "decode_ms_per_token": null,
+        "decode_toks_per_s": null,
+        "prefill_peak_gb": null,
+        "decode_peak_gb": null
+      },
+      "kivi_k2_v2": {
+        "prompt_len": 8192,
+        "error": "out_of_memory",
+        "prefill_ms": null,
+        "decode_ms_per_token": null,
+        "decode_toks_per_s": null,
+        "prefill_peak_gb": null,
+        "decode_peak_gb": null
+      },
+      "oscar_int2": {
+        "prompt_len": 8192,
+        "error": "out_of_memory",
+        "prefill_ms": null,
+        "decode_ms_per_token": null,
+        "decode_toks_per_s": null,
+        "prefill_peak_gb": null,
+        "decode_peak_gb": null
+      },
+      "picokv_k320_v320_offline": {
+        "prompt_len": 8192,
+        "error": "out_of_memory",
+        "prefill_ms": null,
+        "decode_ms_per_token": null,
+        "decode_toks_per_s": null,
+        "prefill_peak_gb": null,
+        "decode_peak_gb": null
+      },
+      "polar": {
+        "prompt_len": 8192,
+        "error": "out_of_memory",
+        "prefill_ms": null,
+        "decode_ms_per_token": null,
+        "decode_toks_per_s": null,
+        "prefill_peak_gb": null,
+        "decode_peak_gb": null
+      }
+    }
+  }
+}

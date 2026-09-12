@@ -22,8 +22,7 @@ GPU="${GPU:-0}"
 MODEL="${MODEL:-/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct}"
 # MODEL="${MODEL:-/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Qwen3-8B}"
 MODEL_TAG="$(basename "${MODEL%/}")"
-RESULT_DIR="results/efficiency"
-mkdir -p "${RESULT_DIR}"
+RESULT_ROOT="results/efficiency"
 
 # ── benchmark runtime params ──
 # LENGTHS="${LENGTHS:-131072}"
@@ -38,17 +37,17 @@ WARMUP="${WARMUP:-2}"
 REPEATS="${REPEATS:-4}"
 # Optional real-text dataset (.jsonl with "text" fields). Empty = use random token ids.
 DATASET="${DATASET:-${SCRIPT_DIR}/datasets/PaulGrahamEssays.jsonl}"
-# Override the auto result file (results/efficiency/{MODEL_TAG}_{TAG}.json).
+# Override the auto result file (results/efficiency/b{N}/{MODEL_TAG}_{TAG}.json).
 # The model name is part of the tag so results from different models never
 # overwrite each other. Needed when one method is split across processes
 # (e.g. one GPU per length): otherwise every process writes the same file.
-# --compare still scans the whole RESULT_DIR.
+# --compare still scans the whole per-batch RESULT_DIR.
 OUTPUT_PATH="${OUTPUT_PATH:-}"
 
-# Optional explicit merged-file path (no batch suffix). When unset it is
-# derived per batch below (efficiency_b{N}.json). Do NOT share one explicit
-# path across a multi-batch sweep: methods from different batches would then
-# collide on the tag key inside the merged file.
+# Optional explicit merged-file path. When unset it is derived per batch
+# below (results/efficiency/b{N}/{MODEL_TAG}_efficiency.json). Each batch
+# gets its own subdirectory, so per-method files and the merged file never
+# collide across batches.
 COMBINED_OUTPUT_BASE="${COMBINED_OUTPUT:-}"
 
 # ── methods to run (comment out to skip; METHOD=oscar forces a single one) ──
@@ -135,13 +134,17 @@ build_method_args() {
 # (length, batch) before the next step starts. Each (length, batch, method)
 # invocation re-loads the model, because every method patches/loads it
 # differently; run_efficiency.py resumes the method's JSON so lengths
-# accumulate across invocations. Batch-aware file names (…_b{N}.json, only
-# when batch != 1) keep a multi-batch sweep from clobbering itself.
+# accumulate across invocations. Each batch gets its own RESULT_DIR
+# (results/efficiency/b{N}/) so per-method files and the merged file for one
+# batch never mix with another batch's — merge-dir globs "*.json" over the
+# whole directory, so a shared directory used to merge every batch's files
+# together regardless of the _b{N} filename suffix.
 for length in $(echo "${LENGTHS}" | tr ',' ' '); do
   for batch in $(echo "${BATCHES}" | tr ',' ' '); do
     BATCH_SIZE="${batch}"
-    BATCH_TAG=""; [ "${BATCH_SIZE}" != "1" ] && BATCH_TAG="_b${BATCH_SIZE}"
-    COMBINED_OUTPUT="${COMBINED_OUTPUT_BASE:-${RESULT_DIR}/${MODEL_TAG}_efficiency${BATCH_TAG}.json}"
+    RESULT_DIR="${RESULT_ROOT}/b${BATCH_SIZE}"
+    mkdir -p "${RESULT_DIR}"
+    COMBINED_OUTPUT="${COMBINED_OUTPUT_BASE:-${RESULT_DIR}/${MODEL_TAG}_efficiency.json}"
     # Double repeats for short/small-batch runs (length<=128K and batch<=8) to
     # compensate for higher measurement noise at these settings.
     EFFECTIVE_REPEATS="${REPEATS}"
@@ -150,7 +153,7 @@ for length in $(echo "${LENGTHS}" | tr ',' ' '); do
     fi
     for method in "${METHODS[@]}"; do
       build_method_args "${method}"
-      out_file="${OUTPUT_PATH:-${RESULT_DIR}/${MODEL_TAG}_${TAG}${BATCH_TAG}.json}"
+      out_file="${OUTPUT_PATH:-${RESULT_DIR}/${MODEL_TAG}_${TAG}.json}"
       echo "=== Efficiency: L=${length} batch=${BATCH_SIZE} repeats=${EFFECTIVE_REPEATS} method=${method} -> ${out_file} ==="
       CUDA_VISIBLE_DEVICES=${GPU} python "${SCRIPT_DIR}/run_efficiency.py" \
         --model "${MODEL}" --method "${method}" \
@@ -168,4 +171,7 @@ for length in $(echo "${LENGTHS}" | tr ',' ' '); do
 done
 
 echo "=== Comparison table ==="
-python "${SCRIPT_DIR}/run_efficiency.py" --compare "${RESULT_DIR}"
+for batch in $(echo "${BATCHES}" | tr ',' ' '); do
+  echo "--- batch=${batch} ---"
+  python "${SCRIPT_DIR}/run_efficiency.py" --compare "${RESULT_ROOT}/b${batch}"
+done
