@@ -1,0 +1,9 @@
+{
+    "device_budget": 28,
+    "window_size": 24,
+    "fix_layers": [0, 16],
+    "K": 10,
+    "L": 150,
+    "mode": "anns_es",
+    "threshold": 2
+}

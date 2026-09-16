@@ -6,6 +6,8 @@ describe the single production path whose latency and accuracy were measured.
 
 from __future__ import annotations
 
+import os
+
 import torch
 
 
@@ -13,8 +15,9 @@ import torch
 SUPPORTED_CODE_BITS = (128, 192, 256, 320, 384, 448, 512)
 SUPPORTED_EXP_BITS = (1, 2, 4, 8)
 
-# Online projection learning invariants.
-ONLINE_GROUP_BITS = 32
+# Online projection learning invariants. Ablation override: PICOKV_ONLINE_GROUP_BITS
+# (online mode only -- the fused offline CUDA path hardcodes 32 and ignores this).
+ONLINE_GROUP_BITS = int(os.environ.get("PICOKV_ONLINE_GROUP_BITS", 32))
 ONLINE_DECODER_RIDGE = 1e-3
 ONLINE_MATMUL_DTYPE = torch.bfloat16
 

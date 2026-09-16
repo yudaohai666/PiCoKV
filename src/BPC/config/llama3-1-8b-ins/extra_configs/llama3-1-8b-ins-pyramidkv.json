@@ -1,0 +1,8 @@
+{
+    "fix_layers": [0, 1],
+    "window_size": 8,
+    "kernel_size": 5,
+    "max_capacity_prompt": 512,
+    "pooling": "avgpool",
+    "pyram_beta": 20
+}

@@ -1,0 +1,11 @@
+{
+    "mistral-7b-ins":31500,
+    "llama3-1-8b-ins": 127500,
+    "Llama-3.1-8B-Instruct": 127500,
+    "llama3-8b":7500,
+    "llama-3-8b":7500,
+    "Meta-Llama-3-8B": 7500,
+    "qwen2.5-7b-ins": 127500,
+    "Qwen2.5-7B-Instruct": 127500,
+    "Qwen2.5-7B-Instruct-1M": 127500
+}

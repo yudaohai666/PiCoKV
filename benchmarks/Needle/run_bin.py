@@ -16,7 +16,13 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from needle import LLMNeedleHaystackTester, ModelProvider  # noqa: E402
-from benchmarks.common import load_model, output_tag, resolve_offline_proj_path, seed_everything  # noqa: E402
+from benchmarks.common import (  # noqa: E402
+    BPC_DEFAULT_OFFLINE_PROJ_PATH,
+    load_model,
+    output_tag,
+    resolve_offline_proj_path,
+    seed_everything,
+)
 
 
 class Transformer(ModelProvider):
@@ -54,6 +60,14 @@ class Transformer(ModelProvider):
         polar_rbits: int = 3,
         polar_tbits: int = 3,
         polar_vbits: int = 2,
+        # BPC params (--method bpc)
+        bpc_mask_out: float = 0.98,
+        bpc_min_remain: int = 128,
+        bpc_token_budget: int | None = None,
+        bpc_err_ratio: float = 0.1,
+        bpc_fix_layers: list[int] | None = None,
+        bpc_use_cuda_kernel: bool = True,
+        bpc_offline_proj_path: str | None = BPC_DEFAULT_OFFLINE_PROJ_PATH,
     ):
         self.max_new_tokens = int(max_new_tokens)
         self.method = method
@@ -88,6 +102,14 @@ class Transformer(ModelProvider):
             polar_rbits=polar_rbits,
             polar_tbits=polar_tbits,
             polar_vbits=polar_vbits,
+            # BPC params (--method bpc)
+            bpc_mask_out=bpc_mask_out,
+            bpc_min_remain=bpc_min_remain,
+            bpc_token_budget=bpc_token_budget,
+            bpc_err_ratio=bpc_err_ratio,
+            bpc_fix_layers=bpc_fix_layers,
+            bpc_use_cuda_kernel=bpc_use_cuda_kernel,
+            bpc_offline_proj_path=bpc_offline_proj_path,
         )
 
     def evaluate_model(self, prompt, needle=None) -> str:
@@ -192,6 +214,14 @@ def run_experiment(
     polar_rbits: int = 3,
     polar_tbits: int = 3,
     polar_vbits: int = 2,
+    # BPC params (--method bpc)
+    bpc_mask_out: float = 0.98,
+    bpc_min_remain: int = 128,
+    bpc_token_budget: int | None = None,
+    bpc_err_ratio: float = 0.1,
+    bpc_fix_layers: list[int] | None = None,
+    bpc_use_cuda_kernel: bool = True,
+    bpc_offline_proj_path: str | None = BPC_DEFAULT_OFFLINE_PROJ_PATH,
 ) -> dict[tuple[int, int], str]:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -226,6 +256,14 @@ def run_experiment(
         polar_rbits=polar_rbits,
         polar_tbits=polar_tbits,
         polar_vbits=polar_vbits,
+        # BPC params (--method bpc)
+        bpc_mask_out=bpc_mask_out,
+        bpc_min_remain=bpc_min_remain,
+        bpc_token_budget=bpc_token_budget,
+        bpc_err_ratio=bpc_err_ratio,
+        bpc_fix_layers=bpc_fix_layers,
+        bpc_use_cuda_kernel=bpc_use_cuda_kernel,
+        bpc_offline_proj_path=bpc_offline_proj_path,
     )
     tester = LLMNeedleHaystackTester(model)
     results = {}
@@ -344,11 +382,30 @@ def main() -> None:
     parser.add_argument("--polar-rbits", type=int, default=3)
     parser.add_argument("--polar-tbits", type=int, default=3)
     parser.add_argument("--polar-vbits", type=int, default=2)
+    # ── BPC params (--method bpc) ──
+    parser.add_argument("--bpc-mask-out", type=float, default=0.98, help="BPC: token_budget = context_len * (1 - mask_out)")
+    parser.add_argument("--bpc-min-remain", type=int, default=128, help="BPC: minimum token budget floor")
+    parser.add_argument("--bpc-token-budget", type=int, default=None, help="BPC: fixed token budget (overrides mask_out/min_remain)")
+    parser.add_argument("--bpc-err-ratio", type=float, default=0.1, help="BPC: err_topk = token_budget * err_ratio")
+    parser.add_argument("--bpc-fix-layers", default="0,1", help="BPC: comma-separated layer indices that skip sparse attention (empty string for none)")
+    parser.add_argument(
+        "--bpc-use-cuda-kernel",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="BPC: use the compiled CUDA kernel (JIT-built on first use); falls back to PyTorch on failure",
+    )
+    parser.add_argument(
+        "--bpc-offline-proj-path",
+        default=BPC_DEFAULT_OFFLINE_PROJ_PATH,
+        help="BPC: path to a learned offline hash-projection .pt (e.g. src/BPC/ckp/projections/*.pt); pass '' for the online (random) projection",
+    )
     args = parser.parse_args()
     if args.k_bits is None:
         args.k_bits = 2 if args.method == "kivi" else 320
     if args.v_bits is None:
         args.v_bits = 2 if args.method == "kivi" else 320
+    if args.bpc_offline_proj_path == "":
+        args.bpc_offline_proj_path = None
 
     seed_everything(args.seed)
     offline_proj_path = resolve_offline_proj_path(
@@ -360,7 +417,7 @@ def main() -> None:
         model_key = Path(args.model.rstrip("/")).name
         tag = output_tag(
             args.method, args.k_bits, args.v_bits, args.num_bits,
-            offline=(args.offline or args.offline_proj_path is not None),
+            offline=(args.offline or args.offline_proj_path is not None or args.bpc_offline_proj_path is not None),
             full_tag=(args.method == "picokv"),
         )
         output_path = str(Path("results/niah") / model_key / tag / "results.json")
@@ -397,6 +454,13 @@ def main() -> None:
         polar_rbits=args.polar_rbits,
         polar_tbits=args.polar_tbits,
         polar_vbits=args.polar_vbits,
+        bpc_mask_out=args.bpc_mask_out,
+        bpc_min_remain=args.bpc_min_remain,
+        bpc_token_budget=args.bpc_token_budget,
+        bpc_err_ratio=args.bpc_err_ratio,
+        bpc_fix_layers=parse_int_list(args.bpc_fix_layers),
+        bpc_use_cuda_kernel=args.bpc_use_cuda_kernel,
+        bpc_offline_proj_path=args.bpc_offline_proj_path,
     )
 
 

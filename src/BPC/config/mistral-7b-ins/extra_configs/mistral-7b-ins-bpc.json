@@ -1,0 +1,11 @@
+{
+    "enable": true,
+    "fix_layers": [0, 1],
+    "mask_out": 0.98,
+    "min_remain": 128,
+    "token_budget": 1024,
+    "err_ratio": 0.1,
+    "use_offline_proj": false,
+    "offline_proj_path": null,
+    "use_cuda_kernel": true
+}

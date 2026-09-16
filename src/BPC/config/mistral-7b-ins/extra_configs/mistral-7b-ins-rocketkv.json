@@ -1,0 +1,6 @@
+{
+    "fix_layers": [0, 1],
+    "token_budget": 1024,
+    "window_size": 32,
+    "kernel_size": 63
+}

@@ -1,0 +1,165 @@
+{
+  "results": {
+    "niah_single_1": {
+      "8192,none": 1.0,
+      "8192_stderr,none": "N/A",
+      "16384,none": 1.0,
+      "16384_stderr,none": "N/A",
+      "32768,none": 1.0,
+      "32768_stderr,none": "N/A"
+    },
+    "niah_single_2": {
+      "8192,none": 1.0,
+      "8192_stderr,none": "N/A",
+      "16384,none": 1.0,
+      "16384_stderr,none": "N/A",
+      "32768,none": 1.0,
+      "32768_stderr,none": "N/A"
+    },
+    "niah_single_3": {
+      "8192,none": 1.0,
+      "8192_stderr,none": "N/A",
+      "16384,none": 1.0,
+      "16384_stderr,none": "N/A",
+      "32768,none": 1.0,
+      "32768_stderr,none": "N/A"
+    },
+    "niah_multikey_1": {
+      "8192,none": 0.95,
+      "8192_stderr,none": "N/A",
+      "16384,none": 0.95,
+      "16384_stderr,none": "N/A",
+      "32768,none": 0.98,
+      "32768_stderr,none": "N/A"
+    },
+    "niah_multikey_2": {
+      "8192,none": 0.98,
+      "8192_stderr,none": "N/A",
+      "16384,none": 0.84,
+      "16384_stderr,none": "N/A",
+      "32768,none": 0.94,
+      "32768_stderr,none": "N/A"
+    },
+    "niah_multikey_3": {
+      "8192,none": 0.9,
+      "8192_stderr,none": "N/A",
+      "16384,none": 0.74,
+      "16384_stderr,none": "N/A",
+      "32768,none": 0.81,
+      "32768_stderr,none": "N/A"
+    },
+    "niah_multiquery": {
+      "8192,none": 0.9975,
+      "8192_stderr,none": "N/A",
+      "16384,none": 0.9975,
+      "16384_stderr,none": "N/A",
+      "32768,none": 0.9875,
+      "32768_stderr,none": "N/A"
+    },
+    "niah_multivalue": {
+      "8192,none": 0.985,
+      "8192_stderr,none": "N/A",
+      "16384,none": 0.9575,
+      "16384_stderr,none": "N/A",
+      "32768,none": 0.95,
+      "32768_stderr,none": "N/A"
+    },
+    "ruler_vt": {
+      "8192,none": 0.992,
+      "8192_stderr,none": "N/A",
+      "16384,none": 0.9840000000000001,
+      "16384_stderr,none": "N/A",
+      "32768,none": 0.858,
+      "32768_stderr,none": "N/A"
+    },
+    "ruler_cwe": {
+      "8192,none": 0.926,
+      "8192_stderr,none": "N/A",
+      "16384,none": 0.8560000000000001,
+      "16384_stderr,none": "N/A",
+      "32768,none": 0.664,
+      "32768_stderr,none": "N/A"
+    },
+    "ruler_fwe": {
+      "8192,none": 0.9333333333333332,
+      "8192_stderr,none": "N/A",
+      "16384,none": 0.94,
+      "16384_stderr,none": "N/A",
+      "32768,none": 0.9166666666666667,
+      "32768_stderr,none": "N/A"
+    },
+    "ruler_qa_squad": {
+      "8192,none": 0.7575,
+      "8192_stderr,none": "N/A",
+      "16384,none": 0.6741666666666667,
+      "16384_stderr,none": "N/A",
+      "32768,none": 0.7241666666666667,
+      "32768_stderr,none": "N/A"
+    },
+    "ruler_qa_hotpot": {
+      "8192,none": 0.6,
+      "8192_stderr,none": "N/A",
+      "16384,none": 0.46,
+      "16384_stderr,none": "N/A",
+      "32768,none": 0.5,
+      "32768_stderr,none": "N/A"
+    }
+  },
+  "config": {
+    "model": "MyModel",
+    "model_args": "pretrained=/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Qwen3-8B,max_length=32768",
+    "batch_size": 1,
+    "batch_sizes": [],
+    "device": null,
+    "use_cache": null,
+    "limit": 100,
+    "bootstrap_iters": 100000,
+    "gen_kwargs": null,
+    "random_seed": 42,
+    "numpy_seed": 42,
+    "torch_seed": 42,
+    "fewshot_seed": 42
+  },
+  "run_config": {
+    "model": "/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Qwen3-8B",
+    "method": "picokv",
+    "k_bits": 256,
+    "v_bits": 256,
+    "sink_size": 64,
+    "local_size": 256,
+    "exp_bits": 4,
+    "eas": 0.01,
+    "zerorope": 20,
+    "use_pruning": false,
+    "prune_mode": 3,
+    "log_eps": -10.0,
+    "group_size": 32,
+    "residual_length": 32,
+    "num_bits": 2,
+    "quant_mode": "k-channel",
+    "kv_rotation": "hadamard",
+    "kv_norm": "1",
+    "residual_evict_size": 256,
+    "offline_v_hadamard": true,
+    "offline": false,
+    "offline_proj_path": null,
+    "polar_mode": "mixed",
+    "polar_rbits": 3,
+    "polar_tbits": 3,
+    "polar_vbits": 2,
+    "tasks": "niah_single_1,niah_single_2,niah_single_3,niah_multikey_1,niah_multikey_2,niah_multikey_3,niah_multiquery,niah_multivalue,ruler_vt,ruler_cwe,ruler_fwe,ruler_qa_squad,ruler_qa_hotpot",
+    "max_seq_lengths": "8192,16384,32768",
+    "max_length": 32768,
+    "batch_size": 1,
+    "max_gen_toks": 128,
+    "limit": 100,
+    "num_fewshot": 0,
+    "seed": 42,
+    "output_path": "results/ablation/ruler_lengths_groupbits/Qwen3-8B/picokv_online_k256_v256_gb64_short/",
+    "write_out": true,
+    "apply_chat_template": true,
+    "fewshot_as_multiturn": false,
+    "add_bos_token": false,
+    "prefix_token_id": null
+  }
+}

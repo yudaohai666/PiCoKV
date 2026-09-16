@@ -36,7 +36,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from benchmarks.common import load_model, output_tag, resolve_offline_proj_path, seed_everything  # noqa: E402
+from benchmarks.common import (  # noqa: E402
+    BPC_DEFAULT_OFFLINE_PROJ_PATH,
+    load_model,
+    output_tag,
+    resolve_offline_proj_path,
+    seed_everything,
+)
 
 
 def parse_int_list(value: str) -> list[int]:
@@ -340,6 +346,14 @@ def run(args) -> None:
         polar_rbits=args.polar_rbits,
         polar_tbits=args.polar_tbits,
         polar_vbits=args.polar_vbits,
+        # BPC params (--method bpc)
+        bpc_mask_out=args.bpc_mask_out,
+        bpc_min_remain=args.bpc_min_remain,
+        bpc_token_budget=args.bpc_token_budget,
+        bpc_err_ratio=args.bpc_err_ratio,
+        bpc_fix_layers=[int(x) for x in args.bpc_fix_layers.split(",") if x],
+        bpc_use_cuda_kernel=args.bpc_use_cuda_kernel,
+        bpc_offline_proj_path=args.bpc_offline_proj_path,
     )
     device = model.device
     vocab_size = model.config.vocab_size
@@ -560,11 +574,21 @@ def main() -> None:
     parser.add_argument("--polar-rbits", type=int, default=3, help="PolarQuant K radius bits (rbits+tbits<=8)")
     parser.add_argument("--polar-tbits", type=int, default=3, help="PolarQuant K angle bits (rbits+tbits<=8)")
     parser.add_argument("--polar-vbits", type=int, default=2, help="PolarQuant V bits (mixed only; KIVI kernel supports 2 or 4)")
+    # ── BPC params (--method bpc); default = offline hash projection ──
+    parser.add_argument("--bpc-mask-out", type=float, default=0.98, help="BPC: token_budget = context_len * (1 - mask_out)")
+    parser.add_argument("--bpc-min-remain", type=int, default=128, help="BPC: minimum token budget floor")
+    parser.add_argument("--bpc-token-budget", type=int, default=None, help="BPC: fixed token budget (overrides mask_out/min_remain)")
+    parser.add_argument("--bpc-err-ratio", type=float, default=0.1, help="BPC: err_topk = token_budget * err_ratio")
+    parser.add_argument("--bpc-fix-layers", default="0,1", help="BPC: comma-separated layers skipping sparse attention (empty for none)")
+    parser.add_argument("--bpc-use-cuda-kernel", action=argparse.BooleanOptionalAction, default=True, help="BPC: use the compiled CUDA kernel; PyTorch fallback on failure")
+    parser.add_argument("--bpc-offline-proj-path", default=BPC_DEFAULT_OFFLINE_PROJ_PATH, help="BPC: learned offline hash-projection .pt; pass '' for the online (random) projection")
     args = parser.parse_args()
     if args.k_bits is None:
         args.k_bits = 2 if args.method == "kivi" else 320
     if args.v_bits is None:
         args.v_bits = 2 if args.method == "kivi" else 320
+    if args.bpc_offline_proj_path == "":
+        args.bpc_offline_proj_path = None
 
     if args.merge_dir:
         merge(args.merge_dir, args.merge_out or f"{args.merge_dir.rstrip('/')}/merged_efficiency.json")

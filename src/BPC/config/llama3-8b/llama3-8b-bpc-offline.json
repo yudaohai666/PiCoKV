@@ -1,0 +1,12 @@
+{
+    "model": {
+        "model_name": "unsloth/llama-3-8b",
+        "model_dtype": "bf16",
+        "model_method": "bpc",
+        "model_structure": "llama",
+        "save_ckp": null,
+        "load_ckp": null,
+        "config": "config/llama3-8b/extra_configs/llama3-8b-bpc-offline.json",
+        "device_map": null
+    }
+}

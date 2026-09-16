@@ -1,0 +1,13 @@
+{
+    "mistral-7b-ins":"mistralai/Mistral-7B-Instruct-v0.3",
+    "llama3-8b": "unsloth/llama-3-8b",
+    "llama3-1-8b-ins": "meta-llama/Llama-3.1-8B-Instruct",
+    "qwen2.5-7b-ins":"Qwen/Qwen2.5-7B-Instruct-1M",
+    
+    "Meta-Llama-3-8B-Instruct": "NousResearch/Meta-Llama-3-8B-Instruct",
+    "Llama-2-7b-chat-hf":"",
+    "Llama-2-7B-32K-Instruct": "togethercomputer/Llama-2-7B-32K-Instruct",
+    "Yi-9B-200K": "01-ai/Yi-9B-200K",
+    "Yi-6B-200K": "01-ai/Yi-6B-200K",
+    "Meta-Llama-3.1-70B-Instruct-AWQ-INT4": "hugging-quants/Meta-Llama-3.1-70B-Instruct-AWQ-INT4"
+}

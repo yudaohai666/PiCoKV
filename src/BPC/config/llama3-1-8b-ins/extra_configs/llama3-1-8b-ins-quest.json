@@ -1,0 +1,5 @@
+{
+    "fix_layers": [0, 1],
+    "token_budget": 1024,
+    "chunk_size": 16
+}

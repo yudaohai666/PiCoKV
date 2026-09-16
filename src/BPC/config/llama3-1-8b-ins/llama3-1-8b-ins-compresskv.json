@@ -1,0 +1,12 @@
+{
+    "model": {
+        "model_name": "meta-llama/Llama-3.1-8B-Instruct",
+        "model_dtype": "bf16",
+        "model_method": "compresskv",
+        "model_structure": "llama",
+        "save_ckp": null,
+        "load_ckp": null,
+        "config": "config/llama3-1-8b-ins/extra_configs/llama3-1-8b-ins-compresskv.json",
+        "device_map": null
+    }
+}

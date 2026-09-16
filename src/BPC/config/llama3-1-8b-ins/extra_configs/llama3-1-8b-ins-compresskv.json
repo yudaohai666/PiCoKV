@@ -1,0 +1,10 @@
+{
+    "fix_layers": [0, 1],
+    "window_size": 8,
+    "kernel_size": 5,
+    "max_capacity_prompt": 512,
+    "pooling": "avgpool",
+    "first_k": 4,
+    "layer_importance_score_path": "config/scores/Llama-3.1-8B-Instruct_layer_score.jsonl",
+    "importance_head_path": "config/scores/Llama-3.1-8B-Instruct_head_idx.json"
+}

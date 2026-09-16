@@ -26,7 +26,7 @@ BATCH_SIZE="${BATCH_SIZE:-1}"
 # 1200 is longbook_sum_en's ceiling; other tasks cap themselves via task yamls.
 MAX_GEN_TOKS="${MAX_GEN_TOKS:-1200}"
 # LIMIT is empty by default (full test set); set to e.g. 20 for a smoke run.
-LIMIT="${LIMIT:-200}"
+LIMIT="${LIMIT:-100}"
 TASKS="${TASKS:-infinitebench_passkey,infinitebench_kv_retrieval,infinitebench_number_string,infinitebench_code_run,infinitebench_code_debug,infinitebench_math_find,infinitebench_longdialogue_qa_en,infinitebench_longbook_qa_en,infinitebench_longbook_sum_en,infinitebench_longbook_choice_en,infinitebench_longbook_qa_chn}"
 APPLY_CHAT_TEMPLATE="${APPLY_CHAT_TEMPLATE:-1}"
 # Override the python runner's auto results dir (results/infinitebench/{MODEL}/{TAG}/).
@@ -60,6 +60,9 @@ OSCAR_NUM_BITS="${OSCAR_NUM_BITS:-2}"; OSCAR_QUANT_MODE="${OSCAR_QUANT_MODE:-k-c
 OSCAR_KV_ROTATION="${OSCAR_KV_ROTATION:-hadamard}"; OSCAR_KV_NORM="${OSCAR_KV_NORM:-1}"; OSCAR_EVICT="${OSCAR_EVICT:-256}"; OSCAR_OFFLINE_V_HAD="${OSCAR_OFFLINE_V_HAD:-1}"
 # polar (src/PolarQuant)
 POLAR_MODE="${POLAR_MODE:-mixed}"; POLAR_RBITS="${POLAR_RBITS:-3}"; POLAR_TBITS="${POLAR_TBITS:-3}"; POLAR_VBITS="${POLAR_VBITS:-2}"
+# bpc (src/BPC); default = offline (python default picks the mixlen-mixdata projection)
+BPC_MASK_OUT="${BPC_MASK_OUT:-0.98}"; BPC_MIN_REMAIN="${BPC_MIN_REMAIN:-128}"; BPC_ERR_RATIO="${BPC_ERR_RATIO:-0.1}"; BPC_FIX_LAYERS="${BPC_FIX_LAYERS:-0,1}"
+BPC_OFFLINE_PROJ_PATH="${BPC_OFFLINE_PROJ_PATH:-}"
 
 # Build METHOD_ARGS[] and TAG for a method. Needs REPO_ROOT, MODEL_TAG + the
 # per-method defaults above. picokv TAG matches run_infinitebench.py's python
@@ -95,6 +98,12 @@ build_method_args() {
     polar)
       METHOD_ARGS=(--polar-mode "${POLAR_MODE}" --polar-rbits "${POLAR_RBITS}" --polar-tbits "${POLAR_TBITS}" --polar-vbits "${POLAR_VBITS}")
       TAG="polar_${POLAR_MODE}_${POLAR_RBITS}${POLAR_TBITS}${POLAR_VBITS}"
+      ;;
+    bpc)
+      METHOD_ARGS=(--bpc-mask-out "${BPC_MASK_OUT}" --bpc-min-remain "${BPC_MIN_REMAIN}"
+        --bpc-err-ratio "${BPC_ERR_RATIO}" --bpc-fix-layers "${BPC_FIX_LAYERS}")
+      [ -n "${BPC_OFFLINE_PROJ_PATH}" ] && METHOD_ARGS+=(--bpc-offline-proj-path "${BPC_OFFLINE_PROJ_PATH}")
+      TAG="bpc_offline"
       ;;
   esac
 }

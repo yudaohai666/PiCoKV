@@ -1,0 +1,11 @@
+{
+    "enable": true,
+    "fix_layers": [0, 1],
+    "mask_out": 0.98,
+    "min_remain": 128,
+    "token_budget": null,
+    "err_ratio": 0.1,
+    "use_offline_proj": true,
+    "offline_proj_path": "config/projections/llama3-8b-mixlen-mixdata-projection.pt",
+    "use_cuda_kernel": false
+}

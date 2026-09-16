@@ -54,6 +54,9 @@ OSCAR_NUM_BITS="${OSCAR_NUM_BITS:-2}"; OSCAR_QUANT_MODE="${OSCAR_QUANT_MODE:-k-c
 OSCAR_KV_ROTATION="${OSCAR_KV_ROTATION:-hadamard}"; OSCAR_KV_NORM="${OSCAR_KV_NORM:-1}"; OSCAR_EVICT="${OSCAR_EVICT:-256}"; OSCAR_OFFLINE_V_HAD="${OSCAR_OFFLINE_V_HAD:-1}"
 # polar (src/PolarQuant)
 POLAR_MODE="${POLAR_MODE:-mixed}"; POLAR_RBITS="${POLAR_RBITS:-3}"; POLAR_TBITS="${POLAR_TBITS:-3}"; POLAR_VBITS="${POLAR_VBITS:-2}"
+# bpc (src/BPC); default = offline (mixlen-mixdata projection)
+BPC_MASK_OUT="${BPC_MASK_OUT:-0.98}"; BPC_MIN_REMAIN="${BPC_MIN_REMAIN:-128}"; BPC_ERR_RATIO="${BPC_ERR_RATIO:-0.1}"; BPC_FIX_LAYERS="${BPC_FIX_LAYERS:-0,1}"
+BPC_OFFLINE_PROJ_PATH="${BPC_OFFLINE_PROJ_PATH:-${REPO_ROOT}/src/BPC/ckp/projections/llama3-1-8b-ins-projection-mixlen-mixdata.pt}"
 
 # Build METHOD_ARGS[] and TAG for a method. Needs REPO_ROOT, MODEL_TAG + the
 # per-method defaults above. picokv TAG matches run_ruler/run_infinitebench's
@@ -103,6 +106,15 @@ build_method_args() {
     polar)
       METHOD_ARGS=(--polar-mode "${POLAR_MODE}" --polar-rbits "${POLAR_RBITS}" --polar-tbits "${POLAR_TBITS}" --polar-vbits "${POLAR_VBITS}")
       TAG="polar_${POLAR_MODE}_${POLAR_RBITS}${POLAR_TBITS}${POLAR_VBITS}"
+      ;;
+    bpc)
+      METHOD_ARGS=(--bpc-mask-out "${BPC_MASK_OUT}" --bpc-min-remain "${BPC_MIN_REMAIN}"
+        --bpc-err-ratio "${BPC_ERR_RATIO}" --bpc-fix-layers "${BPC_FIX_LAYERS}")
+      TAG="bpc"
+      if [ -n "${BPC_OFFLINE_PROJ_PATH}" ]; then
+        METHOD_ARGS+=(--bpc-offline-proj-path "${BPC_OFFLINE_PROJ_PATH}")
+        TAG="bpc_offline"
+      fi
       ;;
   esac
 }

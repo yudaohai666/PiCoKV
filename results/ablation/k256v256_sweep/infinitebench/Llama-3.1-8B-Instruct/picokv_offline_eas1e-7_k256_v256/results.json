@@ -1,0 +1,137 @@
+{
+  "results": {
+    "infinitebench_passkey": {
+      "name": "infinitebench_passkey",
+      "alias": "infinitebench_passkey",
+      "sample_len": 100,
+      "score,none": 1.0,
+      "score_stderr,none": 0.0
+    },
+    "infinitebench_kv_retrieval": {
+      "name": "infinitebench_kv_retrieval",
+      "alias": "infinitebench_kv_retrieval",
+      "sample_len": 100,
+      "score,none": 0.01,
+      "score_stderr,none": 0.01
+    },
+    "infinitebench_number_string": {
+      "name": "infinitebench_number_string",
+      "alias": "infinitebench_number_string",
+      "sample_len": 100,
+      "score,none": 0.86,
+      "score_stderr,none": 0.0348735088019777
+    },
+    "infinitebench_code_run": {
+      "name": "infinitebench_code_run",
+      "alias": "infinitebench_code_run",
+      "sample_len": 100,
+      "score,none": 0.06,
+      "score_stderr,none": 0.023868325657594204
+    },
+    "infinitebench_code_debug": {
+      "name": "infinitebench_code_debug",
+      "alias": "infinitebench_code_debug",
+      "sample_len": 100,
+      "score,none": 0.01,
+      "score_stderr,none": 0.01
+    },
+    "infinitebench_math_find": {
+      "name": "infinitebench_math_find",
+      "alias": "infinitebench_math_find",
+      "sample_len": 100,
+      "score,none": 0.5,
+      "score_stderr,none": 0.050251890762960605
+    },
+    "infinitebench_longdialogue_qa_en": {
+      "name": "infinitebench_longdialogue_qa_en",
+      "alias": "infinitebench_longdialogue_qa_en",
+      "sample_len": 100,
+      "score,none": 0.18,
+      "score_stderr,none": 0.03861229196653691
+    },
+    "infinitebench_longbook_qa_en": {
+      "name": "infinitebench_longbook_qa_en",
+      "alias": "infinitebench_longbook_qa_en",
+      "sample_len": 100,
+      "score,none": 0.30306089955431137,
+      "score_stderr,none": 0.03553027357261354
+    },
+    "infinitebench_longbook_sum_en": {
+      "name": "infinitebench_longbook_sum_en",
+      "alias": "infinitebench_longbook_sum_en",
+      "sample_len": 100,
+      "score,none": 0.2759407236510382,
+      "score_stderr,none": 0.005121456037676556
+    },
+    "infinitebench_longbook_choice_en": {
+      "name": "infinitebench_longbook_choice_en",
+      "alias": "infinitebench_longbook_choice_en",
+      "sample_len": 100,
+      "score,none": 0.68,
+      "score_stderr,none": 0.046882617226215076
+    },
+    "infinitebench_longbook_qa_chn": {
+      "name": "infinitebench_longbook_qa_chn",
+      "alias": "infinitebench_longbook_qa_chn",
+      "sample_len": 100,
+      "score,none": 0.35413995382070285,
+      "score_stderr,none": 0.03657191007053964
+    }
+  },
+  "config": {
+    "model": "MyModel",
+    "model_args": "pretrained=/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct,max_length=131072",
+    "batch_size": 1,
+    "batch_sizes": [],
+    "device": null,
+    "use_cache": null,
+    "limit": 100,
+    "bootstrap_iters": 100000,
+    "gen_kwargs": null,
+    "random_seed": 42,
+    "numpy_seed": 42,
+    "torch_seed": 42,
+    "fewshot_seed": 42
+  },
+  "run_config": {
+    "model": "/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct",
+    "method": "picokv",
+    "k_bits": 256,
+    "v_bits": 256,
+    "sink_size": 64,
+    "local_size": 256,
+    "exp_bits": 4,
+    "eas": 1e-07,
+    "zerorope": 20,
+    "use_pruning": false,
+    "prune_mode": 3,
+    "log_eps": -10.0,
+    "group_size": 32,
+    "residual_length": 32,
+    "num_bits": 2,
+    "quant_mode": "k-channel",
+    "kv_rotation": "hadamard",
+    "kv_norm": "1",
+    "residual_evict_size": 256,
+    "offline_v_hadamard": true,
+    "offline": true,
+    "offline_proj_path": null,
+    "polar_mode": "mixed",
+    "polar_rbits": 3,
+    "polar_tbits": 3,
+    "polar_vbits": 2,
+    "tasks": "infinitebench_passkey,infinitebench_kv_retrieval,infinitebench_number_string,infinitebench_code_run,infinitebench_code_debug,infinitebench_math_find,infinitebench_longdialogue_qa_en,infinitebench_longbook_qa_en,infinitebench_longbook_sum_en,infinitebench_longbook_choice_en,infinitebench_longbook_qa_chn",
+    "max_length": 131072,
+    "batch_size": 1,
+    "max_gen_toks": 1200,
+    "limit": 100,
+    "num_fewshot": 0,
+    "seed": 42,
+    "output_path": "results/ablation/k256v256_sweep/infinitebench/Llama-3.1-8B-Instruct/picokv_offline_k256_v256/",
+    "write_out": true,
+    "apply_chat_template": true,
+    "fewshot_as_multiturn": false,
+    "add_bos_token": false,
+    "prefix_token_id": null
+  }
+}

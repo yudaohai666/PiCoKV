@@ -1,0 +1,12 @@
+{
+    "model": {
+        "model_name": "mistralai/Mistral-7B-Instruct-v0.3",
+        "model_dtype": "bf16",
+        "model_method": "rocketkv",
+        "model_structure": "mistral",
+        "save_ckp": null,
+        "load_ckp": null,
+        "config": "config/mistral-7b-ins/extra_configs/mistral-7b-ins-rocketkv.json",
+        "device_map": null
+    }
+}

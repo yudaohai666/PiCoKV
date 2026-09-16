@@ -44,6 +44,17 @@ OSCAR_SRC = Path(__file__).resolve().parents[1] / "src" / "OScaR-KV-Quant"
 # sys.path. See _load_polar_model for the (models-package) name-collision handling.
 POLAR_SRC = Path(__file__).resolve().parents[1] / "src" / "PolarQuant"
 
+# BPC (src/BPC) ships a self-contained hash-based sparse-attention patch
+# (bpc.bpc.bpc.modify + AllCache) with a pure-PyTorch fallback -- no CUDA
+# extension build required. _load_bpc_model puts its package root on
+# sys.path so `import bpc.bpc.bpc` resolves.
+BPC_SRC = Path(__file__).resolve().parents[1] / "src" / "BPC"
+# Default offline hash-projection checkpoint (mixed-length + mixed-data
+# calibration); BPC's online (random) projection is not evaluated here.
+BPC_DEFAULT_OFFLINE_PROJ_PATH = str(
+    BPC_SRC / "ckp" / "projections" / "llama3-1-8b-ins-projection-mixlen-mixdata.pt"
+)
+
 # make_cache is a zero-arg callable returning a fresh QuantKVCache (picokv), or
 # None for dense baselines (the model uses its default cache).
 CacheFactory = Optional[Callable[[], object]]
@@ -113,6 +124,8 @@ def output_tag(
         return f"kivi_k{k_bits}_v{v_bits}"
     if method == "oscar":
         return f"oscar_int{num_bits}"
+    if method == "bpc":
+        return "bpc_offline"
     if method != "picokv":
         return method
     if full_tag:
@@ -509,6 +522,76 @@ def _load_polar_model(
     return model, tokenizer, None
 
 
+def _load_bpc_model(
+    model_name: str,
+    *,
+    mask_out: float = 0.98,
+    min_remain: int = 128,
+    token_budget: Optional[int] = None,
+    err_ratio: float = 0.1,
+    fix_layers: Optional[list[int]] = None,
+    use_cuda_kernel: bool = True,
+    offline_proj_path: Optional[str] = BPC_DEFAULT_OFFLINE_PROJ_PATH,
+) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
+    """Load a HF model patched with BPC hash-based sparse attention (src/BPC).
+
+    BPC's ``modify()`` replaces each layer's attention forward: prefill
+    delegates to flash_attention_2 while also caching KV + a learned 64-bit
+    binary hash; decode selects top-k KV by hash score. ``make_cache`` hands
+    the runner a fresh ``AllCache`` (a ``transformers.Cache``) per call, same
+    shape as picokv's ``StandaloneLlamaCache`` factory. Only Llama / Mistral /
+    Qwen2 attention classes are patched (see bpc.bpc.bpc.SUPPORTED_ATTENTION_CLASSES);
+    Qwen3 is not yet supported by this method.
+
+    Defaults mirror src/BPC/config/llama3-1-8b-ins/extra_configs/llama3-1-8b-ins-bpc-offline.json
+    (``fix_layers=[0, 1]``, ``use_cuda_kernel=True``, offline hash projection). Pass
+    ``offline_proj_path=None`` to fall back to BPC's online (random) projection instead.
+    """
+    if str(BPC_SRC) not in sys.path:
+        sys.path.insert(0, str(BPC_SRC))
+    from bpc.bpc.bpc import modify, AllCache, load_offline_projections
+
+    config = load_model_config(model_name)
+    if torch.cuda.is_available() and torch.cuda.device_count() <= 1:
+        device_map = {"": 0}
+    else:
+        device_map = _auto_device_map()
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        config=config,
+        device_map=device_map,
+        torch_dtype=torch.bfloat16,
+        attn_implementation="flash_attention_2",  # BPC prefill delegates to the flash forward.
+    )
+    if device_map is None and torch.cuda.is_available():
+        model = model.to("cuda")
+
+    use_offline_proj = offline_proj_path is not None
+    bpc_cfg = dict(
+        enable=True,
+        fix_layers=fix_layers if fix_layers is not None else [0, 1],
+        mask_out=mask_out,
+        min_remain=min_remain,
+        token_budget=token_budget,
+        err_ratio=err_ratio,
+        use_offline_proj=use_offline_proj,
+        offline_proj_path=offline_proj_path,
+        use_cuda_kernel=use_cuda_kernel,
+    )
+    modify(model, config=bpc_cfg)
+    model.eval()
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    # Load once here (not per make_cache() call) so every request's AllCache
+    # shares the same projection tensors instead of re-reading the .pt file.
+    offline_projs = load_offline_projections(offline_proj_path) if use_offline_proj else None
+
+    def make_cache():
+        return AllCache(mask_out, min_remain, token_budget, err_ratio, use_cuda_kernel, offline_projs)
+
+    return model, tokenizer, make_cache
+
+
 def _load_baseline_model(
     model_name: str,
     *,
@@ -568,6 +651,13 @@ def load_model(
     polar_rbits: int = 3,
     polar_tbits: int = 3,
     polar_vbits: int = 2,
+    bpc_mask_out: float = 0.98,
+    bpc_min_remain: int = 128,
+    bpc_token_budget: Optional[int] = None,
+    bpc_err_ratio: float = 0.1,
+    bpc_fix_layers: Optional[list[int]] = None,
+    bpc_use_cuda_kernel: bool = True,
+    bpc_offline_proj_path: Optional[str] = BPC_DEFAULT_OFFLINE_PROJ_PATH,
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
     """Load a HF model+tokenizer and return ``(model, tokenizer, make_cache)``.
 
@@ -588,6 +678,16 @@ def load_model(
                                  ``polar_mode`` / ``polar_rbits`` / ``polar_tbits`` /
                                  ``polar_vbits`` set the PolarQuant configuration.
                                  ``make_cache`` is ``None`` (PolarQuant owns its cache).
+      * ``bpc``               -> ``_load_bpc_model`` (src/BPC); hash-based sparse
+                                 attention, ``bpc_mask_out`` / ``bpc_min_remain`` /
+                                 ``bpc_token_budget`` / ``bpc_err_ratio`` /
+                                 ``bpc_fix_layers`` / ``bpc_use_cuda_kernel`` configure
+                                 it (defaults match config/llama3-1-8b-ins/extra_configs/
+                                 llama3-1-8b-ins-bpc-offline.json). ``bpc_offline_proj_path``
+                                 defaults to the learned offline hash projection
+                                 (``BPC_DEFAULT_OFFLINE_PROJ_PATH``); pass ``None`` to fall
+                                 back to BPC's online (random) projection.
+                                 ``make_cache`` returns a fresh ``AllCache`` per call.
       * flash_attention_2 / sdpa / eager -> dense full-precision baseline;
                                  ``make_cache`` is ``None`` (default KV cache).
     """
@@ -642,8 +742,20 @@ def load_model(
             vbits=polar_vbits,
         )
 
+    if method == "bpc":
+        return _load_bpc_model(
+            model_name,
+            mask_out=bpc_mask_out,
+            min_remain=bpc_min_remain,
+            token_budget=bpc_token_budget,
+            err_ratio=bpc_err_ratio,
+            fix_layers=bpc_fix_layers,
+            use_cuda_kernel=bpc_use_cuda_kernel,
+            offline_proj_path=bpc_offline_proj_path,
+        )
+
     if method not in BASELINE_ATTN:
         raise ValueError(
-            f"Unknown method '{method}'. Supported: 'picokv', 'kivi', 'oscar', 'polar', {sorted(BASELINE_ATTN)}."
+            f"Unknown method '{method}'. Supported: 'picokv', 'kivi', 'oscar', 'polar', 'bpc', {sorted(BASELINE_ATTN)}."
         )
     return _load_baseline_model(model_name, attn_implementation=method)

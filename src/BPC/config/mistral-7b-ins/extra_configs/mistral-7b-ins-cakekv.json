@@ -1,0 +1,8 @@
+{
+    "fix_layers": [0, 1],
+    "window_size": 8,
+    "max_capacity_prompt": 512,
+    "tau1": 0.8,
+    "tau2": 0.5,
+    "gamma": 200.0
+}

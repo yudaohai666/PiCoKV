@@ -1,0 +1,137 @@
+{
+  "results": {
+    "infinitebench_passkey": {
+      "name": "infinitebench_passkey",
+      "alias": "infinitebench_passkey",
+      "sample_len": 100,
+      "score,none": 1.0,
+      "score_stderr,none": 0.0
+    },
+    "infinitebench_kv_retrieval": {
+      "name": "infinitebench_kv_retrieval",
+      "alias": "infinitebench_kv_retrieval",
+      "sample_len": 100,
+      "score,none": 0.04,
+      "score_stderr,none": 0.019694638556693237
+    },
+    "infinitebench_number_string": {
+      "name": "infinitebench_number_string",
+      "alias": "infinitebench_number_string",
+      "sample_len": 100,
+      "score,none": 1.0,
+      "score_stderr,none": 0.0
+    },
+    "infinitebench_code_run": {
+      "name": "infinitebench_code_run",
+      "alias": "infinitebench_code_run",
+      "sample_len": 100,
+      "score,none": 0.0,
+      "score_stderr,none": 0.0
+    },
+    "infinitebench_code_debug": {
+      "name": "infinitebench_code_debug",
+      "alias": "infinitebench_code_debug",
+      "sample_len": 100,
+      "score,none": 0.11,
+      "score_stderr,none": 0.031446603773522014
+    },
+    "infinitebench_math_find": {
+      "name": "infinitebench_math_find",
+      "alias": "infinitebench_math_find",
+      "sample_len": 100,
+      "score,none": 0.55,
+      "score_stderr,none": 0.05
+    },
+    "infinitebench_longdialogue_qa_en": {
+      "name": "infinitebench_longdialogue_qa_en",
+      "alias": "infinitebench_longdialogue_qa_en",
+      "sample_len": 100,
+      "score,none": 0.13,
+      "score_stderr,none": 0.033799766898963114
+    },
+    "infinitebench_longbook_qa_en": {
+      "name": "infinitebench_longbook_qa_en",
+      "alias": "infinitebench_longbook_qa_en",
+      "sample_len": 100,
+      "score,none": 0.1786713735946616,
+      "score_stderr,none": 0.020934659607596877
+    },
+    "infinitebench_longbook_sum_en": {
+      "name": "infinitebench_longbook_sum_en",
+      "alias": "infinitebench_longbook_sum_en",
+      "sample_len": 100,
+      "score,none": 0.27832848787804476,
+      "score_stderr,none": 0.004606401348544022
+    },
+    "infinitebench_longbook_choice_en": {
+      "name": "infinitebench_longbook_choice_en",
+      "alias": "infinitebench_longbook_choice_en",
+      "sample_len": 100,
+      "score,none": 0.7,
+      "score_stderr,none": 0.04605661864718383
+    },
+    "infinitebench_longbook_qa_chn": {
+      "name": "infinitebench_longbook_qa_chn",
+      "alias": "infinitebench_longbook_qa_chn",
+      "sample_len": 100,
+      "score,none": 0.27461778328091424,
+      "score_stderr,none": 0.03102821594143352
+    }
+  },
+  "config": {
+    "model": "MyModel",
+    "model_args": "pretrained=/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Qwen3-8B,max_length=131072",
+    "batch_size": 1,
+    "batch_sizes": [],
+    "device": null,
+    "use_cache": null,
+    "limit": 100,
+    "bootstrap_iters": 100000,
+    "gen_kwargs": null,
+    "random_seed": 42,
+    "numpy_seed": 42,
+    "torch_seed": 42,
+    "fewshot_seed": 42
+  },
+  "run_config": {
+    "model": "/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Qwen3-8B",
+    "method": "picokv",
+    "k_bits": 256,
+    "v_bits": 256,
+    "sink_size": 64,
+    "local_size": 256,
+    "exp_bits": 4,
+    "eas": 1e-07,
+    "zerorope": 20,
+    "use_pruning": false,
+    "prune_mode": 3,
+    "log_eps": -10.0,
+    "group_size": 32,
+    "residual_length": 32,
+    "num_bits": 2,
+    "quant_mode": "k-channel",
+    "kv_rotation": "hadamard",
+    "kv_norm": "1",
+    "residual_evict_size": 256,
+    "offline_v_hadamard": true,
+    "offline": true,
+    "offline_proj_path": null,
+    "polar_mode": "mixed",
+    "polar_rbits": 3,
+    "polar_tbits": 3,
+    "polar_vbits": 2,
+    "tasks": "infinitebench_passkey,infinitebench_kv_retrieval,infinitebench_number_string,infinitebench_code_run,infinitebench_code_debug,infinitebench_math_find,infinitebench_longdialogue_qa_en,infinitebench_longbook_qa_en,infinitebench_longbook_sum_en,infinitebench_longbook_choice_en,infinitebench_longbook_qa_chn",
+    "max_length": 131072,
+    "batch_size": 1,
+    "max_gen_toks": 1200,
+    "limit": 100,
+    "num_fewshot": 0,
+    "seed": 42,
+    "output_path": "results/ablation/k256v256_sweep/infinitebench/Qwen3-8B/picokv_offline_k256_v256/",
+    "write_out": true,
+    "apply_chat_template": true,
+    "fewshot_as_multiturn": false,
+    "add_bos_token": false,
+    "prefix_token_id": null
+  }
+}
