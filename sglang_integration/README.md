@@ -163,7 +163,8 @@ the full decode graph.
 At 120k, peak decode throughput is 573 tok/s for picokv versus 122 tok/s for
 flashinfer (4.7x). To reproduce:
 `ITL_REPS=2 ITL_WARM_LEN=1024 ./run_itl.sh <gpu> pk_8k_b16 picokv 8000 16 128 bcg`
-(and `flashinfer ... full`).
+(and `flashinfer ... full`). Without a projection for the random-weight model,
+the backend runs online. That changes prefill, but decode ITL is the same.
 
 Quality (greedy decoding, offline projections, `eas=0`):
 
@@ -212,7 +213,9 @@ Model dirs default to `llama31_8b_rand` (timing) / `llama31_8b_instruct`
 - Speed: `run_itl.sh` (see its header) drives `scripts/bench_itl.py
   <backend> <plen> <batch> <gen> [reps] [memf]`.
 - Smoke test: `scripts/niah_engine_check.py` runs an 8k haystack with two
-  needles through `sgl.Engine` on real weights.
+  needles through `sgl.Engine` on real weights. Set `NIAH_BATCH=4` for a ragged
+  batch and `BENCH_GRAPHS=1 BENCH_DECODE_GRAPH=breakable` for graph mode. Every
+  output must print `needles found: PASS`.
 - Accuracy (`scripts/eval/`). Each benchmark is split into a build/score half,
   which runs in the PiCoKV repo env (transformers 4.53 + lm_eval), and an infer
   half, which runs in the sglang env:
