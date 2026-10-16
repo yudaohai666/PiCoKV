@@ -20,7 +20,11 @@ class StandaloneConfig:
     direction_sample_size: int | None = 8192
     sink_size: int = 64
     local_size: int = 256
-    eas: float = 0.01
+    # EAS dense retention is OFF by default (user directive 2026-10-14):
+    # window = sink+local exactly.  It also unlocks incremental chunk-append
+    # (no cross-chunk error selection).  Set >0 to re-enable; prepare
+    # validates [0, 0.5).
+    eas: float = 0.0
     zerorope: int = 20
     exp_bits: int = 4
     seed: int = 0

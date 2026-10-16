@@ -153,6 +153,16 @@ def _select_eas_and_kept_indices(
     topk path, so this one path serves all sequence lengths.
     """
     length = int(key_error.shape[-1])
+    if int(eas_size) <= 0:
+        # EAS disabled (eas=0): no dense retention beyond sink+local; every
+        # global token stays compressed.  Identity kept-index map, no topk.
+        kept = torch.arange(
+            length, device=key_error.device, dtype=torch.int32
+        ).expand(*key_error.shape[:-1], length).contiguous()
+        eas = torch.empty(
+            *key_error.shape[:-1], 0, device=key_error.device, dtype=torch.int32
+        )
+        return eas, kept
     key_count = min(int(eas_size), length)
     key_indices = torch.topk(key_error, k=key_count, dim=-1).indices
     if key_count == length:
@@ -194,6 +204,10 @@ def _select_eas_indices(
     coalesced gather.
     """
     length = int(key_error.shape[-1])
+    if int(eas_size) <= 0:
+        return torch.empty(
+            *key_error.shape[:-1], 0, device=key_error.device, dtype=torch.int32
+        )
     key_count = min(int(eas_size), length)
     key_indices = torch.topk(key_error, k=key_count, dim=-1).indices
     if key_count == length:
@@ -249,8 +263,8 @@ def _validate_prepare_inputs(
         raise ValueError("full_key/full_value must be on the same CUDA device")
     if full_key.dtype != torch.bfloat16 or full_value.dtype != torch.bfloat16:
         raise TypeError("prepare_kv_cache requires bfloat16 full_key/full_value")
-    if not 0.0 < float(eas) < 0.5:
-        raise ValueError(f"eas must be in (0, 0.5); got {eas}")
+    if not 0.0 <= float(eas) < 0.5:
+        raise ValueError(f"eas must be in [0, 0.5); got {eas}")
     if direction_sample_size is not None and int(direction_sample_size) <= 0:
         raise ValueError("direction_sample_size must be positive or None")
 
@@ -406,7 +420,7 @@ def prepare_kv_cache(
     if not value_fused:
         packed_value_all = pack_value_token_cuda(value_block.codes)
         value_err = value_block.err
-    eas_size = max(1, int(global_len * float(eas)))
+    eas_size = int(global_len * float(eas))
     eas_indices, kept_indices = _select_eas_and_kept_indices(
         key_err,
         value_err,

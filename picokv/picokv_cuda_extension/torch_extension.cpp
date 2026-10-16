@@ -221,8 +221,77 @@ void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic_fn(
       exp_bits,
       tile_size,
       key_transposed,
-      attention_scale
+      attention_scale,
+      at::Tensor(),
+      at::Tensor(),
+      at::Tensor()
     );
+}
+
+// Split form of picokv_decode_tail_v1_exp8_tiled_gqa4_atomic for callers that
+// overlap the dense-window attention with the query side on another stream:
+// prep = quantize+pack the projected query and zero the accumulators (needs
+// only the projected query); main = global kernel + value projection (needs
+// the dense LSE/output). Same kernels, same order as the fused tail op.
+void picokv_decode_tail_prep_fn(
+  at::Tensor projected_query,
+  at::Tensor packed_projected_query,
+  at::Tensor query_scale,
+  at::Tensor glob_code_output,
+  at::Tensor glob_den
+) {
+    picokv_quantize_pack_zero_projected_query(
+      projected_query,
+      packed_projected_query,
+      query_scale,
+      glob_code_output,
+      glob_den
+    );
+}
+
+void picokv_decode_tail_main_fn(
+  at::Tensor packed_projected_query,
+  at::Tensor packed_key,
+  at::Tensor packed_value_sign,
+  at::Tensor query_scale,
+  at::Tensor dense_lse,
+  at::Tensor dense_output,
+  at::Tensor glob_code_output,
+  at::Tensor glob_den,
+  at::Tensor value_proj,
+  at::Tensor attn_output,
+  int exp_bits,
+  int tile_size,
+  int key_transposed,
+  double attention_scale,
+  at::Tensor global_lens,
+  at::Tensor sched_req,
+  at::Tensor sched_tile,
+  int proj_gemm
+) {
+    picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
+      packed_projected_query,
+      packed_key,
+      packed_value_sign,
+      query_scale,
+      dense_lse,
+      glob_code_output,
+      glob_den,
+      exp_bits,
+      tile_size,
+      key_transposed,
+      attention_scale,
+      global_lens,
+      sched_req,
+      sched_tile
+    );
+    if (proj_gemm && dense_output.scalar_type() == at::kBFloat16) {
+      picokv_fused_output_projection_gemm(
+        dense_output, glob_code_output, glob_den, value_proj, attn_output);
+    } else {
+      picokv_fused_output_projection(
+        dense_output, glob_code_output, glob_den, value_proj, attn_output);
+    }
 }
 
 void picokv_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic_fn(
@@ -269,7 +338,10 @@ void picokv_decode_tail_v1_exp8_tiled_gqa4_atomic_fn(
   int exp_bits,
   int tile_size,
   int key_transposed,
-  double attention_scale
+  double attention_scale,
+  at::Tensor global_lens,
+  at::Tensor sched_req,
+  at::Tensor sched_tile
 ) {
     picokv_decode_tail_v1_exp8_tiled_gqa4_atomic(
       projected_query,
@@ -286,8 +358,24 @@ void picokv_decode_tail_v1_exp8_tiled_gqa4_atomic_fn(
       exp_bits,
       tile_size,
       key_transposed,
-      attention_scale
+      attention_scale,
+      global_lens,
+      sched_req,
+      sched_tile
     );
+}
+
+
+void picokv_window_attn_fn(
+  at::Tensor kbuf,
+  at::Tensor vbuf,
+  at::Tensor lpl,
+  at::Tensor q,
+  at::Tensor out,
+  at::Tensor lse,
+  double sm_scale
+) {
+    picokv_window_attn(kbuf, vbuf, lpl, q, out, lse, sm_scale);
 }
 
 void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned_fn(
@@ -419,4 +507,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("picokv_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned_fn", &picokv_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned_fn, "picokv_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned_fn");
   m.def("picokv_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned_fn", &picokv_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned_fn, "picokv_decode_tail_v1_exp8_tiled_gqa4_atomic_pruned_fn");
   m.def("picokv_decode_tail_packed_v1_exp8_tiled_gqa4_atomic_pruned_fn", &picokv_decode_tail_packed_v1_exp8_tiled_gqa4_atomic_pruned_fn, "picokv_decode_tail_packed_v1_exp8_tiled_gqa4_atomic_pruned_fn");
+  m.def("picokv_window_attn_fn", &picokv_window_attn_fn, "picokv_window_attn_fn");
+  m.def("picokv_decode_tail_prep_fn", &picokv_decode_tail_prep_fn, "picokv_decode_tail_prep_fn");
+  m.def("picokv_decode_tail_main_fn", &picokv_decode_tail_main_fn, "picokv_decode_tail_main_fn");
 }

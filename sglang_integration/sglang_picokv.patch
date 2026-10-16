@@ -1,0 +1,170 @@
+diff --git a/python/sglang/srt/layers/attention/attention_registry.py b/python/sglang/srt/layers/attention/attention_registry.py
+index 2ed16e5..8e93d42 100644
+--- a/python/sglang/srt/layers/attention/attention_registry.py
++++ b/python/sglang/srt/layers/attention/attention_registry.py
+@@ -210,6 +210,15 @@ def create_torch_native_backend(runner):
+     return TorchNativeAttnBackend(runner)
+ 
+ 
++@register_attention_backend("picokv")
++def create_picokv_backend(runner):
++    # PiCoKV quantized-KV decode backend (batch=1, GQA=4, head_dim=128, bf16).
++    # Set PICOKV_OFFLINE_PROJ to an offline projection .pt for the serving path.
++    from sglang.srt.layers.attention.picokv_backend import PicoKVAttnBackend
++
++    return PicoKVAttnBackend(runner)
++
++
+ @register_attention_backend("flex_attention")
+ def create_flex_attention_backend(runner):
+     from sglang.srt.layers.attention.torch_flex_backend import TorchFlexAttnBackend
+diff --git a/python/sglang/srt/mem_cache/kv_cache_configurator.py b/python/sglang/srt/mem_cache/kv_cache_configurator.py
+index 6025de0..25bf018 100644
+--- a/python/sglang/srt/mem_cache/kv_cache_configurator.py
++++ b/python/sglang/srt/mem_cache/kv_cache_configurator.py
+@@ -1971,6 +1971,11 @@ class KVCacheConfigurator:
+     ) -> KVCache:
+         if self.kv_cache_dtype_str == "mxfp8":
+             pool_cls = MHATokenToKVPoolMXFP8
++        elif get_exec().kernel.attention_backend == "picokv":
++            # PiCoKV keeps its own compressed per-request cache and never reads
++            # the dense pool; use the no-op pool so no dense K/V buffers are
++            # allocated (frees that memory for the compressed caches).
++            pool_cls = NoOpMHATokenToKVPool
+         else:
+             pool_cls = (
+                 NoOpMHATokenToKVPool
+diff --git a/python/sglang/srt/model_executor/forward_batch_info.py b/python/sglang/srt/model_executor/forward_batch_info.py
+index 94b7b59..242496f 100644
+--- a/python/sglang/srt/model_executor/forward_batch_info.py
++++ b/python/sglang/srt/model_executor/forward_batch_info.py
+@@ -545,6 +545,9 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
+     # === Borrowed from ScheduleBatch: host metadata (CPU lists / mirrors) ===
+     # Optional seq_lens on cpu (CPU mirror of seq_lens)
+     seq_lens_cpu: Optional[torch.Tensor] = None
++    # Optional req_pool_indices on cpu (CPU mirror of req_pool_indices; not
++    # updated by in-place padding, so check its length before use)
++    req_pool_indices_cpu: Optional[torch.Tensor] = None
+ 
+     # For logprob
+     top_logprobs_nums: Optional[List[int]] = None
+@@ -906,6 +909,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
+             seq_lens_sum=batch.seq_lens_sum,
+             # Inputs aliased by reference from ScheduleBatch
+             seq_lens_cpu=seq_lens_cpu,
++            req_pool_indices_cpu=getattr(batch, "req_pool_indices_cpu", None),
+             orig_seq_lens=batch.orig_seq_lens,
+             out_cache_loc_dsv4=batch.out_cache_loc_dsv4,
+             engram_history=batch.engram_history,
+diff --git a/python/sglang/srt/model_executor/pool_configurator.py b/python/sglang/srt/model_executor/pool_configurator.py
+index 89dfb69..d2dd995 100644
+--- a/python/sglang/srt/model_executor/pool_configurator.py
++++ b/python/sglang/srt/model_executor/pool_configurator.py
+@@ -409,6 +409,16 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
+                 * kv_size
+             )
+ 
++            if get_exec().kernel.attention_backend == "picokv":
++                # PiCoKV stores only compressed global codes (key_bits+value_bits
++                # per token / kv-head / layer) instead of full-precision K/V, so
++                # the per-token KV budget is far smaller -> a much larger
++                # max_total_num_tokens (admission ceiling) fits the same memory.
++                import os as _os
++
++                _kb = int(_os.environ.get("PICOKV_KV_BITS", "320"))
++                cell_size = int(n * ((2 * _kb) // 8) * effective_num_layers)
++
+             if is_float4_e2m1fn_x2(kv_cache_dtype):
+                 from sglang.srt.layers.quantization.fp4_kv_cache_quant_method import (
+                     get_kv_cache_quant_method,
+diff --git a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+index 63f24d6..aef3a3d 100644
+--- a/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
++++ b/python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py
+@@ -194,6 +194,9 @@ def build_replay_fb_view(
+         seq_lens_cpu=(
+             None if forward_batch.seq_lens_cpu is None else buffers.seq_lens_cpu[:bs]
+         ),
++        # Unpadded CPU mirror (raw_bs rows) straight from the batch: lets a
++        # backend read host-side request ids without a device->host sync.
++        req_pool_indices_cpu=getattr(forward_batch, "req_pool_indices_cpu", None),
+         num_padding=bs - raw_bs,
+         encoder_lens=buffers.encoder_lens[:bs] if is_encoder_decoder else None,
+         out_cache_loc=getattr(forward_batch, "out_cache_loc", None),
+diff --git a/python/sglang/srt/model_executor/runner_backend/breakable_cuda_graph_backend.py b/python/sglang/srt/model_executor/runner_backend/breakable_cuda_graph_backend.py
+index 32aa6a9..12b813f 100644
+--- a/python/sglang/srt/model_executor/runner_backend/breakable_cuda_graph_backend.py
++++ b/python/sglang/srt/model_executor/runner_backend/breakable_cuda_graph_backend.py
+@@ -18,6 +18,7 @@ No torch.compile.
+ 
+ from __future__ import annotations
+ 
++import dataclasses
+ from contextlib import contextmanager
+ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+ 
+@@ -194,6 +195,16 @@ class BreakableCudaGraphBackend(DedupedCudaGraphMixin, BaseCudaGraphBackend):
+             return tuple(self._alloc_full_buffer(o, size) for o in output)
+         if isinstance(output, list):
+             return [self._alloc_full_buffer(o, size) for o in output]
++        if _is_dataclass_output(output):
++            # e.g. LogitsProcessorOutput: per-row tensor fields get a full
++            # buffer; everything else is carried over as-is.
++            return dataclasses.replace(
++                output,
++                **{
++                    name: val.new_empty((size, *val.shape[1:]))
++                    for name, val in _dataclass_tensor_fields(output)
++                },
++            )
+         raise TypeError(f"Unsupported BCG output type: {type(output)}")
+ 
+     def _slice_output(self, output: Any, num_tokens: int) -> Any:
+@@ -207,6 +218,14 @@ class BreakableCudaGraphBackend(DedupedCudaGraphMixin, BaseCudaGraphBackend):
+             return tuple(self._slice_output(item, num_tokens) for item in output)
+         if isinstance(output, list):
+             return [self._slice_output(item, num_tokens) for item in output]
++        if _is_dataclass_output(output):
++            return dataclasses.replace(
++                output,
++                **{
++                    name: val[:num_tokens]
++                    for name, val in _dataclass_tensor_fields(output)
++                },
++            )
+         raise TypeError(f"Unsupported BCG output type: {type(output)}")
+ 
+     def _copy_output_to_buffer(
+@@ -246,6 +265,16 @@ class BreakableCudaGraphBackend(DedupedCudaGraphMixin, BaseCudaGraphBackend):
+             for item, buffer in zip(output, output_buffer):
+                 self._copy_output_to_buffer(item, buffer, num_tokens)
+             return
++        if _is_dataclass_output(output) and type(output_buffer) is type(output):
++            for name, val in _dataclass_tensor_fields(output):
++                buf = getattr(output_buffer, name)
++                if not torch.is_tensor(buf):
++                    raise ValueError(
++                        "BCG output field structure changed between capture "
++                        f"sizes: {type(output).__name__}.{name}"
++                    )
++                self._copy_output_to_buffer(val, buf, num_tokens)
++            return
+         raise TypeError(
+             "Unsupported BCG output buffer pair: "
+             f"{type(output)} vs {type(output_buffer)}"
+@@ -276,3 +305,15 @@ class BreakableCudaGraphBackend(DedupedCudaGraphMixin, BaseCudaGraphBackend):
+         self._capture_inputs.clear()
+         self._pool = None
+         self._shared_output_buffer = None
++
++
++def _is_dataclass_output(output: Any) -> bool:
++    return dataclasses.is_dataclass(output) and not isinstance(output, type)
++
++
++def _dataclass_tensor_fields(output: Any):
++    """(name, tensor) for the dataclass's non-empty tensor fields."""
++    for f in dataclasses.fields(output):
++        val = getattr(output, f.name)
++        if torch.is_tensor(val) and val.dim() > 0:
++            yield f.name, val

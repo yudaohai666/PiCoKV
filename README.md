@@ -184,6 +184,15 @@ out = model.generate(
 Prompt attention stays exact SDPA; single-token generation routes through the
 CUDA decode path.
 
+## Serving with SGLang
+
+`sglang_integration/` adds `picokv` as an SGLang attention backend (continuous
+batching, decode CUDA graphs, offline projections with `eas=0`). It ships as a
+patch against upstream `sgl-project/sglang@567d5925` plus the backend file, and
+needs its own torch 2.13 environment. See
+[`sglang_integration/README.md`](sglang_integration/README.md) for setup,
+required server args, measured speed and quality, and known limitations.
+
 ## Layout
 
 Active core (`picokv/`):

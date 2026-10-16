@@ -49,7 +49,9 @@ def main() -> None:
         "direction_sample_size": 8192,
         "sink_size": 64,
         "local_size": 256,
-        "eas": 0.01,
+        # eas=0 is the default since the 2026-10-14 user directive: dense
+        # retention is sink+local exactly (window 320).
+        "eas": 0.0,
         "zerorope": 20,
         "exp_bits": 4,
         "seed": 0,

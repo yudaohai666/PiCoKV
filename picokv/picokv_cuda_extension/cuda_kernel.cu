@@ -2,10 +2,13 @@
 
 #include <stdint.h>
 #include <math.h>
+#include <mutex>
+#include <unordered_map>
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
+#include <cublas_v2.h>
 #include <mma.h>
 #include <torch/extension.h>
 #include <ATen/ATen.h>
@@ -163,6 +166,42 @@ __global__ void picokv_fused_output_projection_kernel(
     attn_output[dense_base + d] = picokv_from_float<scalar_t>(numerator * inv_den);
   }
 
+}
+
+// Round fp32 accumulated codes to bf16 for the tensor-core GEMM projection:
+// the same rounding picokv_code_for_projection applies elementwise in the
+// scalar kernel, so the GEMM multiplies the exact same bf16 values.
+__global__ void picokv_cast_code_bf16_kernel(
+  const float *__restrict__ src,
+  __nv_bfloat16 *__restrict__ dst,
+  const long numel
+) {
+  const long idx = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx < numel) {
+    dst[idx] = __float2bfloat16(src[idx]);
+  }
+}
+
+// GEMM-path epilogue: out = (dense + acc32) * (1 / (1 + den)). Identical
+// arithmetic to the scalar kernel's epilogue (fp32 add, fp32 scale, one bf16
+// round at the store); only the accumulated value's producer differs.
+template <typename scalar_t>
+__global__ void picokv_proj_gemm_epilogue_kernel(
+  const scalar_t *__restrict__ dense_output,  // [B,QH,S,D]
+  const float *__restrict__ glob_acc,         // [B,QH,S,D] fp32 GEMM output
+  const float *__restrict__ glob_den,         // [B,QH,S]
+  scalar_t *__restrict__ attn_output,         // [B,QH,S,D]
+  const int total,
+  const int D
+) {
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= total) {
+    return;
+  }
+  const long row = idx / D;
+  const float inv_den = 1.0f / (1.0f + glob_den[row]);
+  const float numerator = picokv_to_float(dense_output[idx]) + glob_acc[idx];
+  attn_output[idx] = picokv_from_float<scalar_t>(numerator * inv_den);
 }
 
 template <typename scalar_t>
@@ -569,6 +608,89 @@ __global__ void picokv_quantize_pack_projected_query_kernel(
   const int thread_idx = threadIdx.x;
   const int KBlocks = C >> 6;
   const long row_base = (long)row * C;
+
+  float local_max = 0.0f;
+  for (int c = thread_idx; c < C; c += blockDim.x) {
+    local_max = fmaxf(local_max, fabsf(picokv_to_float(projected_query[row_base + c])));
+  }
+
+  reduce_cache[thread_idx] = local_max;
+  __syncthreads();
+  for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+    if (thread_idx < stride) {
+      reduce_cache[thread_idx] = fmaxf(reduce_cache[thread_idx], reduce_cache[thread_idx + stride]);
+    }
+    __syncthreads();
+  }
+
+  if (thread_idx == 0) {
+    const float max_abs = fmaxf(reduce_cache[0], 1.1920928955078125e-7f);
+    row_scale = max_abs / 127.0f;
+    query_scale[row] = row_scale;
+  }
+  __syncthreads();
+
+  for (int c = thread_idx; c < C; c += blockDim.x) {
+    int q = (int)nearbyintf(picokv_to_float(projected_query[row_base + c]) / row_scale);
+    q = q < -127 ? -127 : q;
+    q = q > 127 ? 127 : q;
+    quant_cache[c] = (int8_t)q;
+  }
+  __syncthreads();
+
+  for (int task = thread_idx; task < KBlocks * 8; task += blockDim.x) {
+    const int kb = task >> 3;
+    const int plane = task & 7;
+    unsigned long long word = 0ULL;
+    #pragma unroll
+    for (int bit = 0; bit < 64; bit++) {
+      int q = (int)quant_cache[(kb << 6) + bit];
+      int selected = 0;
+      if (plane == 0) {
+        selected = q < 0;
+      } else {
+        q = q < 0 ? -q : q;
+        selected = (q >> (plane - 1)) & 1;
+      }
+      if (selected) {
+        word |= 1ULL << bit;
+      }
+    }
+    packed_projected_query[((long)row * KBlocks + kb) * 8 + plane] = (long)word;
+  }
+}
+
+// Quantize+pack with the tail accumulators zeroed in the same launch: each row
+// block also clears its [Cv] code accumulator and its denominator entry, which
+// is exactly what the removed cudaMemsetAsync wrote (same zeros, same stream,
+// still strictly before the main kernel reads/accumulates them). Saves one
+// kernel launch and the memset's full-tensor pass per decode layer.
+template <typename scalar_t>
+__global__ void picokv_quantize_pack_zero_projected_query_kernel(
+  const scalar_t *__restrict__ projected_query, // [B,H,S,C]
+  long *__restrict__ packed_projected_query,    // [B,H,S,C/64,8]
+  float *__restrict__ query_scale,              // [B,H,S]
+  float *__restrict__ code_zero,                // [B,H,S,Cv] accumulator to zero
+  float *__restrict__ den_zero,                 // [B,H,S] accumulator to zero
+  const int C,
+  const int Cv
+) {
+  __shared__ float reduce_cache[256];
+  __shared__ float row_scale;
+  __shared__ int8_t quant_cache[512];
+
+  const int row = blockIdx.x;
+  const int thread_idx = threadIdx.x;
+  const int KBlocks = C >> 6;
+  const long row_base = (long)row * C;
+  const long zero_base = (long)row * Cv;
+
+  for (int c = thread_idx; c < Cv; c += blockDim.x) {
+    code_zero[zero_base + c] = 0.0f;
+  }
+  if (thread_idx == 0) {
+    den_zero[row] = 0.0f;
+  }
 
   float local_max = 0.0f;
   for (int c = thread_idx; c < C; c += blockDim.x) {
@@ -2201,8 +2323,28 @@ __global__ void __launch_bounds__(256, 6) picokv_v1_expbits_atomic2_fixed_kernel
 // Runtime-Ck/Cv path with fixed 8-block unrolled score loops for Ck >= 320.
 // It keeps the current Ck=256/Cv=256 specialized kernels untouched, and covers
 // Ck/Cv in {128,192,256,320,384,448,512}.
-template <int GroupSize, bool KeyTransposedFixed, int ExpBits, int PruneMode>
-__global__ void __launch_bounds__(256, 6) picokv_v1_expbits_atomic2_runtime_unrolled_kernel(
+// MinBlocksPerSm feeds __launch_bounds__: 6 (the historical setting) caps the
+// kernel at ~40 registers/thread and spills heavily at Ck=320 (measured ~250MB
+// local-memory traffic per b16 decode layer). 4 allows 64 registers/thread and
+// removes most of those spills at the cost of occupancy (32 vs 48 warps/SM);
+// the dispatcher picks per PICOKV_TAIL_LB. Same arithmetic either way.
+// KBlocksT > 0 compiles the KBlocks unrolled loops (key load / key match /
+// query_block_abs) for that exact block count, dropping the dead `kb <
+// KBlocks` guarded iterations and the unused key_words registers; at the
+// production Ck=320 (KBlocks=5) that removes 3 of 8 predicated iterations on
+// an XU-issue-bound kernel. KBlocksT == 0 keeps the fully generic runtime form.
+// UseBmmaScore=1 replaces the popc key-match section with a tensor-core b1
+// bmma (m8n8k128 AND+POPC) score path: A rows 0-3 hold the query's positive
+// magnitude planes (mag & ~sign) and rows 4-7 the negative planes (mag & sign)
+// of the same bit, so ONE bmma per (chunk, bit) covers all four GQA-4 heads;
+// lanes exchange pos/neg halves with one shfl_xor(16). KBlocks=5 is 2.5 bmma
+// chunks -> 3 chunks with the last one zero-padded. All-integer arithmetic,
+// identical dots to the popc path (verified bitwise on single-writer shapes).
+// BlockTilesT = 256-token tiles per block (grid.x = ceil(L / (256*BT))). 2 is
+// the default; 1 doubles the grid for small launches (b1 at short L fills
+// only ~1 block/SM at BT=2) at the cost of 2x query staging + atomics.
+template <int GroupSize, bool KeyTransposedFixed, int ExpBits, int PruneMode, int MinBlocksPerSm = 6, int KBlocksT = 0, int UseBmmaScore = 0, int BlockTilesT = 2>
+__global__ void __launch_bounds__(256, MinBlocksPerSm) picokv_v1_expbits_atomic2_runtime_unrolled_kernel(
   const long *__restrict__ packed_projected_query,
   const long *__restrict__ packed_key,
   const long *__restrict__ packed_value_sign,
@@ -2220,11 +2362,19 @@ __global__ void __launch_bounds__(256, 6) picokv_v1_expbits_atomic2_runtime_unro
   const int Cv,
   const int query_scale_numel,
   const float attention_scale,
-  const float prune_log_eps
+  const float prune_log_eps,
+  const int *__restrict__ global_lens,
+  const int *__restrict__ sched_req,
+  const int *__restrict__ sched_tile
 ) {
   constexpr int MaxKBlocks = 8;
+  // Loop bound / array extent for the KBlocks-keyed loops: compile-time when
+  // specialized, MaxKBlocks with runtime guards when generic.
+  constexpr int KeyLoopBlocks = KBlocksT > 0 ? KBlocksT : MaxKBlocks;
+  // Compile-time KBlocks value for addressing (strides); runtime arg when generic.
+  constexpr int KeyAddrBlocks = KBlocksT > 0 ? KBlocksT : 0;
   constexpr int MaxQueryWords = MaxKBlocks * 8;
-  constexpr int BlockTiles = 2;
+  constexpr int BlockTiles = BlockTilesT;
   constexpr int TileGroups = kTileSize / 64;
   constexpr int QuantWarps = 8;
   constexpr int QuantPasses = (GroupSize * TileGroups + QuantWarps - 1) / QuantWarps;
@@ -2232,17 +2382,35 @@ __global__ void __launch_bounds__(256, 6) picokv_v1_expbits_atomic2_runtime_unro
   constexpr int MaxTaskSlots = GroupSize; // GroupSize * (512 / 2) / 256
   constexpr bool DoBlockPrune = (PruneMode & 1) != 0;
   constexpr bool DoPrefixPrune = (PruneMode & 2) != 0;
+  // bmma score path shapes: GQA-4 only (A rows 0-3 = query positive magnitude
+  // planes, rows 4-7 = negative planes of the same bit), KBlocks=5 (3 bmma
+  // chunks of 128 bits, chunk 2 zero-padded past kb 4), unpruned.
+  static_assert(!UseBmmaScore || (GroupSize == 4 && KBlocksT == 5 && PruneMode == 0),
+                "bmma score path is GQA-4 / Ck=320 / unpruned only");
+  // The bmma score loop sweeps the tile in 8-token groups (m8n8 B side).
+  constexpr int BmmaTokenGroups = kTileSize / 8;
+  constexpr int BmmaGroupPasses = BmmaTokenGroups / QuantWarps;
 
-  const int tile_block_idx = blockIdx.x;
+  const int _sched_bx = blockIdx.x;
+  // Block-scheduled (paged) grid: sched_req/sched_tile map each grid.x
+  // block to a (request, local-tile) pair so only REAL blocks launch
+  // (no batch-max over-launch). nullptr => legacy blockIdx derivation.
+  const int tile_block_idx = (sched_tile != nullptr) ? sched_tile[_sched_bx] : _sched_bx;
   const int S_idx = blockIdx.y;
   const int BKVH_idx = blockIdx.z;
-  const int B_idx = BKVH_idx / KVH;
-  const int KVH_idx = BKVH_idx - B_idx * KVH;
+  const int B_idx = (sched_req != nullptr) ? sched_req[_sched_bx] : (BKVH_idx / KVH);
+  const int KVH_idx = (sched_req != nullptr) ? BKVH_idx : (BKVH_idx - B_idx * KVH);
   const int thread_idx = threadIdx.x;
   const int qh_base = KVH_idx * GroupSize;
   const int lane_idx = thread_idx & 31;
   const int warp_idx = thread_idx >> 5;
   const int query_words = KBlocks * 8;
+
+  // Varlen (ragged batch): batch element b has L_b <= L real global tokens
+  // (L is the padded physical stride). Skip fully-padded blocks and bound the
+  // in-range token test by L_b so padding is neither read nor scored.
+  const int L_b = (global_lens != nullptr) ? global_lens[B_idx] : L;
+  if (tile_block_idx * (BlockTiles * kTileSize) >= L_b) return;
 
   __shared__ unsigned long long query_cache[GroupSize][MaxQueryWords];
   __shared__ int query_base_dot[GroupSize];
@@ -2254,6 +2422,17 @@ __global__ void __launch_bounds__(256, 6) picokv_v1_expbits_atomic2_runtime_unro
   __shared__ unsigned long long exp_planes[GroupSize][TileGroups][ExpBits];
   __shared__ float exp_scale2[GroupSize][TileGroups];
   __shared__ float exp_bias[GroupSize][TileGroups];
+  // bmma score staging. bmma_a[chunk][bit]: 8 A rows x 4 x 32-bit segments;
+  // row h (0-3) = a_pos of head h (mag & ~sign), row 4+h = a_neg (mag & sign).
+  // bmma_b[warp]: 8 key-sign columns x 4 segments for the warp's current
+  // 8-token group. bmma_qneg: popc(q_mag & q_sign) per (head, chunk, bit).
+  // All sized to 1 in popc mode so no shared memory is wasted.
+  constexpr int kBmmaChunks = UseBmmaScore ? 3 : 1;
+  constexpr int kBmmaBits = UseBmmaScore ? kQMagBits : 1;
+  constexpr int kBmmaRowWords = UseBmmaScore ? 32 : 1;
+  __shared__ __align__(128) unsigned int bmma_a[kBmmaChunks][kBmmaBits][kBmmaRowWords];
+  __shared__ __align__(128) unsigned int bmma_b[UseBmmaScore ? QuantWarps : 1][kBmmaRowWords];
+  __shared__ int bmma_qneg[UseBmmaScore ? GroupSize : 1][kBmmaChunks][kBmmaBits];
 
   for (int idx = thread_idx; idx < GroupSize * query_words; idx += blockDim.x) {
     const int hrel = idx / query_words;
@@ -2267,8 +2446,8 @@ __global__ void __launch_bounds__(256, 6) picokv_v1_expbits_atomic2_runtime_unro
   if (thread_idx < GroupSize) {
     int base_dot = 0;
     #pragma unroll
-    for (int kb = 0; kb < MaxKBlocks; kb++) {
-      if (kb < KBlocks) {
+    for (int kb = 0; kb < KeyLoopBlocks; kb++) {
+      if (KBlocksT > 0 || kb < KBlocks) {
         int block_abs = 0;
         #pragma unroll
         for (int bit_idx = 1; bit_idx <= kQMagBits; bit_idx++) {
@@ -2291,6 +2470,48 @@ __global__ void __launch_bounds__(256, 6) picokv_v1_expbits_atomic2_runtime_unro
   }
   __syncthreads();
 
+  if constexpr (UseBmmaScore) {
+    // Stage bmma_a: idx = ((chunk * kQMagBits + bit) * GroupSize + hrel) * 4 + seg.
+    // Rows 0-3 = a_pos of heads 0-3, rows 4-7 = a_neg. Chunk 2 covers kb 4
+    // only, so its segments 2-3 stay zero.
+    for (int idx = thread_idx; idx < 3 * kQMagBits * GroupSize * 4; idx += blockDim.x) {
+      const int seg = idx & 3;
+      const int hrel = (idx >> 2) & 3;
+      const int bit = (idx >> 4) % kQMagBits;
+      const int chunk = idx / (kQMagBits * GroupSize * 4);
+      const int kb = chunk * 2 + (seg >> 1);
+      unsigned int pos_piece = 0;
+      unsigned int neg_piece = 0;
+      if (chunk < 2 || seg < 2) {
+        const unsigned long long sign_word = query_cache[hrel][kb * 8];
+        const unsigned long long mag_word = query_cache[hrel][kb * 8 + bit + 1];
+        const unsigned int sign_piece = (unsigned int)((seg & 1) ? (sign_word >> 32) : sign_word);
+        const unsigned int mag_piece = (unsigned int)((seg & 1) ? (mag_word >> 32) : mag_word);
+        pos_piece = mag_piece & ~sign_piece;
+        neg_piece = mag_piece & sign_piece;
+      }
+      bmma_a[chunk][bit][hrel * 4 + seg] = pos_piece;
+      bmma_a[chunk][bit][(GroupSize + hrel) * 4 + seg] = neg_piece;
+    }
+    // popc(q_mag & q_sign) per (head, chunk, bit): the query's own negative
+    // planes' weight, added back in the mismatch identity.
+    for (int idx = thread_idx; idx < GroupSize * 3 * kQMagBits; idx += blockDim.x) {
+      const int bit = idx % kQMagBits;
+      const int chunk = (idx / kQMagBits) % 3;
+      const int hrel = idx / (3 * kQMagBits);
+      int qneg = 0;
+      #pragma unroll
+      for (int half = 0; half < 2; half++) {
+        const int kb = chunk * 2 + half;
+        if (kb < KBlocks) {
+          qneg += __popcll(query_cache[hrel][kb * 8 + bit + 1] & query_cache[hrel][kb * 8]);
+        }
+      }
+      bmma_qneg[hrel][chunk][bit] = qneg;
+    }
+    __syncthreads();
+  }
+
   float acc0[MaxTaskSlots];
   float acc1[MaxTaskSlots];
   #pragma unroll
@@ -2305,71 +2526,180 @@ __global__ void __launch_bounds__(256, 6) picokv_v1_expbits_atomic2_runtime_unro
   #pragma unroll
   for (int block_tile = 0; block_tile < BlockTiles; block_tile++) {
     const int tile_idx = tile_block_idx * BlockTiles + block_tile;
-    const int l_idx = tile_idx * kTileSize + thread_idx;
 
-    float local_weights[GroupSize];
-    #pragma unroll
-    for (int hrel = 0; hrel < GroupSize; hrel++) {
-      if constexpr (ExpBits <= 2) {
-        local_weights[hrel] = -3.402823466e38f;
-      } else {
-        local_weights[hrel] = 0.0f;
-      }
-    }
-    if (l_idx < L) {
-      unsigned long long key_words[MaxKBlocks];
+    if constexpr (UseBmmaScore) {
+      // Tensor-core score path. Each warp sweeps the tile's 8-token groups;
+      // ONE m8n8k128 bmma per (chunk, bit) covers all 4 heads: A rows 0-3
+      // hold the query's positive magnitude planes (mag & ~sign) and rows 4-7
+      // the negative planes (mag & sign) of the same bit; B columns hold the
+      // 8 tokens' key sign words. The m8n8 accumulator gives lane L
+      // C[L/4][2*(L%4)] in x[0] and C[L/4][2*(L%4)+1] in x[1], so lanes 0-15
+      // carry positive-plane dots and lanes 16-31 negative-plane dots of the
+      // same (head, token) pairs — one shfl_xor(16) reunites them and
+      //   mismatch = popc(a_pos & k) + popc(a_neg) - popc(a_neg & k)
+      // completes in-lane. All integer; dots identical to the popc path.
       #pragma unroll
-      for (int kb = 0; kb < MaxKBlocks; kb++) {
-        if (kb < KBlocks) {
-          key_words[kb] = load_packed_key_word(
-            packed_key, B_idx, KVH_idx, KVH, L, KBlocks, l_idx, kb, KeyTransposedFixed
-          );
+      for (int group_pass = 0; group_pass < BmmaGroupPasses; group_pass++) {
+        const int token_group = group_pass * QuantWarps + warp_idx;
+        const int token_base = tile_idx * kTileSize + token_group * 8;
+        const int h = (lane_idx & 15) >> 2;
+        const int t0 = (lane_idx & 3) << 1;
+        int dot0 = query_base_dot[h];
+        int dot1 = dot0;
+
+        #pragma unroll
+        for (int chunk = 0; chunk < 3; chunk++) {
+          // B side: lane -> (token column b_col, 32-bit segment b_seg); the
+          // four segments tile the chunk's 128 key bits. Chunk 2 covers kb 4
+          // only, so its segments 2-3 stage zero.
+          const int b_col = lane_idx >> 2;
+          const int b_seg = lane_idx & 3;
+          const int l_idx_b = token_base + b_col;
+          unsigned int key_piece = 0;
+          if (l_idx_b < L_b && (chunk < 2 || b_seg < 2)) {
+            const int kb = chunk * 2 + (b_seg >> 1);
+            const unsigned long long key_word = load_packed_key_word(
+              packed_key, B_idx, KVH_idx, KVH, L, KeyAddrBlocks > 0 ? KeyAddrBlocks : KBlocks, l_idx_b, kb, KeyTransposedFixed
+            );
+            key_piece = (unsigned int)((b_seg & 1) ? (key_word >> 32) : key_word);
+          }
+          bmma_b[warp_idx][lane_idx] = key_piece;
+          __syncwarp();
+
+          // B (key sign pieces) is bit-independent: load the fragment once
+          // per chunk and reuse it across all kQMagBits A planes.
+          nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, 8, 8, 128, nvcuda::wmma::experimental::precision::b1, nvcuda::wmma::col_major> b_frag;
+          nvcuda::wmma::load_matrix_sync(b_frag, &bmma_b[warp_idx][0], 128);
+
+          #pragma unroll
+          for (int bit = 0; bit < kQMagBits; bit++) {
+            nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 8, 8, 128, nvcuda::wmma::experimental::precision::b1, nvcuda::wmma::row_major> a_frag;
+            nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 8, 8, 128, int> c_frag;
+            nvcuda::wmma::fill_fragment(c_frag, 0);
+            nvcuda::wmma::load_matrix_sync(a_frag, &bmma_a[chunk][bit][0], 128);
+            nvcuda::wmma::bmma_sync(
+              c_frag, a_frag, b_frag, c_frag,
+              nvcuda::wmma::experimental::bmmaBitOpAND,
+              nvcuda::wmma::experimental::bmmaAccumulateOpPOPC
+            );
+            // Lanes 0-15 hold popc(a_pos & k); lanes 16-31 popc(a_neg & k)
+            // for the same (head, token) pairs (rows 4-7 of A).
+            const int v0 = c_frag.x[0];
+            const int v1 = c_frag.x[1];
+            const int o0 = __shfl_xor_sync(0xffffffffu, v0, 16);
+            const int o1 = __shfl_xor_sync(0xffffffffu, v1, 16);
+            const bool pos_lane = lane_idx < 16;
+            const int p0 = pos_lane ? v0 : o0;
+            const int p1 = pos_lane ? v1 : o1;
+            const int n0 = pos_lane ? o0 : v0;
+            const int n1 = pos_lane ? o1 : v1;
+            const int qneg = bmma_qneg[h][chunk][bit];
+            dot0 -= (p0 + qneg - n0) << (bit + 1);
+            dot1 -= (p1 + qneg - n1) << (bit + 1);
+          }
+        }
+
+        // Lanes 0-15 already hold complete dots for every (head, token) pair
+        // of this 8-token group (4 heads x 2 tokens per lane); lanes 16-31
+        // mirror them, so only half the warp writes.
+        if (lane_idx < 16) {
+          const int local0 = token_group * 8 + t0;
+          const int local1 = local0 + 1;
+          const int l0 = token_base + t0;
+          const int l1 = l0 + 1;
+          float out0 = 0.0f;
+          float out1 = 0.0f;
+          if constexpr (ExpBits <= 2) {
+            out0 = -3.402823466e38f;
+            out1 = -3.402823466e38f;
+          }
+          if (l0 < L_b) {
+            const float score0 = (float)dot0 * scale_cache[h];
+            if constexpr (ExpBits <= 2) {
+              out0 = score0;
+            } else {
+              out0 = picokv_fast_expf(score0 - lse_cache[h]);
+            }
+          }
+          if (l1 < L_b) {
+            const float score1 = (float)dot1 * scale_cache[h];
+            if constexpr (ExpBits <= 2) {
+              out1 = score1;
+            } else {
+              out1 = picokv_fast_expf(score1 - lse_cache[h]);
+            }
+          }
+          weights[h][local0] = out0;
+          weights[h][local1] = out1;
+        }
+      }
+    } else {
+      const int l_idx = tile_idx * kTileSize + thread_idx;
+
+      float local_weights[GroupSize];
+      #pragma unroll
+      for (int hrel = 0; hrel < GroupSize; hrel++) {
+        if constexpr (ExpBits <= 2) {
+          local_weights[hrel] = -3.402823466e38f;
+        } else {
+          local_weights[hrel] = 0.0f;
+        }
+      }
+      if (l_idx < L_b) {
+        unsigned long long key_words[KeyLoopBlocks];
+        #pragma unroll
+        for (int kb = 0; kb < KeyLoopBlocks; kb++) {
+          if (KBlocksT > 0 || kb < KBlocks) {
+            key_words[kb] = load_packed_key_word(
+              packed_key, B_idx, KVH_idx, KVH, L, KeyAddrBlocks > 0 ? KeyAddrBlocks : KBlocks, l_idx, kb, KeyTransposedFixed
+            );
+          }
+        }
+
+        #pragma unroll
+        for (int hrel = 0; hrel < GroupSize; hrel++) {
+          int negative_dot = 0;
+          int prefix_abs = 0;
+          bool token_pruned = false;
+          const float dot_threshold = PruneMode == 0 ? -3.402823466e38f : prune_dot_threshold_cache[hrel];
+          #pragma unroll
+          for (int kb = 0; kb < KeyLoopBlocks; kb++) {
+            if ((KBlocksT > 0 || kb < KBlocks) && !token_pruned) {
+              const unsigned long long signs = key_words[kb] ^ query_cache[hrel][kb * 8];
+              int negative_block = 0;
+              #pragma unroll
+              for (int bit_idx = 1; bit_idx <= kQMagBits; bit_idx++) {
+                negative_block += __popcll(query_cache[hrel][kb * 8 + bit_idx] & signs) << (bit_idx - 1);
+              }
+              negative_dot += negative_block;
+              if constexpr (DoPrefixPrune) {
+                prefix_abs += query_block_abs[hrel][kb];
+                if (kb < (KBlocksT > 0 ? KBlocksT : KBlocks) - 1) {
+                  const int partial_dot = prefix_abs - (negative_dot << 1);
+                  const int remaining_abs = query_base_dot[hrel] - prefix_abs;
+                  if ((float)(partial_dot + remaining_abs) <= dot_threshold) {
+                    token_pruned = true;
+                  }
+                }
+              }
+            }
+          }
+          if (!token_pruned) {
+            const int dot = query_base_dot[hrel] - (negative_dot << 1);
+            const float score = (float)dot * scale_cache[hrel];
+            if constexpr (ExpBits <= 2) {
+              local_weights[hrel] = score;
+            } else {
+              local_weights[hrel] = picokv_fast_expf(score - lse_cache[hrel]);
+            }
+          }
         }
       }
 
       #pragma unroll
       for (int hrel = 0; hrel < GroupSize; hrel++) {
-        int negative_dot = 0;
-        int prefix_abs = 0;
-        bool token_pruned = false;
-        const float dot_threshold = PruneMode == 0 ? -3.402823466e38f : prune_dot_threshold_cache[hrel];
-        #pragma unroll
-        for (int kb = 0; kb < MaxKBlocks; kb++) {
-          if (kb < KBlocks && !token_pruned) {
-            const unsigned long long signs = key_words[kb] ^ query_cache[hrel][kb * 8];
-            int negative_block = 0;
-            #pragma unroll
-            for (int bit_idx = 1; bit_idx <= kQMagBits; bit_idx++) {
-              negative_block += __popcll(query_cache[hrel][kb * 8 + bit_idx] & signs) << (bit_idx - 1);
-            }
-            negative_dot += negative_block;
-            if constexpr (DoPrefixPrune) {
-              prefix_abs += query_block_abs[hrel][kb];
-              if (kb < KBlocks - 1) {
-                const int partial_dot = prefix_abs - (negative_dot << 1);
-                const int remaining_abs = query_base_dot[hrel] - prefix_abs;
-                if ((float)(partial_dot + remaining_abs) <= dot_threshold) {
-                  token_pruned = true;
-                }
-              }
-            }
-          }
-        }
-        if (!token_pruned) {
-          const int dot = query_base_dot[hrel] - (negative_dot << 1);
-          const float score = (float)dot * scale_cache[hrel];
-          if constexpr (ExpBits <= 2) {
-            local_weights[hrel] = score;
-          } else {
-            local_weights[hrel] = picokv_fast_expf(score - lse_cache[hrel]);
-          }
-        }
+        weights[hrel][thread_idx] = local_weights[hrel];
       }
-    }
-
-    #pragma unroll
-    for (int hrel = 0; hrel < GroupSize; hrel++) {
-      weights[hrel][thread_idx] = local_weights[hrel];
     }
     __syncthreads();
 
@@ -2513,6 +2843,10 @@ __global__ void __launch_bounds__(256, 6) picokv_v1_expbits_atomic2_runtime_unro
     }
   }
 }
+
+// Tensor-core (mma b1 AND+POPC) score + value variant of the kernel above for
+// the production GQA-4 / Ck=320 / Cv=320 shape (bitwise-identical outputs).
+#include "picokv_tc_tail.cuh"
 
 
 // Experimental GQA=8 split path: two GQA4-sized blocks per KV head.
@@ -3271,7 +3605,8 @@ __global__ void __launch_bounds__(256, 4) picokv_v1_expbits_atomic2_gqa8_bmma_sc
   const int L,
   const int LGroups,
   const int query_scale_numel,
-  const float attention_scale
+  const float attention_scale,
+  const int *__restrict__ global_lens
 ) {
   constexpr int GroupSize = 8;
   constexpr int KBlocks = 4;
@@ -3295,6 +3630,13 @@ __global__ void __launch_bounds__(256, 4) picokv_v1_expbits_atomic2_gqa8_bmma_sc
   const int lane_idx = thread_idx & 31;
   const int warp_idx = thread_idx >> 5;
 
+  // Varlen (ragged batch): each batch element b may have a different logical
+  // number of compressed global tokens L_b <= L (the padded physical stride).
+  // Skip blocks whose whole tile is beyond this request's real length, and use
+  // L_b (not L) for all token-in-range checks below.
+  const int L_b = (global_lens != nullptr) ? global_lens[B_idx] : L;
+  if (tile_block_idx * (BlockTiles * kTileSize) >= L_b) return;
+
   __shared__ unsigned long long query_cache[GroupSize][QueryWords];
   __shared__ int query_base_dot[GroupSize];
   __shared__ float scale_cache[GroupSize];
@@ -3307,7 +3649,6 @@ __global__ void __launch_bounds__(256, 4) picokv_v1_expbits_atomic2_gqa8_bmma_sc
   __shared__ __align__(128) unsigned int bmma_a_neg[2][kQMagBits][32];
   __shared__ int query_neg_count[GroupSize][2][kQMagBits];
   __shared__ __align__(128) unsigned int bmma_b[QuantWarps][32];
-  __shared__ __align__(128) int bmma_tmp[QuantWarps][64];
 
   for (int idx = thread_idx; idx < GroupSize * QueryWords; idx += blockDim.x) {
     const int hrel = idx / QueryWords;
@@ -3375,14 +3716,14 @@ __global__ void __launch_bounds__(256, 4) picokv_v1_expbits_atomic2_gqa8_bmma_sc
     for (int group_pass = 0; group_pass < BmmaGroupPasses; group_pass++) {
       const int token_group = group_pass * QuantWarps + warp_idx;
       const int token_base = tile_idx * kTileSize + token_group * 8;
-      const int cell0 = lane_idx;
-      const int cell1 = lane_idx + 32;
-      const int h0 = cell0 >> 3;
-      const int h1 = cell1 >> 3;
-      const int col0 = cell0 & 7;
-      const int col1 = cell1 & 7;
-      int dot0 = query_base_dot[h0];
-      int dot1 = query_base_dot[h1];
+      // m8n8 accumulator fragment (PTX mma layout): lane L holds
+      // C[L/4][2*(L%4)] in x[0] and C[L/4][2*(L%4)+1] in x[1] — one head row,
+      // two adjacent token columns per lane. Verified end-to-end against the
+      // popc kernel by check_bmma_bitwise.py.
+      const int h = lane_idx >> 2;
+      const int t0 = (lane_idx & 3) << 1;
+      int dot0 = query_base_dot[h];
+      int dot1 = dot0;
 
       #pragma unroll
       for (int chunk = 0; chunk < 2; chunk++) {
@@ -3391,7 +3732,7 @@ __global__ void __launch_bounds__(256, 4) picokv_v1_expbits_atomic2_gqa8_bmma_sc
         const int b_seg = b_idx & 3;
         const int l_idx = token_base + b_col;
         unsigned int key_piece = 0;
-        if (l_idx < L) {
+        if (l_idx < L_b) {
           const int kb = chunk * 2 + (b_seg >> 1);
           const unsigned long long key_word = load_packed_key_word(
             packed_key, B_idx, KVH_idx, KVH, L, KBlocks, l_idx, kb, KeyTransposedFixed
@@ -3401,72 +3742,70 @@ __global__ void __launch_bounds__(256, 4) picokv_v1_expbits_atomic2_gqa8_bmma_sc
         bmma_b[warp_idx][b_idx] = key_piece;
         __syncwarp();
 
+        // B (key sign pieces) is bit-independent: load the fragment once per
+        // chunk and reuse it across all kQMagBits A planes.
+        nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, 8, 8, 128, nvcuda::wmma::experimental::precision::b1, nvcuda::wmma::col_major> b_frag;
+        nvcuda::wmma::load_matrix_sync(b_frag, &bmma_b[warp_idx][0], 128);
+
         #pragma unroll
         for (int bit = 0; bit < kQMagBits; bit++) {
           nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 8, 8, 128, nvcuda::wmma::experimental::precision::b1, nvcuda::wmma::row_major> a_frag;
-          nvcuda::wmma::fragment<nvcuda::wmma::matrix_b, 8, 8, 128, nvcuda::wmma::experimental::precision::b1, nvcuda::wmma::col_major> b_frag;
-          nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 8, 8, 128, int> c_frag;
+          nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 8, 8, 128, int> pos_frag;
+          nvcuda::wmma::fragment<nvcuda::wmma::accumulator, 8, 8, 128, int> neg_frag;
 
-          nvcuda::wmma::fill_fragment(c_frag, 0);
+          nvcuda::wmma::fill_fragment(pos_frag, 0);
           nvcuda::wmma::load_matrix_sync(a_frag, &bmma_a_pos[chunk][bit][0], 128);
-          nvcuda::wmma::load_matrix_sync(b_frag, &bmma_b[warp_idx][0], 128);
           nvcuda::wmma::bmma_sync(
-            c_frag, a_frag, b_frag, c_frag,
+            pos_frag, a_frag, b_frag, pos_frag,
             nvcuda::wmma::experimental::bmmaBitOpAND,
             nvcuda::wmma::experimental::bmmaAccumulateOpPOPC
           );
-          nvcuda::wmma::store_matrix_sync(&bmma_tmp[warp_idx][0], c_frag, 8, nvcuda::wmma::mem_row_major);
-          __syncwarp();
-          const int pos0 = bmma_tmp[warp_idx][cell0];
-          const int pos1 = bmma_tmp[warp_idx][cell1];
 
-          nvcuda::wmma::fill_fragment(c_frag, 0);
+          nvcuda::wmma::fill_fragment(neg_frag, 0);
           nvcuda::wmma::load_matrix_sync(a_frag, &bmma_a_neg[chunk][bit][0], 128);
-          nvcuda::wmma::load_matrix_sync(b_frag, &bmma_b[warp_idx][0], 128);
           nvcuda::wmma::bmma_sync(
-            c_frag, a_frag, b_frag, c_frag,
+            neg_frag, a_frag, b_frag, neg_frag,
             nvcuda::wmma::experimental::bmmaBitOpAND,
             nvcuda::wmma::experimental::bmmaAccumulateOpPOPC
           );
-          nvcuda::wmma::store_matrix_sync(&bmma_tmp[warp_idx][0], c_frag, 8, nvcuda::wmma::mem_row_major);
-          __syncwarp();
-          const int neg_key0 = bmma_tmp[warp_idx][cell0];
-          const int neg_key1 = bmma_tmp[warp_idx][cell1];
-          const int neg0 = pos0 + query_neg_count[h0][chunk][bit] - neg_key0;
-          const int neg1 = pos1 + query_neg_count[h1][chunk][bit] - neg_key1;
-          dot0 -= neg0 << (bit + 1);
-          dot1 -= neg1 << (bit + 1);
+
+          // Consume both accumulators in-register — no store_matrix_sync, no
+          // shared round-trip, no warp barrier inside the bit loop:
+          // mismatch_b = popc(a_pos & k) + popc(a_neg) - popc(a_neg & k).
+          const int qneg = query_neg_count[h][chunk][bit];
+          dot0 -= (pos_frag.x[0] + qneg - neg_frag.x[0]) << (bit + 1);
+          dot1 -= (pos_frag.x[1] + qneg - neg_frag.x[1]) << (bit + 1);
         }
       }
 
-      const int local0 = token_group * 8 + col0;
-      const int local1 = token_group * 8 + col1;
-      const int l0 = token_base + col0;
-      const int l1 = token_base + col1;
+      const int local0 = token_group * 8 + t0;
+      const int local1 = local0 + 1;
+      const int l0 = token_base + t0;
+      const int l1 = l0 + 1;
       float out0 = 0.0f;
       float out1 = 0.0f;
       if constexpr (ExpBits <= 2) {
         out0 = -3.402823466e38f;
         out1 = -3.402823466e38f;
       }
-      if (l0 < L) {
-        const float score0 = (float)dot0 * scale_cache[h0];
+      if (l0 < L_b) {
+        const float score0 = (float)dot0 * scale_cache[h];
         if constexpr (ExpBits <= 2) {
           out0 = score0;
         } else {
-          out0 = picokv_fast_expf(score0 - lse_cache[h0]);
+          out0 = picokv_fast_expf(score0 - lse_cache[h]);
         }
       }
-      if (l1 < L) {
-        const float score1 = (float)dot1 * scale_cache[h1];
+      if (l1 < L_b) {
+        const float score1 = (float)dot1 * scale_cache[h];
         if constexpr (ExpBits <= 2) {
           out1 = score1;
         } else {
-          out1 = picokv_fast_expf(score1 - lse_cache[h1]);
+          out1 = picokv_fast_expf(score1 - lse_cache[h]);
         }
       }
-      weights[h0][local0] = out0;
-      weights[h1][local1] = out1;
+      weights[h][local0] = out0;
+      weights[h][local1] = out1;
     }
     __syncthreads();
 
@@ -3651,6 +3990,278 @@ __global__ void picokv_v1_fused_reduce_output_projection_kernel(
 }
 
 
+// ---------------------------------------------------------------------------
+// Dense-window decode attention over the per-layer ring pools (split-chunk).
+//
+// The flashinfer paged-decode call this replaces costs ~10-15 us/layer under
+// CUDA-graph replay (split-kv kernel + merge kernel): its scheduler is sized
+// for full-KV attention while the decode window is only 320-384 rows. This
+// pair of kernels does the same math — softmax attention over rows [0,
+// lpl[b]) of kbuf/vbuf [B, cap, KVH, D], GQA-4 block-major (q head h reads
+// kv head h/4) — with the window CHUNKED over blockIdx.z so small batches
+// still fill the GPU, and the 4 group heads share every K/V line.
+//
+// main kernel, one block per (batch, kv head, 96-row chunk), 256 threads:
+//   1. logits: warp w covers chunk-local rows r0 = w, w+8, ...; lane owns
+//      dims [lane*4, lane*4+4) of all 4 heads (5-step shuffle dot per head)
+//   2. softmax stats per head over the chunk -> (m, l) to global scratch
+//   3. probs in place: s = exp(s - m)   (unnormalized; merge rescales)
+//   4. value: thread = (g, row-half, lane) owns dims [lane*4, +4) and rows
+//      r0 = half, half+2, ... -> unnormalized acc to scratch
+// merge kernel, one block per (batch, kv head), 256 threads = (head, dim
+// pair): standard log-sum-exp combine of the chunk partials -> bf16 out +
+// ln-LSE. Empty chunks (row0 >= lpl[b]) exit early; the merge reads only
+// ceil(lpl[b]/CH) partials, so stale scratch is never touched.
+//
+// Deterministic: every reduction runs in a fixed order. lpl is read from
+// device memory at run time, so a captured launch stays correct while the
+// window grows (no re-plan, no graph re-capture).
+// ---------------------------------------------------------------------------
+constexpr int kWinChunkRows = 96;  // default rows per split-chunk block
+
+// CH = rows per split-chunk block (template: smem logits [GROUP][CH] and the
+// serial per-thread row chains scale with it). Small batches pick a smaller
+// CH so more blocks share the window (the launcher's selector).
+template <int GROUP, int D, int CH>
+__global__ void __launch_bounds__(256, 4) picokv_window_attn_kernel(
+    const __nv_bfloat16 *__restrict__ kbuf,  // [B, cap, KVH, D]
+    const __nv_bfloat16 *__restrict__ vbuf,  // [B, cap, KVH, D]
+    const int *__restrict__ lpl,             // [B] live rows per request
+    const __nv_bfloat16 *__restrict__ q,     // [B, QH, D], QH = KVH*GROUP
+    float *__restrict__ acc,                 // [B, KVH, CHUNKS, GROUP, D]
+    float *__restrict__ ml,                  // [B, KVH, CHUNKS, GROUP, 2]
+    float sm_scale,
+    int cap,
+    int KVH,
+    int CHUNKS)
+{
+  constexpr int THREADS = 256;
+  constexpr int WARPS = THREADS / 32;
+  extern __shared__ float smem[];
+  float *s = smem;                                 // [GROUP][CH] logits/probs
+  float *wmax_s = smem + GROUP * CH;               // [WARPS][GROUP]
+  float *wsum_s = wmax_s + WARPS * GROUP;          // [WARPS][GROUP]
+  float *m_s = wsum_s + WARPS * GROUP;             // [GROUP]
+  float *partial_s = m_s + GROUP;                  // [2][GROUP][D]
+
+  const int b = blockIdx.x;
+  const int kvh = blockIdx.y;
+  const int chunk = blockIdx.z;
+  const int row0 = chunk * CH;
+  const int L = lpl[b];
+  if (row0 >= L) return;            // empty chunk — uniform per block
+  const int R = min(CH, L - row0);  // live rows in this chunk
+  const int h0 = kvh * GROUP;       // first q head of this block
+  const int QH = KVH * GROUP;
+  const int tid = threadIdx.x;
+  const int warp = tid >> 5;
+  const int lane = tid & 31;
+
+  // ---- phase 0: pull this chunk's K/V lines into L2. The K pass (phase 1)
+  // and V pass (phase 4) are barrier-separated; without this each pays its
+  // own DRAM latency. The whole batch's window (tens of MB) fits in L2.
+  {
+    const __nv_bfloat16 *kp = kbuf + (((long)b * cap + row0) * KVH + kvh) * D;
+    const __nv_bfloat16 *vp = vbuf + (((long)b * cap + row0) * KVH + kvh) * D;
+    for (int i = tid; i < R * 4; i += THREADS) {  // R rows x {K,V} x 2 lines
+      const int r = i >> 2;
+      const int piece = i & 3;
+      const char *p = (const char *)((piece < 2 ? kp : vp))
+          + (long)r * KVH * D * 2 + (piece & 1) * 128;
+      asm volatile("prefetch.global.L2 [%0];" :: "l"(p));
+    }
+  }
+
+  // ---- phase 1: logits. Lane owns dims [lane*4, lane*4+4) of every head;
+  // warp w covers chunk-local rows r0 = w, w+8, ... One 8B K load per lane
+  // per row, 4 rows in flight.
+  float qg[GROUP][4];
+  {
+    const __nv_bfloat16 *qb = q + ((long)b * QH + h0) * D;
+    #pragma unroll
+    for (int g = 0; g < GROUP; ++g) {
+      const uint2 raw = *reinterpret_cast<const uint2 *>(qb + g * D + lane * 4);
+      const __nv_bfloat162 p0 = *reinterpret_cast<const __nv_bfloat162 *>(&raw.x);
+      const __nv_bfloat162 p1 = *reinterpret_cast<const __nv_bfloat162 *>(&raw.y);
+      qg[g][0] = __bfloat162float(p0.x);
+      qg[g][1] = __bfloat162float(p0.y);
+      qg[g][2] = __bfloat162float(p1.x);
+      qg[g][3] = __bfloat162float(p1.y);
+    }
+  }
+  {
+    const __nv_bfloat16 *kb = kbuf + (((long)b * cap + row0) * KVH + kvh) * D + lane * 4;
+    #pragma unroll 4
+    for (int r0 = warp; r0 < R; r0 += WARPS) {
+      const uint2 raw = *reinterpret_cast<const uint2 *>(kb + (long)r0 * KVH * D);
+      const __nv_bfloat162 p0 = *reinterpret_cast<const __nv_bfloat162 *>(&raw.x);
+      const __nv_bfloat162 p1 = *reinterpret_cast<const __nv_bfloat162 *>(&raw.y);
+      float kf[4] = {__bfloat162float(p0.x), __bfloat162float(p0.y),
+                     __bfloat162float(p1.x), __bfloat162float(p1.y)};
+      float pd[GROUP];
+      #pragma unroll
+      for (int g = 0; g < GROUP; ++g) {
+        float accv = 0.f;
+        #pragma unroll
+        for (int j = 0; j < 4; ++j)
+          accv = fmaf(qg[g][j], kf[j], accv);
+        pd[g] = accv;
+      }
+      #pragma unroll
+      for (int g = 0; g < GROUP; ++g) {
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1)
+          pd[g] += __shfl_xor_sync(0xffffffffu, pd[g], off);
+      }
+      if (lane == 0) {
+        #pragma unroll
+        for (int g = 0; g < GROUP; ++g)
+          s[g * CH + r0] = pd[g] * sm_scale;
+      }
+    }
+  }
+  __syncthreads();
+
+  // ---- phase 2: per-head online max+sum-exp over the chunk (one fused
+  // pass; warp-uniform values, no shuffle reduce) -> (m, l) to scratch.
+  {
+    float wm[GROUP], wl[GROUP];
+    #pragma unroll
+    for (int g = 0; g < GROUP; ++g) {
+      wm[g] = -FLT_MAX;
+      wl[g] = 0.f;
+    }
+    for (int r0 = warp; r0 < R; r0 += WARPS) {
+      #pragma unroll
+      for (int g = 0; g < GROUP; ++g) {
+        const float sv = s[g * CH + r0];
+        const float nm = fmaxf(wm[g], sv);
+        wl[g] = wl[g] * picokv_fast_expf(wm[g] - nm) + picokv_fast_expf(sv - nm);
+        wm[g] = nm;
+      }
+    }
+    if (lane == 0) {
+      #pragma unroll
+      for (int g = 0; g < GROUP; ++g) {
+        wmax_s[warp * GROUP + g] = wm[g];
+        wsum_s[warp * GROUP + g] = wl[g];
+      }
+    }
+  }
+  __syncthreads();
+  if (tid < GROUP) {
+    float m = -FLT_MAX;
+    #pragma unroll
+    for (int w = 0; w < WARPS; ++w)
+      m = fmaxf(m, wmax_s[w * GROUP + tid]);
+    float l = 0.f;
+    #pragma unroll
+    for (int w = 0; w < WARPS; ++w)
+      l += wsum_s[w * GROUP + tid] * picokv_fast_expf(wmax_s[w * GROUP + tid] - m);
+    m_s[tid] = m;
+    float2 v;
+    v.x = m;
+    v.y = l;
+    *reinterpret_cast<float2 *>(ml + (((long)b * KVH + kvh) * CHUNKS + chunk) * GROUP * 2 + tid * 2) = v;
+  }
+  __syncthreads();
+
+  // ---- phase 3: unnormalized probabilities in place (merge rescales).
+  {
+    float *sg = s;
+    #pragma unroll
+    for (int g = 0; g < GROUP; ++g) {
+      const float m = m_s[g];
+      for (int r0 = tid; r0 < R; r0 += THREADS)
+        sg[g * CH + r0] = picokv_fast_expf(sg[g * CH + r0] - m);
+    }
+  }
+  __syncthreads();
+
+  // ---- phase 4: V accumulation. Thread = (g, row-half, lane): lane owns
+  // dims [lane*4, lane*4+4) via one 8B load, row-half picks rows
+  // r0 = half, half+2, ... so each thread's chain is R/2 long and a warp
+  // covers 256B of every row it touches.
+  {
+    const int g = tid >> 6;
+    const int rowhalf = (tid >> 5) & 1;
+    const __nv_bfloat16 *vb = vbuf + (((long)b * cap + row0) * KVH + kvh) * D + lane * 4;
+    float ac[4] = {0.f, 0.f, 0.f, 0.f};
+    const float *pg = s + g * CH;
+    #pragma unroll 4
+    for (int r0 = rowhalf; r0 < R; r0 += 2) {
+      const uint2 raw = *reinterpret_cast<const uint2 *>(vb + (long)r0 * KVH * D);
+      const __nv_bfloat162 v0 = *reinterpret_cast<const __nv_bfloat162 *>(&raw.x);
+      const __nv_bfloat162 v1 = *reinterpret_cast<const __nv_bfloat162 *>(&raw.y);
+      const float p = pg[r0];
+      ac[0] = fmaf(p, __bfloat162float(v0.x), ac[0]);
+      ac[1] = fmaf(p, __bfloat162float(v0.y), ac[1]);
+      ac[2] = fmaf(p, __bfloat162float(v1.x), ac[2]);
+      ac[3] = fmaf(p, __bfloat162float(v1.y), ac[3]);
+    }
+    float *ps = partial_s + (rowhalf * GROUP + g) * D + lane * 4;
+    #pragma unroll
+    for (int j = 0; j < 4; ++j) ps[j] = ac[j];
+  }
+  __syncthreads();
+  if (tid < GROUP * (D / 2)) {  // fold the 2 row halves -> scratch (fixed order)
+    const int g = tid >> 6;
+    const int dpair = tid & 63;
+    const float *p0s = partial_s + (0 * GROUP + g) * D + dpair * 2;
+    const float *p1s = partial_s + (1 * GROUP + g) * D + dpair * 2;
+    float2 v;
+    v.x = p0s[0] + p1s[0];
+    v.y = p0s[1] + p1s[1];
+    *reinterpret_cast<float2 *>(acc + ((((long)b * KVH + kvh) * CHUNKS + chunk) * GROUP + g) * D + dpair * 2) = v;
+  }
+}
+
+
+// log-sum-exp merge of the chunk partials: one block per (batch, kv head),
+// thread = (head, dim pair). Reads only the ceil(lpl[b]/CH) live chunks.
+template <int CH>
+__global__ void __launch_bounds__(256) picokv_window_attn_merge_kernel(
+    const int *__restrict__ lpl,             // [B]
+    const float *__restrict__ acc,           // [B, KVH, CHUNKS, GROUP, D]
+    const float *__restrict__ ml,            // [B, KVH, CHUNKS, GROUP, 2]
+    __nv_bfloat16 *__restrict__ out,         // [B, QH, D]
+    float *__restrict__ lse,                 // [B, QH] ln(sum exp(scale*q.k))
+    int KVH,
+    int CHUNKS)
+{
+  constexpr int GROUP = 4;
+  constexpr int D = 128;
+  const int b = blockIdx.x;
+  const int kvh = blockIdx.y;
+  const int QH = KVH * GROUP;
+  const int tid = threadIdx.x;
+  const int g = tid >> 6;
+  const int dpair = tid & 63;
+  const int h = kvh * GROUP + g;
+  const int L = lpl[b];
+  const int nch = min(CHUNKS, (L + CH - 1) / CH);
+  const long cbase = ((long)b * KVH + kvh) * CHUNKS;
+
+  float mstar = -FLT_MAX;
+  for (int c = 0; c < nch; ++c)
+    mstar = fmaxf(mstar, ml[(cbase + c) * GROUP * 2 + g * 2]);
+
+  float ltot = 0.f, a0 = 0.f, a1 = 0.f;
+  for (int c = 0; c < nch; ++c) {
+    const float2 mlg = *reinterpret_cast<const float2 *>(ml + (cbase + c) * GROUP * 2 + g * 2);
+    const float w = picokv_fast_expf(mlg.x - mstar);
+    ltot = fmaf(w, mlg.y, ltot);
+    const float2 ac = *reinterpret_cast<const float2 *>(acc + ((cbase + c) * GROUP + g) * D + dpair * 2);
+    a0 = fmaf(w, ac.x, a0);
+    a1 = fmaf(w, ac.y, a1);
+  }
+  const float inv_l = 1.f / ltot;
+  lse[(long)b * QH + h] = mstar + logf(ltot);
+  *reinterpret_cast<__nv_bfloat162 *>(out + ((long)b * QH + h) * D + dpair * 2) =
+      __floats2bfloat162_rn(a0 * inv_l, a1 * inv_l);
+}
+
+
 } // namespace
 
 void picokv_dense_attention_numerator(
@@ -3789,6 +4400,115 @@ void picokv_fused_output_projection(
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// GEMM value projection: replaces the scalar per-row dot-product kernel with
+// one cublas strided-batched GEMM (bf16 tensor cores, fp32 accumulate/output)
+// plus a small epilogue. Same math as the scalar kernel up to fp32 accumulation
+// order: codes are rounded to bf16 exactly as picokv_code_for_projection does,
+// products accumulate in fp32, and the (dense + acc) * inv_den epilogue is
+// identical. Selected by default for bf16; PICOKV_PROJ_GEMM=0 forces the
+// scalar kernel (A/B).
+void picokv_fused_output_projection_gemm(
+  at::Tensor dense_output,
+  at::Tensor glob_code_output,
+  at::Tensor glob_den,
+  at::Tensor value_proj,
+  at::Tensor attn_output
+) {
+  at::cuda::CUDAGuard device_guard(dense_output.device());
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  const int B = dense_output.size(0);
+  const int QH = dense_output.size(1);
+  const int S = dense_output.size(2);
+  const int D = dense_output.size(3);
+  const int KVH = value_proj.size(1);
+  const int Cv = glob_code_output.size(3);
+  const int G = QH / KVH;
+  TORCH_CHECK(G > 0 && QH == G * KVH, "QH must be divisible by KVH");
+  TORCH_CHECK(dense_output.scalar_type() == at::kBFloat16,
+              "GEMM projection currently supports torch.bfloat16");
+
+  // Persistent workspaces (stable addresses across calls; CUDA-graph safe):
+  // bf16 copy of the fp32 code accumulator and the fp32 GEMM output.
+  static std::mutex ws_mutex;
+  static std::unordered_map<int, std::pair<at::Tensor, at::Tensor>> ws;
+  at::Tensor code_bf16, acc32;
+  {
+    std::lock_guard<std::mutex> lock(ws_mutex);
+    auto it = ws.find(dense_output.get_device());
+    if (it == ws.end()) {
+      auto opts_bf16 = dense_output.options();
+      auto opts_f32 = dense_output.options().dtype(at::kFloat);
+      code_bf16 = at::empty({B, QH, S, Cv}, opts_bf16);
+      acc32 = at::empty({B, QH, S, D}, opts_f32);
+      ws.emplace(dense_output.get_device(), std::make_pair(code_bf16, acc32));
+    } else {
+      std::tie(code_bf16, acc32) = it->second;
+      if (code_bf16.numel() < B * QH * S * Cv || acc32.numel() < B * QH * S * D) {
+        code_bf16 = at::empty({B, QH, S, Cv}, code_bf16.options());
+        acc32 = at::empty({B, QH, S, D}, acc32.options());
+        it->second = std::make_pair(code_bf16, acc32);
+      }
+    }
+  }
+
+  // 1. Round codes to bf16 (the scalar kernel's picokv_code_for_projection).
+  {
+    const long numel = (long)B * QH * S * Cv;
+    const int threads = 256;
+    const int blocks = (int)((numel + threads - 1) / threads);
+    picokv_cast_code_bf16_kernel<<<blocks, threads, 0, stream>>>(
+      glob_code_output.data_ptr<float>(),
+      (__nv_bfloat16 *)code_bf16.data_ptr<at::BFloat16>(),
+      numel
+    );
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
+
+  // 2. Batched GEMM over (b, kvh): out rows are the G*S queries of kvh's group.
+  // Row-major out [G*S, D] equals col-major [D, G*S]; vp row-major [Cv, D]
+  // equals col-major [D, Cv]; code row-major [G*S, Cv] equals col-major
+  // [Cv, G*S] -- so a plain N,N GEMM computes out = code @ vp in place.
+  {
+    cublasHandle_t handle = at::cuda::getCurrentCUDABlasHandle();
+    TORCH_CHECK(handle != nullptr, "cublas handle unavailable");
+    cublasSetStream(handle, stream);
+    const float one = 1.0f;
+    const float zero = 0.0f;
+    const int batch = B * KVH;
+    cublasStatus_t status = cublasGemmStridedBatchedEx(
+      handle,
+      CUBLAS_OP_N, CUBLAS_OP_N,
+      /*m=*/D, /*n=*/G * S, /*k=*/Cv,
+      &one,
+      value_proj.data_ptr(), CUDA_R_16BF, /*lda=*/D, /*strideA=*/(long long)Cv * D,
+      code_bf16.data_ptr(), CUDA_R_16BF, /*ldb=*/Cv, /*strideB=*/(long long)G * S * Cv,
+      &zero,
+      acc32.data_ptr(), CUDA_R_32F, /*ldc=*/D, /*strideC=*/(long long)G * S * D,
+      batch,
+      CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT
+    );
+    TORCH_CHECK(status == CUBLAS_STATUS_SUCCESS,
+                "cublasGemmStridedBatchedEx failed: ", (int)status);
+  }
+
+  // 3. Epilogue: out = (dense + acc32) * (1 / (1 + den)).
+  {
+    const long total = (long)B * QH * S * D;
+    const int threads = 256;
+    const int blocks = (int)((total + threads - 1) / threads);
+    picokv_proj_gemm_epilogue_kernel<__nv_bfloat16><<<blocks, threads, 0, stream>>>(
+      (const __nv_bfloat16 *)dense_output.data_ptr<at::BFloat16>(),
+      acc32.data_ptr<float>(),
+      glob_den.data_ptr<float>(),
+      (__nv_bfloat16 *)attn_output.data_ptr<at::BFloat16>(),
+      (int)total,
+      D
+    );
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
+}
+
 
 
 
@@ -3904,6 +4624,63 @@ void picokv_quantize_pack_projected_query(
       packed_projected_query.data_ptr<long>(),
       query_scale.data_ptr<float>(),
       B, H, S, C
+    );
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// Quantize+pack that also zeroes the two fp32 tail accumulators in the same
+// launch (see the kernel comment). The accumulators must be [B,H,S,Cv] and
+// [B,H,S] contiguous fp32, matching what the removed cudaMemsetAsync cleared.
+void picokv_quantize_pack_zero_projected_query(
+  at::Tensor projected_query,
+  at::Tensor packed_projected_query,
+  at::Tensor query_scale,
+  at::Tensor code_zero,
+  at::Tensor den_zero
+) {
+  at::cuda::CUDAGuard device_guard(projected_query.device());
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  TORCH_CHECK(projected_query.dim() == 4, "projected_query must have shape [B,H,S,C]");
+  TORCH_CHECK(projected_query.is_contiguous(), "projected_query must be contiguous");
+  TORCH_CHECK(projected_query.scalar_type() == at::kBFloat16 || projected_query.scalar_type() == at::kFloat,
+              "projected_query must be torch.bfloat16 or torch.float32");
+  TORCH_CHECK(code_zero.is_contiguous() && den_zero.is_contiguous(), "accumulators must be contiguous");
+  TORCH_CHECK(code_zero.scalar_type() == at::kFloat && den_zero.scalar_type() == at::kFloat,
+              "accumulators must be float32");
+
+  const int B = projected_query.size(0);
+  const int H = projected_query.size(1);
+  const int S = projected_query.size(2);
+  const int C = projected_query.size(3);
+  const int Cv = code_zero.size(3);
+  TORCH_CHECK(code_zero.dim() == 4 && code_zero.size(0) == B && code_zero.size(1) == H &&
+              code_zero.size(2) == S && Cv >= 1, "code_zero must be [B,H,S,Cv]");
+  TORCH_CHECK(den_zero.dim() == 3 && den_zero.size(0) == B && den_zero.size(1) == H &&
+              den_zero.size(2) == S, "den_zero must be [B,H,S]");
+
+  const int rows = B * H * S;
+  const int threads = 256;
+  if (projected_query.scalar_type() == at::kBFloat16) {
+    picokv_quantize_pack_zero_projected_query_kernel<__nv_bfloat16><<<rows, threads, 0, stream>>>(
+      (const __nv_bfloat16*)projected_query.data_ptr<at::BFloat16>(),
+      packed_projected_query.data_ptr<long>(),
+      query_scale.data_ptr<float>(),
+      code_zero.data_ptr<float>(),
+      den_zero.data_ptr<float>(),
+      C,
+      Cv
+    );
+  } else {
+    picokv_quantize_pack_zero_projected_query_kernel<float><<<rows, threads, 0, stream>>>(
+      projected_query.data_ptr<float>(),
+      packed_projected_query.data_ptr<long>(),
+      query_scale.data_ptr<float>(),
+      code_zero.data_ptr<float>(),
+      den_zero.data_ptr<float>(),
+      C,
+      Cv
     );
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -4273,6 +5050,101 @@ void picokv_global_output_v1_exp8_tiled_gqa4_fused_reduce(
 }
 
 
+// __launch_bounds__ min-blocks selector for the runtime-unrolled kernel.
+// Default 4: measured 1-7% faster than the historical 6 across production
+// shapes (equal-batch, ragged, long-L) with no regression; 64 regs/thread.
+// PICOKV_TAIL_LB overrides per environment.
+static inline int picokv_tail_min_blocks() {
+  static int value = []() {
+    const char *env = getenv("PICOKV_TAIL_LB");
+    return env ? atoi(env) : 4;
+  }();
+  return value;
+}
+
+// Escape hatch / A-B switch for the KBlocks==5 compile-time specialization of
+// the runtime-unrolled kernel: PICOKV_NO_KBSPEC=1 forces the generic runtime
+// kernel from the same binary.
+static inline bool picokv_kb_spec_disabled() {
+  static int value = []() {
+    const char *env = getenv("PICOKV_NO_KBSPEC");
+    return env ? atoi(env) : 0;
+  }();
+  return value != 0;
+}
+
+// Tensor-core (bmma) score path for the GQA-4 / Ck=320 runtime-unrolled
+// kernel: PICOKV_SCORE_BMMA=1 swaps the popc key-match section for the
+// m8n8k128 bmma path (dots bitwise identical; KBlocks=5 chunks 0-2, chunk 2
+// zero-padded past kb 4). Default off. PICOKV_NO_BMMA=1 forces the popc path
+// from the same binary even when enabled.
+static inline bool picokv_score_bmma_enabled() {
+  static int value = []() {
+    const char *env = getenv("PICOKV_SCORE_BMMA");
+    const char *no = getenv("PICOKV_NO_BMMA");
+    return (env != nullptr && atoi(env) != 0 && !(no != nullptr && atoi(no) != 0)) ? 1 : 0;
+  }();
+  return value != 0;
+}
+
+// One-tile (BlockTiles=1) blocks for the KBlocks==5 popc kernel at short
+// contexts: twice the blocks, each half the serial tile work, but twice the
+// atomics into each (request, kv-head) accumulator. Engine BCG ITL (ms/step,
+// BT1 vs BT2): L<=16k wins at every batch (b1@8k -0.16, b16@8k -0.13,
+// b1@16k -0.09, b8@16k -0.03); L>=32k loses (b1@32k +0.02, b16@32k +0.22,
+// b1@64k +0.01). PICOKV_TAIL_BT1: unset/-1 = auto (L <= 16384), 0 = never,
+// 1 = whenever unscheduled.
+static inline int picokv_tail_bt1_mode() {
+  static int value = []() {
+    const char *env = getenv("PICOKV_TAIL_BT1");
+    return env ? atoi(env) : -1;
+  }();
+  return value;
+}
+
+static inline bool picokv_tail_use_bt1(int L, bool scheduled) {
+  if (scheduled) return false;  // sched tables index 512-token blocks
+  const int mode = picokv_tail_bt1_mode();
+  if (mode >= 0) return mode != 0;
+  return L <= 16384;
+}
+
+// Tensor-core tail main kernel (picokv_tc_tail.cuh) for GQA-4 / Ck=320 /
+// Cv=320: score and value inner products on mma.sync b1 AND+POPC, same math,
+// bitwise-identical single-writer outputs, ~2.4-3.2x faster than the popc
+// kernel. Default on; PICOKV_TC_TAIL=0 or PICOKV_NO_TC=1 restores the popc
+// selector below from the same binary.
+static inline bool picokv_tc_tail_enabled() {
+  static int value = []() {
+    const char *env = getenv("PICOKV_TC_TAIL");
+    const char *no = getenv("PICOKV_NO_TC");
+    if (no != nullptr && atoi(no) != 0) return 0;
+    return (env == nullptr || atoi(env) != 0) ? 1 : 0;
+  }();
+  return value != 0;
+}
+
+// Tiles (256 tokens) per block for the unscheduled tc grid. Standalone sweep
+// (H800, LB4): BT1 wins while the BT2 grid underfills the GPU (b1@8k 7.4 vs
+// 8.9 us), BT4 once its grid is >= 8 waves of blocks (b16@120k 626 vs 636 us),
+// BT2 otherwise. Sched grids are fixed at BT2 (tables index 512-token blocks).
+// PICOKV_TC_BT=1/2/4 overrides.
+static inline int picokv_tc_tail_block_tiles(int L, int BKVH, bool scheduled) {
+  if (scheduled) return 2;
+  static int forced = []() {
+    const char *env = getenv("PICOKV_TC_BT");
+    const int v = env ? atoi(env) : 0;
+    return (v == 1 || v == 2 || v == 4) ? v : 0;
+  }();
+  if (forced) return forced;
+  static int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const long grid_bt2 = (long)((L + 511) / 512) * BKVH;
+  const long grid_bt4 = (long)((L + 1023) / 1024) * BKVH;
+  if (grid_bt2 < 2L * sms) return 1;
+  if (grid_bt4 >= 8L * sms) return 4;
+  return 2;
+}
+
 void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
   at::Tensor packed_projected_query,
   at::Tensor packed_key,
@@ -4284,7 +5156,10 @@ void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
   int exp_bits,
   int tile_size,
   int key_transposed,
-  double attention_scale
+  double attention_scale,
+  at::Tensor global_lens,
+  at::Tensor sched_req,
+  at::Tensor sched_tile
 ) {
   at::cuda::CUDAGuard device_guard(packed_projected_query.device());
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(); /* explicit_current_stream */
@@ -4299,6 +5174,16 @@ void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
   const int Cv = packed_value_sign.size(3);
   const int num_tiles = (L + tile_size - 1) / tile_size;
   const int group_size = KVH == 0 ? 0 : QH / KVH;
+  const int *gl_ptr = (global_lens.defined() && global_lens.numel() > 0)
+                        ? global_lens.data_ptr<int>() : nullptr;
+  if (gl_ptr != nullptr) {
+    TORCH_CHECK((group_size == 4 || group_size == 8) && KBlocks >= 5,
+                "picokv varlen (global_lens) is only wired for the runtime-unrolled kernel (group_size 4/8, Ck>=320)");
+  }
+  const int *sr_ptr = (sched_req.defined() && sched_req.numel() > 0) ? sched_req.data_ptr<int>() : nullptr;
+  const int *st_ptr = (sched_tile.defined() && sched_tile.numel() > 0) ? sched_tile.data_ptr<int>() : nullptr;
+  const int sched_gx = (sr_ptr != nullptr) ? (int)sched_req.numel() : (L + 511) / 512;
+  const int sched_gz = (sr_ptr != nullptr) ? KVH : (B * KVH);
 
   TORCH_CHECK(QH == group_size * KVH && (group_size == 1 || group_size == 4 || group_size == 8), "v1 runtime-exp atomic path requires QH == KVH, 4 * KVH, or 8 * KVH");
   TORCH_CHECK(KBlocks == 2 || KBlocks == 3 || KBlocks == 4 || KBlocks == 5 || KBlocks == 6 || KBlocks == 7 || KBlocks == 8, "v1 runtime-exp atomic path currently requires Ck in {128,192,256,320,384,448,512}");
@@ -4352,8 +5237,8 @@ void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
     (float)attention_scale, \
     0.0f \
   )
-#define LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED(EB, GS, KEY_T) \
-  picokv_v1_expbits_atomic2_runtime_unrolled_kernel<GS, KEY_T, EB, 0><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>( \
+#define LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED(EB, GS, KEY_T, LB, KB) \
+  picokv_v1_expbits_atomic2_runtime_unrolled_kernel<GS, KEY_T, EB, 0, LB, KB><<<dim3(sched_gx, S, sched_gz), partial_threads, 0, stream>>>( \
     packed_projected_query.data_ptr<long>(), \
     packed_key.data_ptr<long>(), \
     packed_value_sign.data_ptr<long>(), \
@@ -4364,8 +5249,126 @@ void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
     B, QH, KVH, S, L, LGroups, KBlocks, Cv, \
     query_scale.numel(), \
     (float)attention_scale, \
-    0.0f \
+    0.0f, \
+    gl_ptr, \
+    sr_ptr, \
+    st_ptr \
   )
+#define LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED_LB(EB, GS, KEY_T) \
+  do { \
+    if (picokv_tail_min_blocks() == 4) { \
+      LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED(EB, GS, KEY_T, 4, 0); \
+    } else { \
+      LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED(EB, GS, KEY_T, 6, 0); \
+    } \
+  } while (0)
+// bmma score instantiation: GQA-4, KBlocks=5 compile-time, PruneMode=0, and
+// UseBmmaScore=1. Same launch config / argument list as the popc kernel.
+#define LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED_BMMA(EB, KEY_T, LB) \
+  picokv_v1_expbits_atomic2_runtime_unrolled_kernel<4, KEY_T, EB, 0, LB, 5, 1><<<dim3(sched_gx, S, sched_gz), partial_threads, 0, stream>>>( \
+    packed_projected_query.data_ptr<long>(), \
+    packed_key.data_ptr<long>(), \
+    packed_value_sign.data_ptr<long>(), \
+    query_scale.data_ptr<float>(), \
+    dense_lse.data_ptr<float>(), \
+    glob_code_output.data_ptr<float>(), \
+    glob_den.data_ptr<float>(), \
+    B, QH, KVH, S, L, LGroups, KBlocks, Cv, \
+    query_scale.numel(), \
+    (float)attention_scale, \
+    0.0f, \
+    gl_ptr, \
+    sr_ptr, \
+    st_ptr \
+  )
+// One-tile-per-block variant of the KBlocks=5 popc kernel (LB 4, unscheduled
+// grid only — sched tables address 512-token blocks).
+#define LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED_BT1(EB, KEY_T) \
+  picokv_v1_expbits_atomic2_runtime_unrolled_kernel<4, KEY_T, EB, 0, 4, 5, 0, 1><<<dim3((L + 255) / 256, S, B * KVH), partial_threads, 0, stream>>>( \
+    packed_projected_query.data_ptr<long>(), \
+    packed_key.data_ptr<long>(), \
+    packed_value_sign.data_ptr<long>(), \
+    query_scale.data_ptr<float>(), \
+    dense_lse.data_ptr<float>(), \
+    glob_code_output.data_ptr<float>(), \
+    glob_den.data_ptr<float>(), \
+    B, QH, KVH, S, L, LGroups, KBlocks, Cv, \
+    query_scale.numel(), \
+    (float)attention_scale, \
+    0.0f, \
+    gl_ptr, \
+    nullptr, \
+    nullptr \
+  )
+// Tensor-core tail kernel (GQA-4, Ck=320, Cv=320, LB 4). Unscheduled grid with
+// BT tiles per block, or the sched grid (BT 2, 512-token sched tiles).
+#define LAUNCH_V1_EXP_BITS_ATOMIC_TC_GRID(EB, KEY_T, BT, GRID, SR, ST) \
+  picokv_v1_expbits_atomic2_tc_kernel<KEY_T, EB, 320, 4, BT><<<GRID, partial_threads, 0, stream>>>( \
+    packed_projected_query.data_ptr<long>(), \
+    packed_key.data_ptr<long>(), \
+    packed_value_sign.data_ptr<long>(), \
+    query_scale.data_ptr<float>(), \
+    dense_lse.data_ptr<float>(), \
+    glob_code_output.data_ptr<float>(), \
+    glob_den.data_ptr<float>(), \
+    B, QH, KVH, S, L, LGroups, KBlocks, Cv, \
+    query_scale.numel(), \
+    (float)attention_scale, \
+    0.0f, \
+    gl_ptr, \
+    SR, \
+    ST \
+  )
+#define LAUNCH_V1_EXP_BITS_ATOMIC_TC(EB, KEY_T) \
+  do { \
+    if (sr_ptr != nullptr) { \
+      LAUNCH_V1_EXP_BITS_ATOMIC_TC_GRID(EB, KEY_T, 2, dim3(sched_gx, S, sched_gz), sr_ptr, st_ptr); \
+    } else { \
+      const int tc_bt = picokv_tc_tail_block_tiles(L, B * KVH, false); \
+      if (tc_bt == 1) { \
+        LAUNCH_V1_EXP_BITS_ATOMIC_TC_GRID(EB, KEY_T, 1, dim3((L + 255) / 256, S, B * KVH), nullptr, nullptr); \
+      } else if (tc_bt == 4) { \
+        LAUNCH_V1_EXP_BITS_ATOMIC_TC_GRID(EB, KEY_T, 4, dim3((L + 1023) / 1024, S, B * KVH), nullptr, nullptr); \
+      } else { \
+        LAUNCH_V1_EXP_BITS_ATOMIC_TC_GRID(EB, KEY_T, 2, dim3((L + 511) / 512, S, B * KVH), nullptr, nullptr); \
+      } \
+    } \
+  } while (0)
+// GQA-4 Ck>=320 selector: at KBlocks==5 / Cv==320 (the production shape)
+// launch the tensor-core kernel (default; PICOKV_NO_TC=1 disables). Otherwise
+// at KBlocks==5 launch the compile-time-specialized popc kernel — dead-guard
+// elimination on the unrolled
+// key loops. PICOKV_SCORE_BMMA=1 (default off) further swaps the popc
+// key-match for the tensor-core bmma score path inside the same
+// specialization. Other KBlocks, or PICOKV_NO_KBSPEC=1, keep the generic
+// kernel.
+#define LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED_LB_KB5(EB, KEY_T) \
+  do { \
+    if (KBlocks == 5 && Cv == 320 && picokv_tc_tail_enabled()) { \
+      LAUNCH_V1_EXP_BITS_ATOMIC_TC(EB, KEY_T); \
+    } else if (KBlocks == 5 && picokv_score_bmma_enabled()) { \
+      if (picokv_tail_min_blocks() == 4) { \
+        LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED_BMMA(EB, KEY_T, 4); \
+      } else { \
+        LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED_BMMA(EB, KEY_T, 6); \
+      } \
+    } else if (KBlocks == 5 && !picokv_kb_spec_disabled()) { \
+      if (picokv_tail_min_blocks() == 4 && \
+          picokv_tail_use_bt1(L, sr_ptr != nullptr)) { \
+        LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED_BT1(EB, KEY_T); \
+      } else if (picokv_tail_min_blocks() == 4) { \
+        LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED(EB, 4, KEY_T, 4, 5); \
+      } else { \
+        LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED(EB, 4, KEY_T, 6, 5); \
+      } \
+    } else { \
+      if (picokv_tail_min_blocks() == 4) { \
+        LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED(EB, 4, KEY_T, 4, 0); \
+      } else { \
+        LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED(EB, 4, KEY_T, 6, 0); \
+      } \
+    } \
+  } while (0)
 #define LAUNCH_V1_EXP_BITS_ATOMIC2_GQA1_BT(EB, KEY_T, BT, DIV) \
   picokv_v1_expbits_atomic2_gqa1_kernel<KEY_T, EB, BT><<<dim3((L + (DIV - 1)) / DIV, S, B * KVH), partial_threads, 0, stream>>>( \
     packed_projected_query.data_ptr<long>(), \
@@ -4439,8 +5442,8 @@ void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
       if (key_transposed) { LAUNCH_V1_EXP_BITS_ATOMIC2_GQA1(EB, true); } \
       else { LAUNCH_V1_EXP_BITS_ATOMIC2_GQA1(EB, false); } \
     } else if (group_size == 1 && KBlocks >= 5) { \
-      if (key_transposed) { LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED(EB, 1, true); } \
-      else { LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED(EB, 1, false); } \
+      if (key_transposed) { LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED_LB(EB, 1, true); } \
+      else { LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED_LB(EB, 1, false); } \
     } else if (group_size == 1) { \
       if (key_transposed) { LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME(EB, 1, true); } \
       else { LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME(EB, 1, false); } \
@@ -4448,8 +5451,8 @@ void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
       if (key_transposed) { LAUNCH_V1_EXP_BITS_ATOMIC2(EB, true); } \
       else { LAUNCH_V1_EXP_BITS_ATOMIC2(EB, false); } \
     } else if (group_size == 4 && KBlocks >= 5) { \
-      if (key_transposed) { LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED(EB, 4, true); } \
-      else { LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED(EB, 4, false); } \
+      if (key_transposed) { LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED_LB_KB5(EB, true); } \
+      else { LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED_LB_KB5(EB, false); } \
     } else if (group_size == 4) { \
       if (key_transposed) { LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME(EB, 4, true); } \
       else { LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME(EB, 4, false); } \
@@ -4457,8 +5460,8 @@ void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
       if (key_transposed) { LAUNCH_V1_EXP_BITS_ATOMIC2_GQA8(EB, true); } \
       else { LAUNCH_V1_EXP_BITS_ATOMIC2_GQA8(EB, false); } \
     } else if (group_size == 8 && KBlocks >= 5) { \
-      if (key_transposed) { LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED(EB, 8, true); } \
-      else { LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED(EB, 8, false); } \
+      if (key_transposed) { LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED_LB(EB, 8, true); } \
+      else { LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED_LB(EB, 8, false); } \
     } else if (group_size == 8) { \
       if (key_transposed) { LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME(EB, 8, true); } \
       else { LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME(EB, 8, false); } \
@@ -4481,6 +5484,10 @@ void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
 #undef LAUNCH_V1_EXP_BITS_ATOMIC2_GQA1_BT
 #undef LAUNCH_V1_EXP_BITS_ATOMIC2
 #undef LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED
+#undef LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED_LB_KB5
+#undef LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME_UNROLLED_BMMA
+#undef LAUNCH_V1_EXP_BITS_ATOMIC_TC
+#undef LAUNCH_V1_EXP_BITS_ATOMIC_TC_GRID
 #undef LAUNCH_V1_EXP_BITS_ATOMIC_RUNTIME
 #undef LAUNCH_V1_EXP_BITS_ATOMIC
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -4566,7 +5573,10 @@ void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic_pruned(
     B, QH, KVH, S, L, LGroups, KBlocks, Cv, \
     query_scale.numel(), \
     (float)attention_scale, \
-    (float)prune_log_eps \
+    (float)prune_log_eps, \
+    nullptr, \
+    nullptr, \
+    nullptr \
   )
 #define LAUNCH_PRUNED_FIXED43(KB, CV) \
   picokv_v1_expbits_atomic2_fixed_kernel<4, KB, CV, true, 4, 3><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>( \
@@ -4854,7 +5864,8 @@ void picokv_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic(
       glob_den.data_ptr<float>(),
       B, QH, KVH, S, L, LGroups,
       query_scale.numel(),
-      (float)attention_scale
+      (float)attention_scale,
+      nullptr
     );
   } else {
     picokv_v1_expbits_atomic2_gqa8_bmma_score_kernel<false, 4><<<dim3((L + 511) / 512, S, B * KVH), partial_threads, 0, stream>>>(
@@ -4867,7 +5878,8 @@ void picokv_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic(
       glob_den.data_ptr<float>(),
       B, QH, KVH, S, L, LGroups,
       query_scale.numel(),
-      (float)attention_scale
+      (float)attention_scale,
+      nullptr
     );
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -4889,38 +5901,23 @@ void picokv_decode_tail_v1_exp8_tiled_gqa4_atomic(
   int exp_bits,
   int tile_size,
   int key_transposed,
-  double attention_scale
+  double attention_scale,
+  at::Tensor global_lens,
+  at::Tensor sched_req,
+  at::Tensor sched_tile
 ) {
   at::cuda::CUDAGuard device_guard(projected_query.device());
 
-  picokv_quantize_pack_projected_query(projected_query, packed_projected_query, query_scale);
-
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream(projected_query.device().index());
-  float *code_ptr = glob_code_output.data_ptr<float>();
-  float *den_ptr = glob_den.data_ptr<float>();
-  const size_t code_numel = (size_t)glob_code_output.numel();
-  const size_t den_numel = (size_t)glob_den.numel();
-  if (den_ptr == code_ptr + code_numel) {
-    C10_CUDA_CHECK(cudaMemsetAsync(
-      code_ptr,
-      0,
-      (code_numel + den_numel) * sizeof(float),
-      stream
-    ));
-  } else {
-    C10_CUDA_CHECK(cudaMemsetAsync(
-      code_ptr,
-      0,
-      code_numel * sizeof(float),
-      stream
-    ));
-    C10_CUDA_CHECK(cudaMemsetAsync(
-      den_ptr,
-      0,
-      den_numel * sizeof(float),
-      stream
-    ));
-  }
+  // Quantize+pack the projected query and zero both fp32 accumulators in ONE
+  // launch (replaces the separate quantize kernel + cudaMemsetAsync pair).
+  // Same zeros, same stream, still strictly before the main kernel.
+  picokv_quantize_pack_zero_projected_query(
+    projected_query,
+    packed_projected_query,
+    query_scale,
+    glob_code_output,
+    glob_den
+  );
 
   picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
     packed_projected_query,
@@ -4933,14 +5930,122 @@ void picokv_decode_tail_v1_exp8_tiled_gqa4_atomic(
     exp_bits,
     tile_size,
     key_transposed,
-    attention_scale
+    attention_scale,
+    global_lens,
+    sched_req,
+    sched_tile
   );
 
-  picokv_fused_output_projection(
-    dense_output,
-    glob_code_output,
-    glob_den,
-    value_proj,
-    attn_output
-  );
+  // Value projection: cublas GEMM path by default (bf16), scalar kernel as
+  // fallback (PICOKV_PROJ_GEMM=0 or non-bf16 inputs). Same math up to fp32
+  // accumulation order.
+  static const bool use_proj_gemm = []() {
+    const char *env = getenv("PICOKV_PROJ_GEMM");
+    return env ? (atoi(env) != 0) : true;
+  }();
+  if (use_proj_gemm && dense_output.scalar_type() == at::kBFloat16) {
+    picokv_fused_output_projection_gemm(
+      dense_output,
+      glob_code_output,
+      glob_den,
+      value_proj,
+      attn_output
+    );
+  } else {
+    picokv_fused_output_projection(
+      dense_output,
+      glob_code_output,
+      glob_den,
+      value_proj,
+      attn_output
+    );
+  }
+}
+
+
+// Rows per window split-chunk block. PICOKV_WIN_CH in {32,48,64,96} forces
+// one; unset/0 = auto by batch size. Small launches are latency-bound on the
+// per-thread phase-4 V chain (CH/2 rows), so fewer rows per block win there;
+// from ~128 (b, kv-head) pairs the grid is full and the merge cost dominates.
+// Graph-replayed times on this box (us, cap 832, lpl 384) CH 96/48/32:
+// b1 10.9/8.4/7.7, b4 12.9/11.1/10.7, b8 15.8/13.3/13.9, b16 21.7/22.9/23.3.
+static inline int picokv_window_chunk_rows(int B, int KVH) {
+  static int forced = []() {
+    const char *env = getenv("PICOKV_WIN_CH");
+    return env ? atoi(env) : 0;
+  }();
+  if (forced == 32 || forced == 48 || forced == 64 || forced == 96) return forced;
+  const int pairs = B * KVH;
+  if (pairs <= 32) return 32;
+  if (pairs <= 64) return 48;
+  return kWinChunkRows;
+}
+
+void picokv_window_attn(
+  at::Tensor kbuf,
+  at::Tensor vbuf,
+  at::Tensor lpl,
+  at::Tensor q,
+  at::Tensor out,
+  at::Tensor lse,
+  double sm_scale
+) {
+  at::cuda::CUDAGuard device_guard(kbuf.device());
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  TORCH_CHECK(kbuf.dim() == 4 && vbuf.dim() == 4, "window attn: kbuf/vbuf must be [B, cap, KVH, D]");
+  TORCH_CHECK(q.dim() == 3, "window attn: q must be [B, QH, D]");
+  TORCH_CHECK(kbuf.is_cuda() && vbuf.is_cuda() && lpl.is_cuda() && q.is_cuda(), "window attn: all inputs must be CUDA tensors");
+  TORCH_CHECK(kbuf.is_contiguous() && vbuf.is_contiguous() && lpl.is_contiguous(), "window attn: kbuf/vbuf/lpl must be contiguous");
+  TORCH_CHECK(q.is_contiguous() && out.is_contiguous() && lse.is_contiguous(), "window attn: q/out/lse must be contiguous");
+  TORCH_CHECK(kbuf.scalar_type() == at::kBFloat16 && vbuf.scalar_type() == at::kBFloat16
+              && q.scalar_type() == at::kBFloat16 && out.scalar_type() == at::kBFloat16,
+              "window attn: kbuf/vbuf/q/out must be bf16");
+  TORCH_CHECK(lpl.scalar_type() == at::kInt, "window attn: lpl must be int32");
+  TORCH_CHECK(lse.scalar_type() == at::kFloat, "window attn: lse must be float32");
+
+  const int B = kbuf.size(0);
+  const int cap = kbuf.size(1);
+  const int KVH = kbuf.size(2);
+  const int D = kbuf.size(3);
+  const int QH = q.size(1);
+  TORCH_CHECK(vbuf.sizes() == kbuf.sizes(), "window attn: vbuf shape must match kbuf");
+  TORCH_CHECK(q.size(0) == B && q.size(2) == D, "window attn: q must be [B, QH, D] with matching B/D");
+  TORCH_CHECK(out.size(0) == B && out.size(1) == QH && out.size(2) == D, "window attn: out must be [B, QH, D]");
+  TORCH_CHECK(lse.size(0) == B && lse.size(1) == QH, "window attn: lse must be [B, QH]");
+  TORCH_CHECK(lpl.size(0) == B, "window attn: lpl must be [B]");
+  TORCH_CHECK(D == 128, "window attn kernel currently supports head_dim 128");
+  TORCH_CHECK(QH == KVH * 4, "window attn kernel currently supports GQA-4 (QH == 4*KVH)");
+
+  // chunk split: smem holds only [4][CH] logits + stats + phase-4 partials
+  // (<= 5.9 KB) — no 48 KB opt-in needed and cap is unbounded.
+  const int ch = picokv_window_chunk_rows(B, KVH);
+  const int CHUNKS = (cap + ch - 1) / ch;
+  const size_t smem_bytes = (size_t)(4 * ch + 72 + 1024) * sizeof(float);
+  auto fopts = q.options();
+  at::Tensor acc = at::empty({(long)B * KVH * CHUNKS * 4 * D}, fopts.dtype(at::kFloat));
+  at::Tensor ml = at::empty({(long)B * KVH * CHUNKS * 4 * 2}, fopts.dtype(at::kFloat));
+
+  dim3 grid(B, KVH, CHUNKS);
+#define PICOKV_WINDOW_LAUNCH(CHV) \
+  do { \
+    picokv_window_attn_kernel<4, 128, CHV><<<grid, 256, smem_bytes, stream>>>( \
+        reinterpret_cast<const __nv_bfloat16 *>(kbuf.data_ptr<at::BFloat16>()), \
+        reinterpret_cast<const __nv_bfloat16 *>(vbuf.data_ptr<at::BFloat16>()), \
+        lpl.data_ptr<int>(), \
+        reinterpret_cast<const __nv_bfloat16 *>(q.data_ptr<at::BFloat16>()), \
+        acc.data_ptr<float>(), ml.data_ptr<float>(), \
+        (float)sm_scale, cap, KVH, CHUNKS); \
+    C10_CUDA_KERNEL_LAUNCH_CHECK(); \
+    picokv_window_attn_merge_kernel<CHV><<<dim3(B, KVH), 256, 0, stream>>>( \
+        lpl.data_ptr<int>(), acc.data_ptr<float>(), ml.data_ptr<float>(), \
+        reinterpret_cast<__nv_bfloat16 *>(out.data_ptr<at::BFloat16>()), \
+        lse.data_ptr<float>(), KVH, CHUNKS); \
+    C10_CUDA_KERNEL_LAUNCH_CHECK(); \
+  } while (0)
+  if (ch == 32) PICOKV_WINDOW_LAUNCH(32);
+  else if (ch == 48) PICOKV_WINDOW_LAUNCH(48);
+  else if (ch == 64) PICOKV_WINDOW_LAUNCH(64);
+  else PICOKV_WINDOW_LAUNCH(96);
+#undef PICOKV_WINDOW_LAUNCH
 }

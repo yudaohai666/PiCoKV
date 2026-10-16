@@ -22,6 +22,16 @@ void picokv_fused_output_projection(
   at::Tensor attn_output
 );
 
+// Same projection via one cublas strided-batched GEMM (bf16 tensor cores, fp32
+// accumulate) + epilogue. Same math up to fp32 accumulation order.
+void picokv_fused_output_projection_gemm(
+  at::Tensor dense_output,
+  at::Tensor glob_code_output,
+  at::Tensor glob_den,
+  at::Tensor value_proj,
+  at::Tensor attn_output
+);
+
 
 // GQA-specialized L-tiled packed PiCoKV global attention for QH/KVH == 4.
 void picokv_global_code_output_packed_value_tiled_gqa4(
@@ -98,6 +108,16 @@ void picokv_quantize_pack_projected_query(
   at::Tensor query_scale
 );
 
+// Same, plus zeroing the two fp32 tail accumulators ([B,H,S,Cv] codes and
+// [B,H,S] denominators) in the same launch, replacing a separate memset.
+void picokv_quantize_pack_zero_projected_query(
+  at::Tensor projected_query,
+  at::Tensor packed_projected_query,
+  at::Tensor query_scale,
+  at::Tensor code_zero,
+  at::Tensor den_zero
+);
+
 // Pack int8 projected queries into sign + 7 magnitude bitplanes used by the
 // bitwise key dot-product kernels. Input: [B,H,S,C], output: [B,H,S,C/64,8].
 void picokv_pack_projected_query(
@@ -144,7 +164,10 @@ void picokv_decode_tail_v1_exp8_tiled_gqa4_atomic(
   int exp_bits,
   int tile_size,
   int key_transposed,
-  double attention_scale
+  double attention_scale,
+  at::Tensor global_lens,
+  at::Tensor sched_req,
+  at::Tensor sched_tile
 );
 
 // Pruned GQA4/Ck=256/Cv=256 direct-output path. prune_mode:
@@ -235,7 +258,26 @@ void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
   int exp_bits,
   int tile_size,
   int key_transposed,
-  double attention_scale
+  double attention_scale,
+  at::Tensor global_lens,
+  at::Tensor sched_req,
+  at::Tensor sched_tile
+);
+
+
+// Fused dense-window decode attention over the per-layer ring pools: softmax
+// attention over rows [0, lpl[b]) of kbuf/vbuf [B, cap, KVH, D] (GQA-4,
+// head_dim 128, bf16). Writes out [B, QH, D] and lse [B, QH] in ln space —
+// the same contract as the flashinfer paged-decode call it replaces. lpl is
+// read on device at run time (CUDA-graph replay-safe as the window grows).
+void picokv_window_attn(
+  at::Tensor kbuf,
+  at::Tensor vbuf,
+  at::Tensor lpl,
+  at::Tensor q,
+  at::Tensor out,
+  at::Tensor lse,
+  double sm_scale
 );
 
 
