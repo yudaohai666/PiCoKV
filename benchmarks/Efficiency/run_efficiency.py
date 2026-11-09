@@ -5,6 +5,11 @@ For each (method, prompt_length) it measures:
   * decode latency per token, derived from ``generate(max_new_tokens=N)`` minus TTFT
   * decode throughput (tokens/s)
   * peak GPU memory for the prefill phase and for the full generation
+  * KV-cache footprint (GB): ``prefill_kv_gb`` right after the full-prompt
+    prefill and ``decode_kv_gb`` at the end of the decode run (``_kv_cache_bytes``),
+    isolated from weights/activations and INCLUDING each method's
+    quantize/reconstruct tensors (projection stacks, scales, hash codes), so
+    methods are comparable on an end-to-end cache-vs-length basis
 
 The same ``generate()``-based methodology works uniformly across picokv (a
 fresh QuantKVCache injected per call), kivi (internal quantized cache), and the
@@ -74,6 +79,71 @@ def _peak_gb() -> float:
     return 0.0
 
 
+# Cache-object attributes that are NOT persistent KV state: decode kernel
+# workspace / streams and timing events (transient scratch, not quantized
+# state). Everything else -- including the shared encoder/decoder projection
+# stacks a method holds to (de)quantize (picokv key/value encoders+decoders,
+# BPC hash projections) -- IS counted as part of the cache, so the reported
+# number includes the method's real quantize/reconstruct cost.
+_CACHE_SKIP_ATTRS = frozenset({
+    "_pending_encoders", "_pending_decoders",
+    "_workspace", "_dense_stream", "_prepare_events",
+})
+
+
+def _kv_cache_bytes(pkv) -> int:
+    """GPU bytes held by a ``past_key_values`` object's persistent KV state.
+
+    Walks the cache's tensor graph generically (picokv's ``StandaloneLlamaCache``,
+    BPC's ``AllCache``, OScaR's ``DynamicCache``, a stock transformers
+    ``DynamicCache``, or KIVI's tuple-of-tensors) and sums the physical bytes of
+    every unique CUDA storage -- i.e. the method's REAL quantized/dense cache
+    footprint, including the projection/scale tensors it keeps to quantize and
+    reconstruct (views sharing one storage are counted once). Cycle-safe;
+    transient attributes (workspace/streams/events) are excluded via
+    ``_CACHE_SKIP_ATTRS``.
+    """
+    if pkv is None:
+        return 0
+    total = 0
+    seen_storage: set[int] = set()
+    seen_objs: set[int] = set()
+
+    def add(obj) -> None:
+        nonlocal total
+        if obj is None:
+            return
+        if isinstance(obj, torch.Tensor):
+            if obj.device.type != "cuda":
+                return
+            st = obj.untyped_storage()
+            ptr = st.data_ptr()
+            if ptr in seen_storage:
+                return
+            seen_storage.add(ptr)
+            total += st.nbytes()
+            return
+        if isinstance(obj, dict):
+            for v in obj.values():
+                add(v)
+            return
+        if isinstance(obj, (list, tuple, set)):
+            for v in obj:
+                add(v)
+            return
+        d = getattr(obj, "__dict__", None)
+        if d is None or id(obj) in seen_objs:
+            return
+        seen_objs.add(id(obj))
+        for k, v in d.items():
+            if k in _CACHE_SKIP_ATTRS:
+                continue
+            add(v)
+
+    add(pkv)
+    return total
+
+
 def build_inputs(vocab_size: int, batch_size: int, prompt_len: int, device) -> torch.Tensor:
     # Content is irrelevant for latency; use random in-range ids (avoid id 0/pad).
     return torch.randint(1, vocab_size, (batch_size, prompt_len), device=device, dtype=torch.long)
@@ -137,7 +207,7 @@ def _time_generate(model, input_ids, max_new_tokens, make_cache) -> float:
     return elapsed
 
 
-def _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats, decode_warmup=2, track_peak: bool = False) -> float:
+def _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats, decode_warmup=2, track_peak: bool = False, out_kv: Optional[dict] = None) -> float:
     """Median per-token STEADY-STATE decode latency, timing ONLY the decode steps.
 
     Prefill once (untimed) to populate the KV cache, run ``decode_warmup`` untimed
@@ -178,6 +248,10 @@ def _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats, d
                 cache_position=torch.arange(prompt_len, device=device), logits_to_keep=1)
             out = model(**mi)
             pkv = out.past_key_values
+            if out_kv is not None and "prefill_kv_gb" not in out_kv:
+                # KV-cache footprint right after the full-prompt prefill
+                # (the cache object all decode steps run against).
+                out_kv["prefill_kv_gb"] = _kv_cache_bytes(pkv) / 1024 ** 3
             next_tok = out.logits[:, -1:, :].argmax(dim=-1)
             gen_ids = torch.cat([gen_ids, next_tok], dim=1)
             attn = torch.cat([attn, torch.ones_like(next_tok)], dim=1)
@@ -213,13 +287,17 @@ def _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats, d
                 attn = torch.cat([attn, torch.ones_like(next_tok)], dim=1)
                 pos += 1
             _sync()
+        if out_kv is not None:
+            # KV-cache footprint at the end of this decode run: the cache the
+            # benchmark's decoding phase actually holds in memory.
+            out_kv["decode_kv_gb"] = _kv_cache_bytes(pkv) / 1024 ** 3
         per_token.append((time.perf_counter() - t0) * 1000.0 / decode_tokens)
         del pkv, gen_ids, attn, out, next_tok, mi
         _free()
     return statistics.median(per_token)
 
 
-def _decode_peak_gb(model, input_ids, decode_tokens, make_cache, device) -> float:
+def _decode_peak_gb(model, input_ids, decode_tokens, make_cache, device, out_kv: Optional[dict] = None) -> float:
     """Peak GPU memory during the DECODE phase only.
 
     Prefill once (untimed) to build the KV cache, reset the peak counter, then
@@ -237,6 +315,9 @@ def _decode_peak_gb(model, input_ids, decode_tokens, make_cache, device) -> floa
             cache_position=torch.arange(prompt_len, device=device), logits_to_keep=1)
         out = model(**mi)
         pkv = out.past_key_values
+        if out_kv is not None and "prefill_kv_gb" not in out_kv:
+            # KV-cache footprint right after the full-prompt prefill.
+            out_kv["prefill_kv_gb"] = _kv_cache_bytes(pkv) / 1024 ** 3
         next_tok = out.logits[:, -1:, :].argmax(dim=-1)
         gen_ids = torch.cat([gen_ids, next_tok], dim=1)
         attn = torch.cat([attn, torch.ones_like(next_tok)], dim=1)
@@ -253,6 +334,9 @@ def _decode_peak_gb(model, input_ids, decode_tokens, make_cache, device) -> floa
             next_tok = out.logits[:, -1:, :].argmax(dim=-1)
             gen_ids = torch.cat([gen_ids, next_tok], dim=1)
             attn = torch.cat([attn, torch.ones_like(next_tok)], dim=1)
+    if out_kv is not None:
+        # KV-cache footprint at the end of the decode run.
+        out_kv["decode_kv_gb"] = _kv_cache_bytes(pkv) / 1024 ** 3
     peak = _peak_gb()
     del pkv, gen_ids, attn, out, next_tok, mi
     _free()
@@ -276,6 +360,8 @@ def measure(model, make_cache, vocab_size, batch_size, prompt_len, decode_tokens
 
     prefill_peak = decode_peak = None
     ttft_ms = decode_ms_per_token = decode_toks_per_s = None
+    # KV-cache footprints (GB) filled by the decode/peak helpers below.
+    kv = {}
 
     if mem_only:
         # Prefill-phase peak: reset -> single prefill (+1 token).
@@ -285,18 +371,20 @@ def measure(model, make_cache, vocab_size, batch_size, prompt_len, decode_tokens
         prefill_peak = _peak_gb()
 
         # Decode-phase peak: prefill (untimed) -> reset -> decode loop.
-        decode_peak = _decode_peak_gb(model, input_ids, decode_tokens, make_cache, device)
+        decode_peak = _decode_peak_gb(model, input_ids, decode_tokens, make_cache, device, out_kv=kv)
     else:
         # Latency + peaks in one pass: reset before the TTFT loop so the
         # prefill peak excludes weights/warmup; _decode_ms_per_token resets
         # after its untimed prefill for the decode peak. Both are host-side
-        # counter ops — no extra generate passes, latency untouched.
+        # counter ops — no extra generate passes, latency untouched. The same
+        # pass fills `kv` with the KV-cache footprints (also host-side walks).
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
         ttft = [_time_generate(model, input_ids, 1, make_cache) for _ in range(repeats)]
         ttft_ms = statistics.median(ttft)
         prefill_peak = _peak_gb()
-        decode_ms_per_token = _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats, track_peak=True)
+        decode_ms_per_token = _decode_ms_per_token(
+            model, input_ids, decode_tokens, make_cache, repeats, track_peak=True, out_kv=kv)
         decode_peak = _peak_gb()
         decode_toks_per_s = (1000.0 / decode_ms_per_token * batch_size) if decode_ms_per_token > 0 else float("nan")
 
@@ -307,6 +395,10 @@ def measure(model, make_cache, vocab_size, batch_size, prompt_len, decode_tokens
         "decode_toks_per_s": round(decode_toks_per_s, 2) if decode_toks_per_s is not None else None,
         "prefill_peak_gb": round(prefill_peak, 3) if prefill_peak is not None else None,
         "decode_peak_gb": round(decode_peak, 3) if decode_peak is not None else None,
+        # KV cache footprint: prefill_kv_gb right after the full-prompt prefill,
+        # decode_kv_gb at the end of the decode run (what decoding actually holds).
+        "prefill_kv_gb": round(kv["prefill_kv_gb"], 3) if "prefill_kv_gb" in kv else None,
+        "decode_kv_gb": round(kv["decode_kv_gb"], 3) if "decode_kv_gb" in kv else None,
     }
 
 
@@ -425,6 +517,8 @@ def run(args) -> None:
                 "decode_toks_per_s": None,
                 "prefill_peak_gb": None,
                 "decode_peak_gb": None,
+                "prefill_kv_gb": None,
+                "decode_kv_gb": None,
             }
             print(f"[{args.method}] L={length}: OUT OF MEMORY (recorded, continuing)")
         results[str(length)] = r
@@ -434,13 +528,15 @@ def run(args) -> None:
         if args.mem_only:
             print(
                 f"[{args.method}] L={length}: "
-                f"peak prefill/decode={r['prefill_peak_gb']}/{r['decode_peak_gb']}GB"
+                f"peak prefill/decode={r['prefill_peak_gb']}/{r['decode_peak_gb']}GB  "
+                f"kv prefill/decode={r['prefill_kv_gb']}/{r['decode_kv_gb']}GB"
             )
         else:
             print(
                 f"[{args.method}] L={length}: prefill={r['prefill_ms']}ms  "
                 f"decode={r['decode_ms_per_token']}ms/tok ({r['decode_toks_per_s']} tok/s)  "
-                f"peak={r['prefill_peak_gb']}/{r['decode_peak_gb']}GB"
+                f"peak={r['prefill_peak_gb']}/{r['decode_peak_gb']}GB  "
+                f"kv={r['prefill_kv_gb']}/{r['decode_kv_gb']}GB"
             )
 
     _save()
@@ -469,6 +565,7 @@ def compare(directory: str) -> None:
         header = (
             f"{'method':<22}{'prefill_ms':>12}{'dec_ms/tok':>12}"
             f"{'tok/s':>10}{'prefill_GB':>12}{'decode_GB':>10}"
+            f"{'prefill_kvGB':>14}{'decode_kvGB':>12}"
         )
         print(header)
         print("-" * len(header))
@@ -486,6 +583,7 @@ def compare(directory: str) -> None:
                 f"{label:<22}"
                 f"{_c('prefill_ms', 12)}{_c('decode_ms_per_token', 12)}"
                 f"{_c('decode_toks_per_s', 10)}{_c('prefill_peak_gb', 12)}{_c('decode_peak_gb', 10)}"
+                f"{_c('prefill_kv_gb', 14)}{_c('decode_kv_gb', 12)}"
             )
 
 

@@ -23,6 +23,7 @@ from .config import StandaloneConfig
 from .constants import ONLINE_GROUP_BITS
 from .decode import decode_attention
 from .prepare import prepare_kv_cache
+from .recon import build_recon_dense_cache
 
 try:  # Match the flash_attention_2 baseline backend for a fair prefill comparison.
     from flash_attn import flash_attn_func as _flash_attn_func
@@ -279,6 +280,39 @@ class StandaloneLlamaCache(Cache):
             _layer_encoders(self.key_decoders, layer_idx, heads),
             _layer_encoders(self.value_decoders, layer_idx, heads),
         )
+
+        # Ablation path: reconstruct compressed side(s) to bf16 and serve decode
+        # through the existing dense SDPA branch, bypassing the packed-code CUDA
+        # kernel entirely. The production path (recon_ablation=False) is untouched.
+        if self.config.recon_ablation:
+            key_encoders, value_encoders = self._pending_encoders
+            key_decoders, value_decoders = self._pending_decoders
+            self._pending_encoders = None
+            self._pending_decoders = None
+            recon_key, recon_value = build_recon_dense_cache(
+                key_states,
+                value_states,
+                quant_target=self.config.quant_target,
+                key_bits=self.config.key_bits,
+                value_bits=self.config.value_bits,
+                direction_sample_size=self.config.direction_sample_size,
+                sink_size=self.config.sink_size,
+                local_size=self.config.local_size,
+                eas=self.config.eas,
+                zerorope=self.config.zerorope,
+                seed=self.config.seed,
+                key_encoders=key_encoders,
+                value_encoders=value_encoders,
+                key_decoders=key_decoders,
+                value_decoders=value_decoders,
+            )
+            self._dense_layers[layer_idx] = (
+                recon_key.contiguous(),
+                recon_value.contiguous(),
+            )
+            self.seq_lengths[layer_idx] = total_len
+            return
+
         stream = torch.cuda.current_stream(key_states.device)
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)

@@ -1,13 +1,12 @@
-"""Plot prefill time, prefill peak memory, and decode throughput vs. context length.
+"""Plot prefill time and decode throughput vs. context length.
 
 Reads results/efficiency-1-1/Llama-3.1-8B-Instruct_efficiency.json (batch_size=1,
-lengths 8K-512K) and draws three side-by-side panels comparing PiCoKV against
+lengths 8K-512K) and draws two side-by-side panels comparing PiCoKV against
 the dense (flash_attention_2) and KV-quant baselines (KIVI, OScaR, PolarQuant):
 
   - Prefill time (ms), grouped bars (one bar per method per length), truncated
     at FA2's last successful length (512K is PiCoKV-only, an OOM comparison
     point rather than a head-to-head data point).
-  - Peak memory (GB), from `prefill_peak_gb`
   - Decode throughput (tokens/s), log-y
 
 Usage:
@@ -42,7 +41,6 @@ METHODS = [
 ]
 
 METRICS = [
-    ("prefill_peak_gb", "Peak memory (GB)", False),
     ("decode_toks_per_s", "Decode throughput (tokens/s)", False),
 ]
 
@@ -82,7 +80,7 @@ def main():
         for key in list(d.keys()):
             d[key] = [d[key][i] for i in keep]
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5.5))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5.5))
 
     ax = axes[0]
     fa2_lengths = per_method[BASELINE_TAG]["len"]
@@ -107,7 +105,6 @@ def main():
     ax.set_ylabel("Batch size = 1\nPrefill time (s)")
     ax.tick_params(labelsize=13, length=6, width=1.5)
     ax.grid(True, which="major", axis="y", linewidth=0.6, alpha=0.25, zorder=0)
-    ax.legend(loc="upper left", frameon=False, fontsize=11.5, ncol=1)
 
     for ax, (key, ylabel, logy) in zip(axes[1:], METRICS):
         for tag, label, color, dash in METHODS:
@@ -135,34 +132,25 @@ def main():
         ax.tick_params(labelsize=13, length=6, width=1.5)
         ax.grid(True, which="major", axis="y", linewidth=0.6, alpha=0.25, zorder=0)
 
-    axes[1].legend(loc="upper left", frameon=False, fontsize=11.5)
+    handles, labels = axes[1].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", bbox_to_anchor=(0.5, 1.0),
+               ncol=len(METHODS), frameon=False, fontsize=13, columnspacing=1.6,
+               handlelength=2.6)
 
     boundary = fa2_lengths[-1]
-    fa2_mem = per_method[BASELINE_TAG]["prefill_peak_gb"][per_method[BASELINE_TAG]["len"].index(boundary)]
-    pico_mem = per_method[PICOKV_TAG]["prefill_peak_gb"][per_method[PICOKV_TAG]["len"].index(boundary)]
+    fa2_toks = per_method[BASELINE_TAG]["decode_toks_per_s"][per_method[BASELINE_TAG]["len"].index(boundary)]
+    pico_toks = per_method[PICOKV_TAG]["decode_toks_per_s"][per_method[PICOKV_TAG]["len"].index(boundary)]
     axes[1].set_xlim(None, boundary * 1.35)
     bx = boundary * 1.12
     bracket_x = bx * 1.06
-    axes[1].plot([bx, bracket_x, bracket_x, bx], [pico_mem, pico_mem, fa2_mem, fa2_mem],
+    axes[1].plot([bx, bracket_x, bracket_x, bx], [fa2_toks, fa2_toks, pico_toks, pico_toks],
                  color="#d62728", linewidth=1.3, zorder=6)
     axes[1].text(
-        bracket_x, (pico_mem + fa2_mem) / 2 + (fa2_mem - pico_mem) * 0.22, f"{fa2_mem / pico_mem:.2f}x less",
-        fontsize=11, color="#d62728", fontweight="bold", ha="center", va="center",
-    )
-
-    fa2_toks = per_method[BASELINE_TAG]["decode_toks_per_s"][per_method[BASELINE_TAG]["len"].index(boundary)]
-    pico_toks = per_method[PICOKV_TAG]["decode_toks_per_s"][per_method[PICOKV_TAG]["len"].index(boundary)]
-    axes[2].set_xlim(None, boundary * 1.35)
-    bx = boundary * 1.12
-    bracket_x = bx * 1.06
-    axes[2].plot([bx, bracket_x, bracket_x, bx], [fa2_toks, fa2_toks, pico_toks, pico_toks],
-                 color="#d62728", linewidth=1.3, zorder=6)
-    axes[2].text(
         bx * 1.02, (fa2_toks + pico_toks) / 2, f"{pico_toks / fa2_toks:.2f}x",
         fontsize=11, color="#d62728", fontweight="bold", ha="right", va="center",
     )
 
-    fig.subplots_adjust(left=0.055, right=0.985, bottom=0.16, top=0.92, wspace=0.28)
+    fig.subplots_adjust(left=0.055, right=0.985, bottom=0.16, top=0.88, wspace=0.28)
     os.makedirs(OUTDIR, exist_ok=True)
     path = os.path.join(OUTDIR, "efficiency_vs_length")
     fig.savefig(path + ".pdf", dpi=300)

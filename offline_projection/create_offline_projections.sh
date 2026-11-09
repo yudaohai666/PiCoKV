@@ -85,5 +85,5 @@ python create_offline_projections.py \
     --collect_stride "${COLLECT_STRIDE}" \
     --collect_layers_per_forward "${COLLECT_LAYERS_PER_FORWARD}" \
     --block32-learn-tokens "${BLOCK32_LEARN_TOKENS}" \
-    --verbose_fit --keep_tmp \
+    --verbose_fit \
     "$@"

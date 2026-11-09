@@ -24,6 +24,18 @@ dist/
 # Generated benchmark results.
 # results/
 
+# Memoized KV extracted by draw/plot_residual_iteration.py. Regenerable from the
+# model by rerunning the script; ~65MB per (layer, ctx, depth, dtype) entry.
+draw/cache/
+
+# Intermediate-exploration projections. The k256_v256 / k320_v320 pairs in the
+# same directory ARE tracked; k256_v320 was a one-off sweep point.
+offline_projection/projections/*_k256_v320.pt
+
+# Agent/editor local state.
+.claude/
+memory/
+
 # Generated profiler traces
 results/efficiency/prof/
 offline_projection/data/proof-pile.json

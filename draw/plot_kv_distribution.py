@@ -38,6 +38,23 @@ NEEDLE = (
     "Dolores Park on a sunny day.\n"
 )
 
+# Shared by the other draw scripts, which import this module anyway.
+#
+# The GPUs on this box are sm_90 and run torch 2.6+cu124 fine. What used to make
+# CUDA look unavailable -- and what an earlier version of this comment
+# misattributed to sm_100 -- is the bundled compat driver: LD_LIBRARY_PATH starts
+# with /usr/local/cuda/compat, whose libcuda is 575.51.03, *older* than the
+# loaded kernel module (580.126.20). cudaGetDeviceCount then fails with error 803
+# (driver mismatch) and torch.cuda.is_available() silently returns False. Drop
+# that entry to get the system libcuda:
+#
+#   export LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu
+#
+# The default follows whatever actually initialized, so these scripts stay
+# runnable in a CPU-only container without a flag.
+DEFAULT_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument(
@@ -57,8 +74,7 @@ def parse_args():
         help="target prompt length in tokens; 0 plots the bare needle",
     )
     p.add_argument("--depth-percent", type=float, default=50.0)
-    # The sm_100 GPUs on this box cannot run torch 2.6+cu124, so CPU is default.
-    p.add_argument("--device", default="cpu")
+    p.add_argument("--device", default=DEFAULT_DEVICE)
     p.add_argument("--outdir", default=os.path.join(HERE, "pics"))
     p.add_argument("--dpi", type=int, default=300)
     return p.parse_args()
@@ -104,6 +120,7 @@ def collect_kv(args):
         args.model,
         torch_dtype=torch.float32 if args.device == "cpu" else torch.float16,
         trust_remote_code=True,
+        attn_implementation="sdpa",
     ).to(args.device)
     model.eval()
 
@@ -115,12 +132,15 @@ def collect_kv(args):
         )
 
     # Only layers 0..layer feed the cache entry we plot; dropping the rest cuts
-    # the 8k CPU forward pass roughly proportionally. LlamaModel.forward slices
+    # the forward pass roughly proportionally. LlamaModel.forward slices
     # self.layers[:config.num_hidden_layers], which is safe on a shorter list.
     model.model.layers = model.model.layers[: args.layer + 1]
 
     ids = tok(prompt, return_tensors="pt").to(model.device)
-    cache = model(**ids, use_cache=True).past_key_values
+    # model.model, not model: the causal-LM wrapper projects every position to
+    # the 128k vocab, ~2 GiB of logits at ctx 8k, for a tensor nothing here
+    # reads. The base model returns past_key_values without entering lm_head.
+    cache = model.model(**ids, use_cache=True).past_key_values
     if hasattr(cache, "layers"):  # transformers >= 4.54
         k, v = cache.layers[args.layer].keys, cache.layers[args.layer].values
     else:

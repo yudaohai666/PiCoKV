@@ -144,7 +144,8 @@ def parse_arguments():
         type=str,
         default="picokv",
         help=(
-            "evaluation method: 'picokv' / 'kivi' / 'oscar' / 'polar' (quantized KV cache), "
+            "evaluation method: 'picokv' (CUDA kernel) / 'picokv_recon' (dequant+flash ablation, "
+            "see --quant-target) / 'kivi' / 'oscar' / 'polar' (quantized KV cache), "
             "or a dense baseline attn impl 'flash_attention_2' / 'sdpa' / 'eager'"
         ),
     )
@@ -171,6 +172,12 @@ def parse_arguments():
     )
     parser.add_argument("--prune-mode", type=int, default=3, help="decode pruning mode (CUDA v1_exp8 path)")
     parser.add_argument("--log-eps", type=float, default=-10.0, help="decode pruning log-epsilon threshold")
+    parser.add_argument(
+        "--quant-target",
+        default="both",
+        choices=["key", "value", "both", "none", "dense_zr"],
+        help="picokv_recon: which side(s) to quantize+reconstruct (dequant+flash, no CUDA kernel); 'dense_zr'=dense zerorope-only ablation (no quantization)",
+    )
 
     # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
     parser.add_argument("--group-size", type=int, default=32, help="KIVI per-group quant size; OScaR group size (INT2 必须=32)")
@@ -256,9 +263,12 @@ def parse_arguments():
 def run_tag(args):
     """Return a reproducible tag for this evaluation configuration."""
     offline = args.offline or args.offline_proj_path is not None
-    if args.method == "picokv":
+    if args.method in ("picokv", "picokv_recon"):
         mode = "offline" if offline else "online"
-        tag = f"picokv_{mode}_k{args.k_bits}_v{args.v_bits}"
+        prefix = "picokv_recon" if args.method == "picokv_recon" else "picokv"
+        tag = f"{prefix}_{mode}_k{args.k_bits}_v{args.v_bits}"
+        if args.method == "picokv_recon":
+            tag += f"_{args.quant_target}"
         if args.exp_bits != 4:
             tag += f"_exp{args.exp_bits}"
         if args.zerorope != 20:
@@ -435,8 +445,11 @@ def main():
     logger.info("RULER Evaluation")
     logger.info(f"Model: {args.model}")
     logger.info(f"Method: {args.method}")
-    if args.method == "picokv":
-        logger.info("Backend: CUDA (picokv.picokv_standalone)")
+    if args.method in ("picokv", "picokv_recon"):
+        if args.method == "picokv_recon":
+            logger.info(f"Backend: dequant+SDPA recon ablation (quant_target={args.quant_target})")
+        else:
+            logger.info("Backend: CUDA (picokv.picokv_standalone)")
         logger.info(f"KV cache: k_bits={args.k_bits}, v_bits={args.v_bits}, "
                     f"exp_bits={args.exp_bits}, eas={args.eas}, zerorope={args.zerorope}")
     logger.info(f"Tasks: {args.tasks}")
@@ -462,6 +475,7 @@ def main():
             use_pruning=args.use_pruning,
             prune_mode=args.prune_mode,
             log_eps=args.log_eps,
+            quant_target=args.quant_target,
             offline_proj_path=offline_proj_path,
             # KIVI params (--method kivi)
             group_size=args.group_size,

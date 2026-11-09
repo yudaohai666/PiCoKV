@@ -78,7 +78,7 @@ def resolve_offline_proj_path(
     tag and bits: ``offline_projection/projections/{model_tag}_k{k}_v{v}.pt``.
     Raises a clear error when the resolved file is missing.
     """
-    if method != "picokv":
+    if method not in ("picokv", "picokv_recon"):
         return None
     if not offline and offline_proj_path is None:
         return None
@@ -126,12 +126,13 @@ def output_tag(
         return f"oscar_int{num_bits}"
     if method == "bpc":
         return "bpc_offline"
-    if method != "picokv":
+    if method not in ("picokv", "picokv_recon"):
         return method
     if full_tag:
         mode = "offline" if offline else "online"
         return f"{mode}_k{k_bits}_v{v_bits}"
-    tag = f"picokv_k{k_bits}_v{v_bits}"
+    prefix = "picokv_recon" if method == "picokv_recon" else "picokv"
+    tag = f"{prefix}_k{k_bits}_v{v_bits}"
     if offline:
         tag += "_offline"
     return tag
@@ -310,6 +311,8 @@ def _load_picokv_model(
     prune_mode: int,
     log_eps: float,
     offline_proj_path: Optional[str] = None,
+    recon_ablation: bool = False,
+    quant_target: str = "both",
 ) -> Tuple[PreTrainedModel, PreTrainedTokenizerBase, CacheFactory]:
     """Load a HF model patched with the picokv_standalone online-projection path.
 
@@ -340,6 +343,8 @@ def _load_picokv_model(
         use_pruning=use_pruning,
         prune_mode=prune_mode,
         log_eps=log_eps,
+        recon_ablation=recon_ablation,
+        quant_target=quant_target,
     )
 
     key_encoders = value_encoders = None
@@ -638,6 +643,7 @@ def load_model(
     use_pruning: bool = False,
     prune_mode: int = 3,
     log_eps: float = -10.0,
+    quant_target: str = "both",
     group_size: int = 32,
     residual_length: int = 32,
     num_bits: int = 4,
@@ -717,7 +723,7 @@ def load_model(
             offline_v_hadamard=offline_v_hadamard,
         )
 
-    if method == "picokv":
+    if method in ("picokv", "picokv_recon"):
         return _load_picokv_model(
             model_name,
             k_bits=k_bits,
@@ -731,6 +737,8 @@ def load_model(
             prune_mode=prune_mode,
             log_eps=log_eps,
             offline_proj_path=offline_proj_path,
+            recon_ablation=(method == "picokv_recon"),
+            quant_target=quant_target,
         )
 
     if method == "polar":
@@ -756,6 +764,6 @@ def load_model(
 
     if method not in BASELINE_ATTN:
         raise ValueError(
-            f"Unknown method '{method}'. Supported: 'picokv', 'kivi', 'oscar', 'polar', 'bpc', {sorted(BASELINE_ATTN)}."
+            f"Unknown method '{method}'. Supported: 'picokv', 'picokv_recon', 'kivi', 'oscar', 'polar', 'bpc', {sorted(BASELINE_ATTN)}."
         )
     return _load_baseline_model(model_name, attn_implementation=method)

@@ -6,16 +6,15 @@ METHOD, all named Llama-3.1-8B-Instruct_{method}.json (no _b{B} suffix --
 the subdirectory is what disambiguates batch sizes) -- NOT the merged
 Llama-3.1-8B-Instruct_efficiency.json files, which are stale
 length-outer-launcher leftovers and must be ignored.
-Batch axis runs 1-64 for the throughput/memory panels. A method with
+Batch axis runs 1-64 for the throughput panels. A method with
 "error": "out_of_memory" (or a missing file) at some batch size has its
 line simply stop at the last successful batch size. Draws a single row
-of 3 panels (context = 16K):
+of 2 panels (context = 16K):
 
   - Prefill time vs batch size (grouped bars, one bar per method per batch
     size, truncated at FA2's last successful batch size -- prefill time is
     purely a head-to-head comparison, not a scaling claim, so points where
     the baseline has already OOM'd add no information)
-  - Prefill peak memory vs batch size (line)
   - Decode throughput vs batch size (line)
 
 Usage:
@@ -89,7 +88,7 @@ def main():
     plt.rcParams["axes.spines.top"] = False
     plt.rcParams["axes.linewidth"] = 2
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5.5))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5.5))
 
     dirname, length_key, title = CONTEXTS[0]
     per_method = load_context(dirname, length_key)
@@ -144,46 +143,6 @@ def main():
         lw = 3.8 if is_ours else 2.6
         zorder = 5 if is_ours else 3
         mfc = "white"
-        ax.plot(d["batch"], d["peak_gb"], color=color, linewidth=lw, marker=marker,
-                 markersize=8 if is_ours else 7, markerfacecolor=mfc,
-                 markeredgecolor=color, markeredgewidth=1.8,
-                 label=label, alpha=0.95, zorder=zorder, dashes=dash)
-    ax.set_xscale("log", base=2)
-    ax.set_xticks(BATCH_SIZES)
-    ax.set_xticklabels([str(b) for b in BATCH_SIZES])
-    ax.set_xlabel("Batch size")
-    ax.set_ylabel("Peak memory (GB)")
-    ax.tick_params(labelsize=13, length=6, width=1.5)
-    ax.grid(True, which="major", axis="y", linewidth=0.6, alpha=0.25, zorder=0)
-    ax.axvspan(fa2_batches[-1], BATCH_SIZES[-1], color="#000000", alpha=0.05, zorder=0)
-    ax.text(
-        fa2_batches[-1], ax.get_ylim()[1], " others OOM",
-        fontsize=10.5, color="#767676", ha="left", va="top", style="italic",
-    )
-    fa2_mem = per_method["flash_attention_2"]["peak_gb"][-1]
-    pico_mem = per_method["picokv_k320_v320_offline"]["peak_gb"][
-        per_method["picokv_k320_v320_offline"]["batch"].index(fa2_batches[-1])
-    ]
-    bx = fa2_batches[-1] * 1.12
-    bracket_x = bx * 1.06
-    ax.plot([bx, bracket_x, bracket_x, bx], [pico_mem, pico_mem, fa2_mem, fa2_mem],
-            color="#d62728", linewidth=1.3, zorder=6, clip_on=False)
-    ax.text(
-        bracket_x, (pico_mem + fa2_mem) / 2 + (fa2_mem - pico_mem) * 0.22, f"{fa2_mem / pico_mem:.2f}x less",
-        fontsize=11, color="#d62728", fontweight="bold", ha="center", va="center", clip_on=False,
-    )
-    ax.legend(loc="upper left", frameon=False, fontsize=11.5)
-
-    ax = axes[2]
-    for tag, label, color, _, dash in METHODS:
-        d = per_method[tag]
-        if not d["batch"]:
-            continue
-        is_ours = tag == "picokv_k320_v320_offline"
-        marker = "s"
-        lw = 3.8 if is_ours else 2.6
-        zorder = 5 if is_ours else 3
-        mfc = "white"
         ax.plot(d["batch"], d["toks_per_s"], color=color, linewidth=lw, marker=marker,
                  markersize=8 if is_ours else 7, markerfacecolor=mfc,
                  markeredgecolor=color, markeredgewidth=1.8,
@@ -195,6 +154,7 @@ def main():
     ax.set_ylabel("Decode throughput (tokens/s)")
     ax.tick_params(labelsize=13, length=6, width=1.5)
     ax.grid(True, which="major", axis="y", linewidth=0.6, alpha=0.25, zorder=0)
+    ax.legend(loc="upper left", frameon=False, fontsize=11.5)
     ax.axvspan(fa2_batches[-1], BATCH_SIZES[-1], color="#000000", alpha=0.05, zorder=0)
     ax.text(
         fa2_batches[-1], ax.get_ylim()[1], " others OOM",

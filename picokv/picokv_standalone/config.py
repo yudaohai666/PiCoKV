@@ -31,6 +31,14 @@ class StandaloneConfig:
     # overrides this globally.
     use_fused_quant: bool = True
 
+    # Dequantize-and-reconstruct ablation. When True, prefill builds a
+    # full-precision reconstructed cache and decode runs plain SDPA/Flash instead
+    # of the packed-code CUDA kernel. ``quant_target`` selects which side(s) are
+    # degraded to their reconstruction: "key" / "value" / "both" / "none". Leaves
+    # the production kernel path (recon_ablation=False) completely untouched.
+    recon_ablation: bool = False
+    quant_target: str = "both"
+
     # Per-token CUDA decode. Pruning is off by default: it is a decode-time
     # approximation, and every benchmark run keeps the global scan exact.
     use_pruning: bool = False

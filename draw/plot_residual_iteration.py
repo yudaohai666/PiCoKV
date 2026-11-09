@@ -44,7 +44,12 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
-from plot_kv_distribution import NEEDLE, build_niah_context, surface  # noqa: E402
+from plot_kv_distribution import (  # noqa: E402
+    DEFAULT_DEVICE,
+    NEEDLE,
+    build_niah_context,
+    surface,
+)
 from picokv.picokv_standalone.constants import ONLINE_GROUP_BITS  # noqa: E402
 from picokv.picokv_standalone.online import quantize_block32_online  # noqa: E402
 
@@ -63,8 +68,8 @@ def parse_args():
     )
     p.add_argument("--context-length", type=int, default=8192)
     p.add_argument("--depth-percent", type=float, default=50.0)
-    # sm_100 GPUs on this box cannot run torch 2.6+cu124, so CPU is default.
-    p.add_argument("--device", default="cpu")
+    # See plot_kv_distribution.DEFAULT_DEVICE for why this is auto-detected.
+    p.add_argument("--device", default=DEFAULT_DEVICE)
 
     # PiCoKV parameters (run_niah.sh defaults).
     p.add_argument("--k-bits", type=int, default=int(os.environ.get("K_BITS", 320)))
@@ -106,18 +111,28 @@ def parse_args():
 def collect_kv_full(args):
     """Return one layer's full ``[1, kv_heads, L, D]`` K and V, plus token count.
 
-    The 8k forward pass runs on CPU and dominates the runtime, so the extracted
-    cache is memoized to ``--cache-dir``; only the figure styling usually needs
-    re-running.
+    The forward pass dominates the runtime, so the extracted cache is memoized to
+    ``--cache-dir``; only the figure styling usually needs re-running.
+
+    The forward dtype is part of the cache key, because it is not a free choice:
+    CPU runs in fp32 and CUDA in fp16, so the two produce *different* KV values.
+    Keying on ``(layer, ctx, depth)`` alone would let a CPU-fp32 cache be served
+    to a GPU-fp16 run and silently change the residual curves.
     """
+    forward_dtype = "fp32" if args.device == "cpu" else "fp16"
     cache_path = os.path.join(
         args.cache_dir,
-        f"kv_L{args.layer}_ctx{args.context_length}_d{args.depth_percent:g}.pt",
+        f"kv_L{args.layer}_ctx{args.context_length}"
+        f"_d{args.depth_percent:g}_{forward_dtype}.pt",
     )
     if os.path.exists(cache_path):
         blob = torch.load(cache_path)
         print(f"loaded {cache_path}")
-        return blob["key"], blob["value"], int(blob["n_tokens"])
+        return (
+            blob["key"].to(args.device),
+            blob["value"].to(args.device),
+            int(blob["n_tokens"]),
+        )
 
     tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     prompt = (
@@ -132,6 +147,7 @@ def collect_kv_full(args):
         args.model,
         torch_dtype=torch.float32 if args.device == "cpu" else torch.float16,
         trust_remote_code=True,
+        attn_implementation="sdpa",
     ).to(args.device)
     model.eval()
 
@@ -143,11 +159,15 @@ def collect_kv_full(args):
         )
 
     # Layers past the one we plot never touch its cache entry; dropping them
-    # cuts the CPU forward pass roughly proportionally.
+    # cuts the forward pass roughly proportionally.
     model.model.layers = model.model.layers[: args.layer + 1]
 
     ids = tok(prompt, return_tensors="pt").to(model.device)
-    cache = model(**ids, use_cache=True).past_key_values
+    # model.model, not model: the causal-LM wrapper projects every position to
+    # the 128k vocab, which is ~2 GiB of logits at ctx 8k and unrunnable past
+    # ~32k. Only past_key_values is wanted, and the base model returns it
+    # without ever entering lm_head.
+    cache = model.model(**ids, use_cache=True).past_key_values
     if hasattr(cache, "layers"):  # transformers >= 4.54
         k, v = cache.layers[args.layer].keys, cache.layers[args.layer].values
     else:
@@ -155,8 +175,14 @@ def collect_kv_full(args):
     k, v, n_tokens = k.float(), v.float(), ids["input_ids"].shape[1]
 
     os.makedirs(args.cache_dir, exist_ok=True)
-    torch.save({"key": k, "value": v, "n_tokens": n_tokens}, cache_path)
+    torch.save(
+        {"key": k.cpu(), "value": v.cpu(), "n_tokens": n_tokens},
+        cache_path,
+    )
     print(f"cached {cache_path}")
+    del cache, ids, model
+    if args.device != "cpu":
+        torch.cuda.empty_cache()
     return k, v, n_tokens
 
 
@@ -256,7 +282,7 @@ def draw_panels_combined(all_snaps, all_rels, iters, tag, stride, args, stem):
         total_tokens = snaps[0].shape[0]
         window = 32
         start = int(rng.integers(0, max(1, total_tokens - window)))
-        mats = [snaps[i][start : start + window].float().numpy() for i in iters]
+        mats = [snaps[i][start : start + window].float().cpu().numpy() for i in iters]
         zmax = max(float(np.abs(m).max()) for m in mats)
         for it in iters:
             argv = base_argv + [
@@ -299,7 +325,7 @@ def _render_single_panel(args):
 
     start = args.window_start
     window = 32
-    mat = snaps[it_clamped][start : start + window].float().numpy()
+    mat = snaps[it_clamped][start : start + window].float().cpu().numpy()
     zmax = args.zmax if args.zmax > 0 else float(np.abs(mat).max())
     # Per-panel colour range so blue/red contrast is always vivid.
     mat_max = float(np.abs(mat).max())
@@ -321,6 +347,7 @@ def _render_single_panel(args):
     path = os.path.join(args.outdir, f"{file_prefix}_{stem}_{label}.pdf")
     fig.savefig(path, dpi=args.dpi, bbox_inches="tight", pad_inches=0)
     fig.savefig(path.replace(".pdf", ".png"), dpi=args.dpi, bbox_inches="tight", pad_inches=0)
+    fig.savefig(path.replace(".pdf", ".svg"), bbox_inches="tight", pad_inches=0)
     plt.close(fig)
     print(f"saved {path}")
 
@@ -353,6 +380,7 @@ def draw_curve(curves, eas_shares, args, stem):
     path = os.path.join(args.outdir, f"residual_curve_{stem}.pdf")
     fig.savefig(path, dpi=args.dpi, bbox_inches="tight")
     fig.savefig(path.replace(".pdf", ".png"), dpi=args.dpi, bbox_inches="tight")
+    fig.savefig(path.replace(".pdf", ".svg"), bbox_inches="tight")
     plt.close(fig)
     print(f"saved {path}")
 
@@ -426,7 +454,7 @@ def main():
     val_err = value_block.err[0, args.head].float()
 
     key_indices = torch.topk(key_err, k=eas_size).indices
-    mask = torch.zeros(global_len, dtype=torch.bool)
+    mask = torch.zeros(global_len, dtype=torch.bool, device=key_err.device)
     mask[key_indices] = True
     val_count = min(eas_size, global_len - eas_size)
     val_indices = torch.topk(val_err.masked_fill(mask, -torch.inf), k=val_count).indices

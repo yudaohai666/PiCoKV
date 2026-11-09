@@ -123,6 +123,34 @@ Prompt attention stays exact SDPA. The adapter currently targets bf16 CUDA
 Llama models with greedy, unpadded generation and a static compressed global
 cache.
 
+## Reconstruction ablation
+
+`--method picokv_recon` isolates the accuracy cost of quantization from the
+packed-code CUDA decode kernel. It runs the *same* block-32 quantization, EAS
+selection, and zero-RoPE as the production path, then reconstructs the
+compressed side(s) back to bf16 (`codes @ decoder`) and serves decode through
+plain SDPA/FlashAttention instead of the custom kernel. `--quant-target`
+selects which side(s) are degraded to their reconstruction.
+
+To keep the dense/global token partition byte-identical to full PiCoKV, both K
+and V are always quantized during prefill to produce the error norms EAS uses;
+only the requested side's global (non-EAS) tokens are overwritten with their
+reconstruction. Sink, local, and EAS tokens keep their exact values.
+
+| 命令 | `recon_ablation` | 路径 | 内容 |
+|---|:---:|---|---|
+| `--method picokv` | `False`（默认） | CUDA kernel | 和之前完全一样：pack + 定制量化 attention，K、V 都量化 |
+| `--method picokv_recon --quant-target both` | `True` | 重建 + flash | K、V 都量化后重建，精确 attention |
+| `--method picokv_recon --quant-target key` | `True` | 重建 + flash | 只量化 K |
+| `--method picokv_recon --quant-target value` | `True` | 重建 + flash | 只量化 V |
+| `--method picokv_recon --quant-target none` | `True` | 重建 + flash | 都精确，自检 |
+
+The production path (`--method picokv`, `recon_ablation=False`) is completely
+untouched. The recon path has no GQA/dtype restriction because it does not use
+the CUDA kernel. Add `--zerorope <N>` to study zero-RoPE's effect on key
+quantization; recon results are written to their own directory tagged with the
+`quant_target` (and `_zr{N}` when zero-RoPE differs from the default).
+
 ## Checks
 
 Run from the repository root with the environment configured as above:
