@@ -1,0 +1,28 @@
+{
+  "method": "polar",
+  "tag": "polar",
+  "model": "/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct",
+  "batch_size": 2,
+  "decode_tokens": 64,
+  "config": {
+    "k_bits": 320,
+    "v_bits": 320,
+    "group_size": 32,
+    "residual_length": 32,
+    "exp_bits": 4,
+    "eas": 0.01,
+    "zerorope": 20
+  },
+  "results": {
+    "16384": {
+      "prompt_len": 16384,
+      "prefill_ms": 1480.363,
+      "decode_ms_per_token": 29.5654,
+      "decode_toks_per_s": 67.65,
+      "prefill_peak_gb": 19.435,
+      "decode_peak_gb": 15.909,
+      "prefill_kv_gb": 0.812,
+      "decode_kv_gb": 0.829
+    }
+  }
+}

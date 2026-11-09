@@ -1,0 +1,78 @@
+{
+  "method": "oscar",
+  "tag": "oscar_int2",
+  "model": "/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct",
+  "batch_size": 1,
+  "decode_tokens": 64,
+  "config": {
+    "k_bits": 320,
+    "v_bits": 320,
+    "group_size": 32,
+    "residual_length": 32,
+    "exp_bits": 4,
+    "eas": 0.01,
+    "zerorope": 20
+  },
+  "results": {
+    "8192": {
+      "prompt_len": 8192,
+      "prefill_ms": 321.324,
+      "decode_ms_per_token": 20.139,
+      "decode_toks_per_s": 49.65,
+      "prefill_peak_gb": 16.091,
+      "decode_peak_gb": 15.206,
+      "prefill_kv_gb": 0.188,
+      "decode_kv_gb": 0.197
+    },
+    "16384": {
+      "prompt_len": 16384,
+      "prefill_ms": 726.487,
+      "decode_ms_per_token": 20.1943,
+      "decode_toks_per_s": 49.52,
+      "prefill_peak_gb": 17.19,
+      "decode_peak_gb": 15.395,
+      "prefill_kv_gb": 0.377,
+      "decode_kv_gb": 0.385
+    },
+    "32768": {
+      "prompt_len": 32768,
+      "prefill_ms": 1862.734,
+      "decode_ms_per_token": 20.2084,
+      "decode_toks_per_s": 49.48,
+      "prefill_peak_gb": 19.387,
+      "decode_peak_gb": 15.772,
+      "prefill_kv_gb": 0.754,
+      "decode_kv_gb": 0.762
+    },
+    "65536": {
+      "prompt_len": 65536,
+      "prefill_ms": 5363.136,
+      "decode_ms_per_token": 20.3462,
+      "decode_toks_per_s": 49.15,
+      "prefill_peak_gb": 23.783,
+      "decode_peak_gb": 16.525,
+      "prefill_kv_gb": 1.508,
+      "decode_kv_gb": 1.516
+    },
+    "131072": {
+      "prompt_len": 131072,
+      "prefill_ms": 17684.003,
+      "decode_ms_per_token": 22.1349,
+      "decode_toks_per_s": 45.18,
+      "prefill_peak_gb": 32.575,
+      "decode_peak_gb": 18.034,
+      "prefill_kv_gb": 3.016,
+      "decode_kv_gb": 3.024
+    },
+    "262144": {
+      "prompt_len": 262144,
+      "prefill_ms": 63762.012,
+      "decode_ms_per_token": 30.2072,
+      "decode_toks_per_s": 33.1,
+      "prefill_peak_gb": 50.158,
+      "decode_peak_gb": 21.052,
+      "prefill_kv_gb": 6.031,
+      "decode_kv_gb": 6.039
+    }
+  }
+}

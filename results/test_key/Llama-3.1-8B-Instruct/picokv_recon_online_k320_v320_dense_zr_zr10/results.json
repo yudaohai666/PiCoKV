@@ -1,0 +1,121 @@
+{
+  "results": {
+    "niah_single_1": {
+      "131072,none": 1.0,
+      "131072_stderr,none": "N/A"
+    },
+    "niah_single_2": {
+      "131072,none": 0.97,
+      "131072_stderr,none": "N/A"
+    },
+    "niah_single_3": {
+      "131072,none": 0.99,
+      "131072_stderr,none": "N/A"
+    },
+    "niah_multikey_1": {
+      "131072,none": 0.97,
+      "131072_stderr,none": "N/A"
+    },
+    "niah_multikey_2": {
+      "131072,none": 0.89,
+      "131072_stderr,none": "N/A"
+    },
+    "niah_multikey_3": {
+      "131072,none": 0.7,
+      "131072_stderr,none": "N/A"
+    },
+    "niah_multiquery": {
+      "131072,none": 0.98,
+      "131072_stderr,none": "N/A"
+    },
+    "niah_multivalue": {
+      "131072,none": 0.9425,
+      "131072_stderr,none": "N/A"
+    },
+    "ruler_vt": {
+      "131072,none": 0.62,
+      "131072_stderr,none": "N/A"
+    },
+    "ruler_cwe": {
+      "131072,none": 0.0,
+      "131072_stderr,none": "N/A"
+    },
+    "ruler_fwe": {
+      "131072,none": 0.7366666666666666,
+      "131072_stderr,none": "N/A"
+    },
+    "ruler_qa_squad": {
+      "131072,none": 0.6816666666666668,
+      "131072_stderr,none": "N/A"
+    },
+    "ruler_qa_hotpot": {
+      "131072,none": 0.42,
+      "131072_stderr,none": "N/A"
+    }
+  },
+  "config": {
+    "model": "MyModel",
+    "model_args": "pretrained=/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct,max_length=131072",
+    "batch_size": 1,
+    "batch_sizes": [],
+    "device": null,
+    "use_cache": null,
+    "limit": 100,
+    "bootstrap_iters": 100000,
+    "gen_kwargs": null,
+    "random_seed": 42,
+    "numpy_seed": 42,
+    "torch_seed": 42,
+    "fewshot_seed": 42
+  },
+  "run_config": {
+    "model": "/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct",
+    "method": "picokv_recon",
+    "k_bits": 320,
+    "v_bits": 320,
+    "sink_size": 64,
+    "local_size": 256,
+    "exp_bits": 4,
+    "eas": 0.01,
+    "zerorope": 10,
+    "use_pruning": false,
+    "prune_mode": 3,
+    "log_eps": -10.0,
+    "quant_target": "dense_zr",
+    "group_size": 32,
+    "residual_length": 32,
+    "num_bits": 2,
+    "quant_mode": "k-channel",
+    "kv_rotation": "hadamard",
+    "kv_norm": "1",
+    "residual_evict_size": 256,
+    "offline_v_hadamard": true,
+    "offline": false,
+    "offline_proj_path": null,
+    "polar_mode": "mixed",
+    "polar_rbits": 3,
+    "polar_tbits": 3,
+    "polar_vbits": 2,
+    "bpc_mask_out": 0.98,
+    "bpc_min_remain": 128,
+    "bpc_token_budget": null,
+    "bpc_err_ratio": 0.1,
+    "bpc_fix_layers": "0,1",
+    "bpc_use_cuda_kernel": true,
+    "bpc_offline_proj_path": "/root/paddlejob/share-storage/gpfs/system-public/yudaohai/ICLR2027/PiCoKV/src/BPC/ckp/projections/llama3-1-8b-ins-projection-mixlen-mixdata.pt",
+    "tasks": "niah_single_1,niah_single_2,niah_single_3,niah_multikey_1,niah_multikey_2,niah_multikey_3,niah_multiquery,niah_multivalue,ruler_vt,ruler_cwe,ruler_fwe,ruler_qa_squad,ruler_qa_hotpot",
+    "max_seq_lengths": "131072",
+    "max_length": 131072,
+    "batch_size": 1,
+    "max_gen_toks": 128,
+    "limit": 100,
+    "num_fewshot": 0,
+    "seed": 42,
+    "output_path": "results/test_key/Llama-3.1-8B-Instruct/picokv_recon_online_k320_v320_dense_zr_zr10/",
+    "write_out": true,
+    "apply_chat_template": true,
+    "fewshot_as_multiturn": false,
+    "add_bos_token": false,
+    "prefix_token_id": null
+  }
+}
