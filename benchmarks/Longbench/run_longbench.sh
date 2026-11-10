@@ -38,6 +38,7 @@ METHODS=(
   # kivi
   # oscar
   # polar
+  # bitdecoding
   # flash_attention_2
   # sdpa
   # eager
@@ -61,6 +62,12 @@ POLAR_MODE="${POLAR_MODE:-mixed}"; POLAR_RBITS="${POLAR_RBITS:-3}"; POLAR_TBITS=
 # bpc (src/BPC); default = offline (python default picks the mixlen-mixdata projection)
 BPC_MASK_OUT="${BPC_MASK_OUT:-0.98}"; BPC_MIN_REMAIN="${BPC_MIN_REMAIN:-128}"; BPC_ERR_RATIO="${BPC_ERR_RATIO:-0.1}"; BPC_FIX_LAYERS="${BPC_FIX_LAYERS:-0,1}"
 BPC_OFFLINE_PROJ_PATH="${BPC_OFFLINE_PROJ_PATH:-}"
+# bitdecoding (src/BitDecoding). 4-bit/g128 is the ONLY numerically correct
+# config in the released kernel (pack_num is derived from group_size, so it is
+# right only when group_size == kBlockN_pack == 128); common.py rejects anything
+# else unless --bitdecoding-allow-unvalidated, which is efficiency-only. Do not
+# change these two for an accuracy run.
+BD_NUM_BITS="${BD_NUM_BITS:-4}"; BD_GROUP="${BD_GROUP:-128}"; BD_QUANT_MODE="${BD_QUANT_MODE:-k-channel}"
 
 # Build METHOD_ARGS[] and TAG for a method. Needs REPO_ROOT, MODEL_TAG + the
 # per-method defaults above. picokv TAG matches run_ruler/run_infinitebench's
@@ -98,6 +105,10 @@ build_method_args() {
     kivi)
       METHOD_ARGS=(--k-bits "${KIVI_K}" --v-bits "${KIVI_V}" --group-size "${KIVI_GROUP}" --residual-length "${KIVI_RESIDUAL}")
       TAG="kivi_k${KIVI_K}_v${KIVI_V}"
+      # Mirrors common.output_tag(): the group size was missing from the tag, so a
+      # g128 run would overwrite the g32 one. Suffix only on deviation from 32.
+      [ "${KIVI_GROUP}" != "32" ] && TAG+="_g${KIVI_GROUP}"
+      :
       ;;
     oscar)
       METHOD_ARGS=(--num-bits "${OSCAR_NUM_BITS}" --quant-mode "${OSCAR_QUANT_MODE}" --group-size "${OSCAR_GROUP}")
@@ -116,6 +127,19 @@ build_method_args() {
         --bpc-err-ratio "${BPC_ERR_RATIO}" --bpc-fix-layers "${BPC_FIX_LAYERS}")
       [ -n "${BPC_OFFLINE_PROJ_PATH}" ] && METHOD_ARGS+=(--bpc-offline-proj-path "${BPC_OFFLINE_PROJ_PATH}")
       TAG="bpc_offline"
+      ;;
+    bitdecoding)
+      METHOD_ARGS=(--num-bits "${BD_NUM_BITS}" --group-size "${BD_GROUP}" --quant-mode "${BD_QUANT_MODE}")
+      # Anything other than 4-bit/g128 reads the wrong quantization scale, so the
+      # score measures the kernel bug rather than the method. Opt in explicitly
+      # and keep the tag distinct so such a run can never be mistaken for a
+      # comparable accuracy row.
+      if [ "${BD_NUM_BITS}" != "4" ] || [ "${BD_GROUP}" != "128" ]; then
+        METHOD_ARGS+=(--bitdecoding-allow-unvalidated)
+        TAG="bitdecoding_${BD_NUM_BITS}bit_g${BD_GROUP}_UNVALIDATED"
+      else
+        TAG="bitdecoding_${BD_NUM_BITS}bit_g${BD_GROUP}"
+      fi
       ;;
   esac
 }

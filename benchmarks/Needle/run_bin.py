@@ -344,8 +344,9 @@ def main() -> None:
     parser.add_argument(
         "--group-size",
         type=int,
-        default=32,
-        help="KIVI per-group quantization size; OScaR group size (INT2 必须=32)",
+        default=None,
+        help="KIVI per-group quantization size; OScaR group size (INT2 必须=32); "
+             "BitDecoding 必须=128 (default 32, or 128 for bitdecoding)",
     )
     parser.add_argument(
         "--residual-length",
@@ -354,7 +355,7 @@ def main() -> None:
         help="KIVI number of recent fp16 tokens kept unquantized",
     )
     # ── OScaR params (--method oscar) —— 默认 = INT2 官方配方 ──
-    parser.add_argument("--num-bits", type=int, default=2, help="OScaR KV quant bits (INT2 默认)")
+    parser.add_argument("--num-bits", type=int, default=None, help="OScaR KV quant bits (INT2 默认); BitDecoding bits (default 2, or 4 for bitdecoding)")
     parser.add_argument("--quant-mode", default="k-channel", help="OScaR quant mode")
     parser.add_argument("--kv-rotation", default="hadamard", help="OScaR kv rotation (INT2 默认 hadamard)")
     parser.add_argument("--kv-norm", default="1", help="OScaR kv norm (INT2 默认 1)")
@@ -404,6 +405,13 @@ def main() -> None:
         args.k_bits = 2 if args.method == "kivi" else 320
     if args.v_bits is None:
         args.v_bits = 2 if args.method == "kivi" else 320
+    # BitDecoding's only numerically correct config is 4-bit/g128 (see
+    # common._load_bitdecoding_model); make that the default so the common case
+    # needs no extra flags.
+    if args.num_bits is None:
+        args.num_bits = 4 if args.method == "bitdecoding" else 2
+    if args.group_size is None:
+        args.group_size = 128 if args.method == "bitdecoding" else 32
     if args.bpc_offline_proj_path == "":
         args.bpc_offline_proj_path = None
 
@@ -419,6 +427,7 @@ def main() -> None:
             args.method, args.k_bits, args.v_bits, args.num_bits,
             offline=(args.offline or args.offline_proj_path is not None or args.bpc_offline_proj_path is not None),
             full_tag=(args.method == "picokv"),
+            group_size=args.group_size,
         )
         output_path = str(Path("results/niah") / model_key / tag / "results.json")
     run_experiment(

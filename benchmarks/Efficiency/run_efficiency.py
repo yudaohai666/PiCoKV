@@ -90,8 +90,31 @@ _CACHE_SKIP_ATTRS = frozenset({
     "_workspace", "_dense_stream", "_prepare_events",
 })
 
+# Persistent KV state that hangs off the ATTENTION MODULE instead of
+# past_key_values, so a cache-only walk misses it. BitDecoding stages one
+# residual block of repacked K/V plus their params on each attention module
+# (32 layers x 4 tensors), sized by residual_block_size -- 128 at 4-bit but 256
+# at 2-bit, so ignoring them systematically overstates BitDecoding's
+# compression ratio, and does so unequally across bit widths.
+_MODULE_KV_ATTRS = ("k_pack_new", "k_params_new", "v_pack_new", "v_params_new")
 
-def _kv_cache_bytes(pkv) -> int:
+
+def _module_kv_tensors(model) -> list:
+    """Per-layer KV tensors held on modules rather than on the cache object.
+
+    Returns [] for every method that keeps all its state on ``past_key_values``
+    (picokv / kivi / bpc / oscar / dense), so this is a no-op outside BitDecoding.
+    """
+    found = []
+    for module in model.modules():
+        for name in _MODULE_KV_ATTRS:
+            tensor = getattr(module, name, None)
+            if isinstance(tensor, torch.Tensor):
+                found.append(tensor)
+    return found
+
+
+def _kv_cache_bytes(pkv, extra=None) -> int:
     """GPU bytes held by a ``past_key_values`` object's persistent KV state.
 
     Walks the cache's tensor graph generically (picokv's ``StandaloneLlamaCache``,
@@ -102,8 +125,11 @@ def _kv_cache_bytes(pkv) -> int:
     reconstruct (views sharing one storage are counted once). Cycle-safe;
     transient attributes (workspace/streams/events) are excluded via
     ``_CACHE_SKIP_ATTRS``.
+
+    ``extra`` is an iterable of additional tensors to fold into the same
+    deduplicated total (see ``_module_kv_tensors``).
     """
-    if pkv is None:
+    if pkv is None and not extra:
         return 0
     total = 0
     seen_storage: set[int] = set()
@@ -141,6 +167,8 @@ def _kv_cache_bytes(pkv) -> int:
             add(v)
 
     add(pkv)
+    for tensor in extra or ():
+        add(tensor)
     return total
 
 
@@ -251,7 +279,8 @@ def _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats, d
             if out_kv is not None and "prefill_kv_gb" not in out_kv:
                 # KV-cache footprint right after the full-prompt prefill
                 # (the cache object all decode steps run against).
-                out_kv["prefill_kv_gb"] = _kv_cache_bytes(pkv) / 1024 ** 3
+                out_kv["prefill_kv_gb"] = _kv_cache_bytes(
+                    pkv, _module_kv_tensors(model)) / 1024 ** 3
             next_tok = out.logits[:, -1:, :].argmax(dim=-1)
             gen_ids = torch.cat([gen_ids, next_tok], dim=1)
             attn = torch.cat([attn, torch.ones_like(next_tok)], dim=1)
@@ -290,7 +319,8 @@ def _decode_ms_per_token(model, input_ids, decode_tokens, make_cache, repeats, d
         if out_kv is not None:
             # KV-cache footprint at the end of this decode run: the cache the
             # benchmark's decoding phase actually holds in memory.
-            out_kv["decode_kv_gb"] = _kv_cache_bytes(pkv) / 1024 ** 3
+            out_kv["decode_kv_gb"] = _kv_cache_bytes(
+                pkv, _module_kv_tensors(model)) / 1024 ** 3
         per_token.append((time.perf_counter() - t0) * 1000.0 / decode_tokens)
         del pkv, gen_ids, attn, out, next_tok, mi
         _free()
@@ -317,7 +347,8 @@ def _decode_peak_gb(model, input_ids, decode_tokens, make_cache, device, out_kv:
         pkv = out.past_key_values
         if out_kv is not None and "prefill_kv_gb" not in out_kv:
             # KV-cache footprint right after the full-prompt prefill.
-            out_kv["prefill_kv_gb"] = _kv_cache_bytes(pkv) / 1024 ** 3
+            out_kv["prefill_kv_gb"] = _kv_cache_bytes(
+                pkv, _module_kv_tensors(model)) / 1024 ** 3
         next_tok = out.logits[:, -1:, :].argmax(dim=-1)
         gen_ids = torch.cat([gen_ids, next_tok], dim=1)
         attn = torch.cat([attn, torch.ones_like(next_tok)], dim=1)
@@ -336,7 +367,8 @@ def _decode_peak_gb(model, input_ids, decode_tokens, make_cache, device, out_kv:
             attn = torch.cat([attn, torch.ones_like(next_tok)], dim=1)
     if out_kv is not None:
         # KV-cache footprint at the end of the decode run.
-        out_kv["decode_kv_gb"] = _kv_cache_bytes(pkv) / 1024 ** 3
+        out_kv["decode_kv_gb"] = _kv_cache_bytes(
+            pkv, _module_kv_tensors(model)) / 1024 ** 3
     peak = _peak_gb()
     del pkv, gen_ids, attn, out, next_tok, mi
     _free()
@@ -446,6 +478,9 @@ def run(args) -> None:
         bpc_fix_layers=[int(x) for x in args.bpc_fix_layers.split(",") if x],
         bpc_use_cuda_kernel=args.bpc_use_cuda_kernel,
         bpc_offline_proj_path=args.bpc_offline_proj_path,
+        # BitDecoding params (--method bitdecoding; also uses --num-bits/--group-size/--quant-mode)
+        bitdecoding_residual_block_size=args.bitdecoding_residual_block_size,
+        bitdecoding_allow_unvalidated=args.bitdecoding_allow_unvalidated,
     )
     device = model.device
     vocab_size = model.config.vocab_size
@@ -459,7 +494,8 @@ def run(args) -> None:
             )
 
     tag = output_tag(args.method, args.k_bits, args.v_bits, args.num_bits,
-                     offline=(args.offline or args.offline_proj_path is not None))
+                     offline=(args.offline or args.offline_proj_path is not None),
+                     group_size=args.group_size)
     results = {}
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -631,7 +667,7 @@ def main() -> None:
                         help="transpose all per-method JSONs under this dir into one length->method file (see --merge-out)")
     parser.add_argument("--merge-out", default=None, help="output path for --merge-dir")
     parser.add_argument("--model", default="/data/Llama-3.1-8B-Instruct")
-    parser.add_argument("--method", default="picokv", help="picokv | oscar | kivi | flash_attention_2 | sdpa | eager")
+    parser.add_argument("--method", default="picokv", help="picokv | oscar | kivi | bitdecoding | flash_attention_2 | sdpa | eager")
     parser.add_argument("--dataset", default=None,
                         help="path to a .jsonl file with 'text' fields; uses real text instead of random token ids")
     parser.add_argument("--lengths", default="4096,16384,32768", help="comma-separated prompt lengths")
@@ -656,10 +692,10 @@ def main() -> None:
     parser.add_argument("--prune-mode", type=int, default=3, help="decode pruning mode (CUDA v1_exp8 path)")
     parser.add_argument("--log-eps", type=float, default=-10.0, help="decode pruning log-epsilon threshold")
     # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
-    parser.add_argument("--group-size", type=int, default=32, help="KIVI per-group quant size; OScaR group size (INT2 必须=32)")
+    parser.add_argument("--group-size", type=int, default=None, help="KIVI per-group quant size; OScaR group size (INT2 必须=32); BitDecoding 必须=128 (default 32, or 128 for bitdecoding)")
     parser.add_argument("--residual-length", type=int, default=32, help="KIVI recent fp16 tokens kept unquantized")
     # ── OScaR params (--method oscar) ──
-    parser.add_argument("--num-bits", type=int, default=2, help="OScaR KV quant bits (INT2 默认)")
+    parser.add_argument("--num-bits", type=int, default=None, help="OScaR KV quant bits (INT2 默认); BitDecoding bits (default 2, or 4 for bitdecoding)")
     parser.add_argument("--quant-mode", default="k-channel", help="OScaR quant mode")
     parser.add_argument("--kv-rotation", default="hadamard", help="OScaR kv rotation (INT2 默认 hadamard)")
     parser.add_argument("--kv-norm", default="1", help="OScaR kv norm (INT2 默认 1)")
@@ -680,11 +716,24 @@ def main() -> None:
     parser.add_argument("--bpc-fix-layers", default="0,1", help="BPC: comma-separated layers skipping sparse attention (empty for none)")
     parser.add_argument("--bpc-use-cuda-kernel", action=argparse.BooleanOptionalAction, default=True, help="BPC: use the compiled CUDA kernel; PyTorch fallback on failure")
     parser.add_argument("--bpc-offline-proj-path", default=BPC_DEFAULT_OFFLINE_PROJ_PATH, help="BPC: learned offline hash-projection .pt; pass '' for the online (random) projection")
+    # ── BitDecoding params (--method bitdecoding); reuses --num-bits/--group-size/--quant-mode ──
+    parser.add_argument("--bitdecoding-residual-block-size", type=int, default=None,
+                        help="BitDecoding fp16 residual block (default 128 at 4-bit, 256 at 2-bit; must match the kernel's kBlockN_pack)")
+    parser.add_argument("--bitdecoding-allow-unvalidated", action="store_true",
+                        help="BitDecoding: allow a (num_bits, group_size) other than (4, 128). Those configs index the wrong "
+                             "quantization scale (pack_num is derived from group_size) so they are EFFICIENCY-ONLY -- "
+                             "timings and cache bytes are valid, accuracy is not")
     args = parser.parse_args()
     if args.k_bits is None:
         args.k_bits = 2 if args.method == "kivi" else 320
     if args.v_bits is None:
         args.v_bits = 2 if args.method == "kivi" else 320
+    # BitDecoding's only correct config is 4-bit/g128 (see _load_bitdecoding_model);
+    # make that the default so the common case needs no extra flags.
+    if args.num_bits is None:
+        args.num_bits = 4 if args.method == "bitdecoding" else 2
+    if args.group_size is None:
+        args.group_size = 128 if args.method == "bitdecoding" else 32
     if args.bpc_offline_proj_path == "":
         args.bpc_offline_proj_path = None
 

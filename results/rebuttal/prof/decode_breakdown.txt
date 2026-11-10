@@ -1,0 +1,46 @@
+
+picokv offline k320/v320 eas=1e-7  |  batch 1  |  64 profiled decode steps
+decode GPU time per token (ms/tok, % of device time)
+
+category                          16384          32768          65536         131072         262144
+---------------------------------------------------------------------------------------------------
+KV cache cat/copy          0.331   2.8%   0.334   2.7%   0.336   2.5%   0.336   2.1%   0.337   1.7%
+attn: picokv expbits       1.021   8.6%   1.494  12.1%   2.694  19.9%   4.998  31.4%   9.545  46.7%
+attn: fp16 flash           0.251   2.1%   0.248   2.0%   0.249   1.8%   0.259   1.6%   0.259   1.3%
+picokv out-proj fused      2.202  18.6%   2.209  17.9%   2.218  16.4%   2.227  14.0%   2.205  10.8%
+picokv quant+pack          0.103   0.9%   0.102   0.8%   0.102   0.8%   0.102   0.6%   0.103   0.5%
+dense weight GEMM          6.217  52.6%   6.206  50.4%   6.203  45.9%   6.256  39.3%   6.238  30.5%
+other (norm/elemwise)      1.623  13.7%   1.632  13.3%   1.636  12.1%   1.662  10.4%   1.649   8.1%
+---------------------------------------------------------------------------------------------------
+device total              11.829 100.0%  12.306 100.0%  13.523 100.0%  15.922 100.0%  20.422 100.0%
+
+     ctx  e2e ms/tok  device ms/tok  gpu busy   host gap
+   16384       18.47         11.829     64.1%      6.64ms
+   32768       18.81         12.306     65.4%      6.51ms
+   65536       18.53         13.523     73.0%      5.01ms
+  131072       19.03         15.922     83.7%      3.11ms
+  262144       23.13         20.422     88.3%      2.71ms
+
+dense fp16 flash_attention_2  |  batch 1  |  64 profiled decode steps
+decode GPU time per token (ms/tok, % of device time)
+
+category                          16384          32768          65536         131072         262144
+---------------------------------------------------------------------------------------------------
+KV cache cat/copy          4.054  31.2%   7.799  44.7%  15.274  58.1%  30.394  68.8%  60.400  75.9%
+attn: fp16 flash           1.271   9.8%   2.008  11.5%   3.379  12.8%   6.101  13.8%  11.530  14.5%
+dense weight GEMM          6.030  46.4%   5.991  34.3%   5.993  22.8%   6.010  13.6%   5.994   7.5%
+other (norm/elemwise)      1.608  12.4%   1.618   9.3%   1.618   6.2%   1.619   3.7%   1.629   2.0%
+---------------------------------------------------------------------------------------------------
+device total              12.994 100.0%  17.453 100.0%  26.297 100.0%  44.156 100.0%  79.594 100.0%
+
+     ctx  e2e ms/tok  device ms/tok  gpu busy   host gap
+   16384       20.01         12.994     64.9%      7.02ms
+   32768       21.09         17.453     82.8%      3.63ms
+   65536       28.89         26.297     91.0%      2.60ms
+  131072       46.53         44.156     94.9%      2.37ms
+  262144       82.25         79.594     96.8%      2.66ms
+
+e2e = run_efficiency.py wall clock, no profiler attached (results/rebuttal/b1/).
+device = sum of kernel self-CUDA time from the table above.
+host gap = launch/dispatch time not overlapped with the GPU.
+Never quote the profiler's own wall clock: per-launch CPU cost inflates to ~4 us under it.

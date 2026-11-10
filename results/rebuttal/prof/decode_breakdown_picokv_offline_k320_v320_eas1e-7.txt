@@ -1,0 +1,28 @@
+picokv offline k320/v320 eas=1e-7 | batch 1 | 64 profiled decode steps
+decode GPU time per token, by kernel category (ms/tok, % of device time)
+
+category                          16384          32768          65536         131072         262144
+---------------------------------------------------------------------------------------------------
+picokv attn (expbits)      1.021   8.6%   1.494  12.1%   2.694  19.9%   4.998  31.4%   9.545  46.7%
+picokv out-proj fused      2.202  18.6%   2.209  17.9%   2.218  16.4%   2.227  14.0%   2.205  10.8%
+picokv quant+pack          0.103   0.9%   0.102   0.8%   0.102   0.8%   0.102   0.6%   0.103   0.5%
+dense weight GEMM          6.217  52.6%   6.206  50.4%   6.203  45.9%   6.256  39.3%   6.238  30.5%
+fp16 sink/local flash      0.251   2.1%   0.248   2.0%   0.249   1.8%   0.259   1.6%   0.259   1.3%
+cat (buffer append)        0.331   2.8%   0.334   2.7%   0.336   2.5%   0.336   2.1%   0.337   1.7%
+other (norm/elemwise)      1.623  13.7%   1.632  13.3%   1.636  12.1%   1.662  10.4%   1.649   8.1%
+---------------------------------------------------------------------------------------------------
+device total              11.829 100.0%  12.306 100.0%  13.523 100.0%  15.922 100.0%  20.422 100.0%
+
+reconciliation against the sweep row (same config, same session hardware)
+results/rebuttal/b1/Llama-3.1-8B-Instruct_picokv_offline_k320_v320_eas0.0000001.json
+
+     ctx  e2e ms/tok  device ms/tok  gpu busy   host gap
+   16384       18.47         11.829     64.1%      6.64ms
+   32768       18.81         12.306     65.4%      6.51ms
+   65536       18.53         13.523     73.0%      5.01ms
+  131072       19.03         15.922     83.7%      3.11ms
+  262144       23.13         20.422     88.3%      2.71ms
+
+e2e = run_efficiency.py wall clock, no profiler attached.
+device = sum of kernel self-CUDA time from the table above.
+host gap = launch/dispatch time not overlapped with the GPU (~1340 kernel launches per decode step).

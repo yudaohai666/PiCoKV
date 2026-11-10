@@ -97,6 +97,9 @@ class PiCoKVModel:
         bpc_fix_layers: list[int] | None = None,
         bpc_use_cuda_kernel: bool = True,
         bpc_offline_proj_path: str | None = BPC_DEFAULT_OFFLINE_PROJ_PATH,
+        # BitDecoding params (--method bitdecoding); also uses num_bits/group_size/quant_mode
+        bitdecoding_residual_block_size: int | None = None,
+        bitdecoding_allow_unvalidated: bool = False,
     ):
         self.method = method
         self.model, self.tokenizer, self._make_cache = load_model(
@@ -137,6 +140,9 @@ class PiCoKVModel:
             bpc_fix_layers=bpc_fix_layers,
             bpc_use_cuda_kernel=bpc_use_cuda_kernel,
             bpc_offline_proj_path=bpc_offline_proj_path,
+            # BitDecoding params (--method bitdecoding)
+            bitdecoding_residual_block_size=bitdecoding_residual_block_size,
+            bitdecoding_allow_unvalidated=bitdecoding_allow_unvalidated,
         )
 
     def build_cache(self):
@@ -282,10 +288,10 @@ def parse_args(argv=None):
     p.add_argument("--data-dir", required=True,
                    help="directory holding the unzipped LongBench *.jsonl files")
     # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
-    p.add_argument("--group-size", type=int, default=32, help="KIVI per-group quant size; OScaR group size (INT2 必须=32)")
+    p.add_argument("--group-size", type=int, default=None, help="KIVI per-group quant size; OScaR group size (INT2 必须=32); BitDecoding 必须=128 (default 32, or 128 for bitdecoding)")
     p.add_argument("--residual-length", type=int, default=32, help="KIVI recent fp16 tokens kept unquantized")
     # ── OScaR params (--method oscar) —— 默认 = INT2 官方配方 ──
-    p.add_argument("--num-bits", type=int, default=2, help="OScaR KV quant bits (INT2 默认)")
+    p.add_argument("--num-bits", type=int, default=None, help="OScaR KV quant bits (INT2 默认); BitDecoding bits (default 2, or 4 for bitdecoding)")
     p.add_argument("--quant-mode", default="k-channel", help="OScaR quant mode")
     p.add_argument("--kv-rotation", default="hadamard", help="OScaR kv rotation (INT2 默认 hadamard)")
     p.add_argument("--kv-norm", default="1", help="OScaR kv norm (INT2 默认 1)")
@@ -307,11 +313,25 @@ def parse_args(argv=None):
     p.add_argument("--bpc-fix-layers", default="0,1", help="BPC: comma-separated layers skipping sparse attention (empty for none)")
     p.add_argument("--bpc-use-cuda-kernel", action=argparse.BooleanOptionalAction, default=True, help="BPC: use the compiled CUDA kernel; PyTorch fallback on failure")
     p.add_argument("--bpc-offline-proj-path", default=BPC_DEFAULT_OFFLINE_PROJ_PATH, help="BPC: learned offline hash-projection .pt; pass '' for the online (random) projection")
+    # ── BitDecoding params (--method bitdecoding); reuses --num-bits/--group-size/--quant-mode ──
+    p.add_argument("--bitdecoding-residual-block-size", type=int, default=None,
+                   help="BitDecoding fp16 residual block (default 128 at 4-bit, 256 at 2-bit; must match the kernel's kBlockN_pack)")
+    p.add_argument("--bitdecoding-allow-unvalidated", action="store_true",
+                   help="BitDecoding: allow a (num_bits, group_size) other than (4, 128). Those configs index the wrong "
+                        "quantization scale (pack_num is derived from group_size), so the resulting scores measure the "
+                        "kernel bug, NOT the method -- label them as such and never put them in a comparison table")
     args = p.parse_args(argv)
     if args.k_bits is None:
         args.k_bits = 2 if args.method == "kivi" else 320
     if args.v_bits is None:
         args.v_bits = 2 if args.method == "kivi" else 320
+    # BitDecoding's only numerically correct config is 4-bit/g128 (see
+    # common._load_bitdecoding_model); make that the default so the common case
+    # needs no extra flags.
+    if args.num_bits is None:
+        args.num_bits = 4 if args.method == "bitdecoding" else 2
+    if args.group_size is None:
+        args.group_size = 128 if args.method == "bitdecoding" else 32
     if args.bpc_offline_proj_path == "":
         args.bpc_offline_proj_path = None
     return args
@@ -336,6 +356,7 @@ def main() -> None:
         args.method, args.k_bits, args.v_bits, args.num_bits,
         offline=(args.offline or args.offline_proj_path is not None),
         full_tag=(args.method == "picokv"),
+        group_size=args.group_size,
     )
     save_path = (
         Path(args.output_path)
@@ -386,6 +407,9 @@ def main() -> None:
         bpc_fix_layers=[int(x) for x in args.bpc_fix_layers.split(",") if x],
         bpc_use_cuda_kernel=args.bpc_use_cuda_kernel,
         bpc_offline_proj_path=args.bpc_offline_proj_path,
+        # BitDecoding params (--method bitdecoding)
+        bitdecoding_residual_block_size=args.bitdecoding_residual_block_size,
+        bitdecoding_allow_unvalidated=args.bitdecoding_allow_unvalidated,
     )
 
     for dataset in datasets:

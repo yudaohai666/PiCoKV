@@ -22,7 +22,10 @@ GPU="${GPU:-0}"
 MODEL="${MODEL:-/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct}"
 # MODEL="${MODEL:-/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Qwen3-8B}"
 MODEL_TAG="$(basename "${MODEL%/}")"
-RESULT_ROOT="results/efficiency"
+# Overridable so a self-contained campaign (e.g. a rebuttal re-measurement where
+# every arm must come from one session on identical hardware) can land in its own
+# tree instead of mixing with results/efficiency's historical rows.
+RESULT_ROOT="${RESULT_ROOT:-results/efficiency}"
 
 # ── benchmark runtime params ──
 # LENGTHS="${LENGTHS:-131072}"
@@ -81,6 +84,9 @@ POLAR_MODE="${POLAR_MODE:-mixed}"; POLAR_RBITS="${POLAR_RBITS:-3}"; POLAR_TBITS=
 # bpc (src/BPC); default = offline (python default picks the mixlen-mixdata projection)
 BPC_MASK_OUT="${BPC_MASK_OUT:-0.98}"; BPC_MIN_REMAIN="${BPC_MIN_REMAIN:-128}"; BPC_ERR_RATIO="${BPC_ERR_RATIO:-0.1}"; BPC_FIX_LAYERS="${BPC_FIX_LAYERS:-0,1}"
 BPC_OFFLINE_PROJ_PATH="${BPC_OFFLINE_PROJ_PATH:-}"
+# bitdecoding (src/BitDecoding). g128 for BOTH bit widths so the two rows differ
+# only in bit width (same reasoning as KIVI-2/KIVI-4 sharing g32/R128).
+BD_NUM_BITS="${BD_NUM_BITS:-4}"; BD_GROUP="${BD_GROUP:-128}"; BD_QUANT_MODE="${BD_QUANT_MODE:-k-channel}"
 
 # Build METHOD_ARGS[] and TAG for a method. Needs REPO_ROOT, MODEL_TAG + the
 # per-method defaults above. picokv TAG matches run_ruler/run_infinitebench's
@@ -135,6 +141,19 @@ build_method_args() {
         --bpc-err-ratio "${BPC_ERR_RATIO}" --bpc-fix-layers "${BPC_FIX_LAYERS}")
       [ -n "${BPC_OFFLINE_PROJ_PATH}" ] && METHOD_ARGS+=(--bpc-offline-proj-path "${BPC_OFFLINE_PROJ_PATH}")
       TAG="bpc_offline"
+      ;;
+    bitdecoding)
+      METHOD_ARGS=(--num-bits "${BD_NUM_BITS}" --group-size "${BD_GROUP}" --quant-mode "${BD_QUANT_MODE}")
+      # Unlike run_longbench.sh, no _UNVALIDATED suffix: the pack_num bug puts a
+      # wrong subscript on a quantization scale, so it corrupts OUTPUT VALUES
+      # only. Loop trip counts, tile sizes, smem and memory traffic are
+      # identical to a corrected kernel, and the cache tensor shapes come from
+      # the python side, so latency and cache bytes measured here are valid at
+      # every (bits, group). Accuracy from the same config is not -- that is why
+      # the accuracy launcher tags it differently.
+      [ "${BD_NUM_BITS}" != "4" ] || [ "${BD_GROUP}" != "128" ] && METHOD_ARGS+=(--bitdecoding-allow-unvalidated)
+      TAG="bitdecoding_${BD_NUM_BITS}bit_g${BD_GROUP}"
+      :
       ;;
   esac
 }

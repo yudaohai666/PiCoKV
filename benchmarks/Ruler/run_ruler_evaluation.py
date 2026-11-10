@@ -137,6 +137,8 @@ def parse_arguments():
     #   picokv            -> quantized KV-cache method (modify + StandaloneLlamaCache)
     #   kivi               -> KIVI quantized KV cache
     #   oscar              -> OScaR quantized KV cache
+    #   bitdecoding        -> BitDecoding low-bit KV cache (4-bit/g128 only; see
+    #                         common._load_bitdecoding_model)
     #   flash_attention_2  -> dense full-precision baseline (flash-attn-2)
     #   sdpa / eager       -> dense full-precision baseline
     parser.add_argument(
@@ -145,7 +147,7 @@ def parse_arguments():
         default="picokv",
         help=(
             "evaluation method: 'picokv' (CUDA kernel) / 'picokv_recon' (dequant+flash ablation, "
-            "see --quant-target) / 'kivi' / 'oscar' / 'polar' (quantized KV cache), "
+            "see --quant-target) / 'kivi' / 'oscar' / 'polar' / 'bitdecoding' (quantized KV cache), "
             "or a dense baseline attn impl 'flash_attention_2' / 'sdpa' / 'eager'"
         ),
     )
@@ -180,11 +182,11 @@ def parse_arguments():
     )
 
     # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
-    parser.add_argument("--group-size", type=int, default=32, help="KIVI per-group quant size; OScaR group size (INT2 必须=32)")
+    parser.add_argument("--group-size", type=int, default=None, help="KIVI per-group quant size; OScaR group size (INT2 必须=32); BitDecoding 必须=128 (default 32, or 128 for bitdecoding)")
     parser.add_argument("--residual-length", type=int, default=32, help="KIVI recent fp16 tokens kept unquantized")
 
     # ── OScaR params (--method oscar) ──
-    parser.add_argument("--num-bits", type=int, default=2, help="OScaR KV quant bits (INT2 默认)")
+    parser.add_argument("--num-bits", type=int, default=None, help="OScaR KV quant bits (INT2 默认); BitDecoding bits (default 2, or 4 for bitdecoding)")
     parser.add_argument("--quant-mode", default="k-channel", help="OScaR quant mode")
     parser.add_argument("--kv-rotation", default="hadamard", help="OScaR kv rotation (INT2 默认 hadamard)")
     parser.add_argument("--kv-norm", default="1", help="OScaR kv norm (INT2 默认 1)")
@@ -207,6 +209,13 @@ def parse_arguments():
     parser.add_argument("--bpc-fix-layers", default="0,1", help="BPC: comma-separated layer indices that skip sparse attention (empty string for none)")
     parser.add_argument("--bpc-use-cuda-kernel", action=argparse.BooleanOptionalAction, default=True, help="BPC: use the compiled CUDA kernel; falls back to PyTorch on failure")
     parser.add_argument("--bpc-offline-proj-path", default=BPC_DEFAULT_OFFLINE_PROJ_PATH, help="BPC: learned offline hash-projection .pt; pass '' for the online (random) projection")
+    # ── BitDecoding params (--method bitdecoding); reuses --num-bits/--group-size/--quant-mode ──
+    parser.add_argument("--bitdecoding-residual-block-size", type=int, default=None,
+                        help="BitDecoding fp16 residual block (default 128 at 4-bit, 256 at 2-bit; must match the kernel's kBlockN_pack)")
+    parser.add_argument("--bitdecoding-allow-unvalidated", action="store_true",
+                        help="BitDecoding: allow a (num_bits, group_size) other than (4, 128). Those configs index the wrong "
+                             "quantization scale (pack_num is derived from group_size), so they are EFFICIENCY-ONLY and must "
+                             "NOT be used for a RULER accuracy row")
 
     # Task configuration
     parser.add_argument(
@@ -255,6 +264,12 @@ def parse_arguments():
         args.k_bits = 2 if args.method == "kivi" else 320
     if args.v_bits is None:
         args.v_bits = 2 if args.method == "kivi" else 320
+    # BitDecoding's only correct config is 4-bit/g128 (see _load_bitdecoding_model);
+    # make that the default so the common case needs no extra flags.
+    if args.num_bits is None:
+        args.num_bits = 4 if args.method == "bitdecoding" else 2
+    if args.group_size is None:
+        args.group_size = 128 if args.method == "bitdecoding" else 32
     if args.bpc_offline_proj_path == "":
         args.bpc_offline_proj_path = None
     return args
@@ -276,7 +291,8 @@ def run_tag(args):
         if float(args.eas) != 0.01:
             tag += f"_eas{float(args.eas):g}"
         return tag
-    return output_tag(args.method, args.k_bits, args.v_bits, args.num_bits)
+    return output_tag(args.method, args.k_bits, args.v_bits, args.num_bits,
+                      group_size=args.group_size)
 
 
 def get_output_path(args):
@@ -500,6 +516,9 @@ def main():
             bpc_fix_layers=[int(x) for x in args.bpc_fix_layers.split(",") if x],
             bpc_use_cuda_kernel=args.bpc_use_cuda_kernel,
             bpc_offline_proj_path=args.bpc_offline_proj_path,
+            # BitDecoding params (--method bitdecoding; also uses --num_bits/--group_size/--quant_mode)
+            bitdecoding_residual_block_size=args.bitdecoding_residual_block_size,
+            bitdecoding_allow_unvalidated=args.bitdecoding_allow_unvalidated,
         )
         # RULER's lm_eval harness pads batches; ensure a pad token exists.
         if tokenizer.pad_token is None:

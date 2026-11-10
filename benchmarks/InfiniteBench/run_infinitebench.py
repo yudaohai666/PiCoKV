@@ -98,11 +98,13 @@ def parse_arguments():
     parser.add_argument("--log-eps", type=float, default=-10.0)
 
     # ── KIVI params (--method kivi; also uses --k-bits/--v-bits as 2/4-bit KV) ──
-    parser.add_argument("--group-size", type=int, default=32)
+    parser.add_argument("--group-size", type=int, default=None,
+                        help="KIVI/OScaR group size (default 32); BitDecoding 必须=128 (its default)")
     parser.add_argument("--residual-length", type=int, default=32)
 
     # ── OScaR params (--method oscar) ──
-    parser.add_argument("--num-bits", type=int, default=2)
+    parser.add_argument("--num-bits", type=int, default=None,
+                        help="OScaR KV quant bits (default 2); BitDecoding bits (default 4)")
     parser.add_argument("--quant-mode", default="k-channel")
     parser.add_argument("--kv-rotation", default="hadamard")
     parser.add_argument("--kv-norm", default="1")
@@ -178,6 +180,13 @@ def parse_arguments():
         args.k_bits = 2 if args.method == "kivi" else 320
     if args.v_bits is None:
         args.v_bits = 2 if args.method == "kivi" else 320
+    # BitDecoding's only numerically correct config is 4-bit/g128 (see
+    # common._load_bitdecoding_model); make that the default so the common case
+    # needs no extra flags.
+    if args.num_bits is None:
+        args.num_bits = 4 if args.method == "bitdecoding" else 2
+    if args.group_size is None:
+        args.group_size = 128 if args.method == "bitdecoding" else 32
     if args.bpc_offline_proj_path == "":
         args.bpc_offline_proj_path = None
     return args
@@ -196,7 +205,8 @@ def run_tag(args):
         if float(args.eas) != 0.01:
             tag += f"_eas{float(args.eas):g}"
         return tag
-    return output_tag(args.method, args.k_bits, args.v_bits, args.num_bits)
+    return output_tag(args.method, args.k_bits, args.v_bits, args.num_bits,
+                      group_size=args.group_size)
 
 
 def get_output_path(args):

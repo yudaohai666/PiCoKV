@@ -2,7 +2,7 @@
 # Decode-stage torch.profiler analysis: picokv / kivi / oscar / polar / dense.
 # Prefill once, time the decode steps, export key_averages table + chrome trace.
 # Select methods via the METHODS list below (METHOD=kivi forces a single one).
-# Output: results/efficiency/prof/<method>_<length>.json (chrome trace)
+# Output: ${PROF_DIR}/<tag>_<length>.{json,txt} (chrome trace + key_averages table)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -18,7 +18,10 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 GPU="${GPU:-6}"
 MODEL="${MODEL:-/data/Llama-3.1-8B-Instruct}"
 MODEL_TAG="$(basename "${MODEL%/}")"
-PROF_DIR="results/efficiency/prof"
+# Overridable for the same reason RESULT_ROOT is in run_efficiency.sh: a
+# self-contained campaign (e.g. a rebuttal breakdown) lands in its own tree
+# instead of mixing with results/efficiency's historical rows.
+PROF_DIR="${PROF_DIR:-results/efficiency/prof}"
 mkdir -p "${PROF_DIR}"
 
 # ── benchmark runtime params (aligned with run_efficiency.py) ──
@@ -77,6 +80,13 @@ build_method_args() {
         mode="online"
       fi
       TAG="picokv_${mode}_k${K_BITS}_v${V_BITS}"
+      # Same reasoning as run_efficiency.sh: knobs that change the result must
+      # appear in the name, or two arms silently share one output file. Suffix
+      # only on deviation from the default so existing names stay valid.
+      [ "${EXP_BITS}" != "4" ]  && TAG+="_exp${EXP_BITS}"
+      [ "${ZEROROPE}" != "20" ] && TAG+="_zr${ZEROROPE}"
+      [ "${EAS}" != "0.01" ]    && TAG+="_eas${EAS}"
+      :
       ;;
     kivi)
       METHOD_ARGS=(--k-bits "${KIVI_K}" --v-bits "${KIVI_V}" --group-size "${KIVI_GROUP}" --residual-length "${KIVI_RESIDUAL}")
@@ -99,11 +109,16 @@ build_method_args() {
 
 for method in "${METHODS[@]}"; do
   build_method_args "${method}"
-  TRACE="${OUTPUT_PATH:-${PROF_DIR}/${method}_${LENGTH}.json}"
-  echo "=== Profiling decode: method=${method} length=${LENGTH} -> ${TRACE} ==="
+  # TAG, not ${method}: the breakdown depends on every per-method knob, so a
+  # bare method name made two configs at the same length overwrite each other.
+  TRACE="${OUTPUT_PATH:-${PROF_DIR}/${TAG}_${LENGTH}.json}"
+  # profile_decode.py prints the key_averages table to stdout only; the --trace
+  # file is the chrome trace. Tee so the per-op numbers are persisted too.
+  REPORT="${TRACE%.json}.txt"
+  echo "=== Profiling decode: method=${method} tag=${TAG} length=${LENGTH} -> ${TRACE} ==="
   CUDA_VISIBLE_DEVICES=${GPU} python "${SCRIPT_DIR}/profile_decode.py" \
     --model "${MODEL}" --method "${method}" \
     --length "${LENGTH}" --batch "${BATCH}" --warmup "${WARMUP}" --active "${ACTIVE}" --rows "${ROWS}" \
     ${DATASET:+--dataset "${DATASET}"} \
-    --trace "${TRACE}" "${METHOD_ARGS[@]}"
+    --trace "${TRACE}" "${METHOD_ARGS[@]}" 2>&1 | tee "${REPORT}"
 done
