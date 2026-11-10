@@ -294,6 +294,192 @@ void picokv_decode_tail_main_fn(
     }
 }
 
+// Global kernel of picokv_decode_tail_main_fn alone (no value projection):
+// fills glob_code_output / glob_den for callers that run the projection +
+// epilogue themselves, e.g. from one shared projection matrix per KV head
+// instead of a per-row replica.
+void picokv_decode_tail_global_fn(
+  at::Tensor packed_projected_query,
+  at::Tensor packed_key,
+  at::Tensor packed_value_sign,
+  at::Tensor query_scale,
+  at::Tensor dense_lse,
+  at::Tensor glob_code_output,
+  at::Tensor glob_den,
+  int exp_bits,
+  int tile_size,
+  int key_transposed,
+  double attention_scale,
+  at::Tensor global_lens,
+  at::Tensor sched_req,
+  at::Tensor sched_tile
+) {
+    picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
+      packed_projected_query,
+      packed_key,
+      packed_value_sign,
+      query_scale,
+      dense_lse,
+      glob_code_output,
+      glob_den,
+      exp_bits,
+      tile_size,
+      key_transposed,
+      attention_scale,
+      global_lens,
+      sched_req,
+      sched_tile
+    );
+}
+
+// picokv_decode_tail_global_fn over per-row packed storage: row b's keys /
+// values live at row_kptr[b] / row_vptr[b] with capacity row_cap[b] tokens
+// (packed_key / packed_value only give KVH / KB / Cv). TC sched path only.
+void picokv_decode_tail_global_rows_fn(
+  at::Tensor packed_projected_query,
+  at::Tensor packed_key,
+  at::Tensor packed_value_sign,
+  at::Tensor query_scale,
+  at::Tensor dense_lse,
+  at::Tensor glob_code_output,
+  at::Tensor glob_den,
+  int exp_bits,
+  int tile_size,
+  int key_transposed,
+  double attention_scale,
+  at::Tensor global_lens,
+  at::Tensor sched_req,
+  at::Tensor sched_tile,
+  at::Tensor row_kptr,
+  at::Tensor row_vptr,
+  at::Tensor row_cap
+) {
+    picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
+      packed_projected_query,
+      packed_key,
+      packed_value_sign,
+      query_scale,
+      dense_lse,
+      glob_code_output,
+      glob_den,
+      exp_bits,
+      tile_size,
+      key_transposed,
+      attention_scale,
+      global_lens,
+      sched_req,
+      sched_tile,
+      row_kptr,
+      row_vptr,
+      row_cap
+    );
+}
+
+// Deterministic picokv_decode_tail_global(_rows)_fn: the TC kernel writes
+// per-block partials (part_code / part_den, part_rs for sched grids; empty
+// row_* = batched storage) that shared_proj.det_tail_reduce sums in a fixed
+// order into glob_code_output / glob_den (left untouched here).
+void picokv_decode_tail_global_part_fn(
+  at::Tensor packed_projected_query,
+  at::Tensor packed_key,
+  at::Tensor packed_value_sign,
+  at::Tensor query_scale,
+  at::Tensor dense_lse,
+  at::Tensor glob_code_output,
+  at::Tensor glob_den,
+  int exp_bits,
+  int tile_size,
+  int key_transposed,
+  double attention_scale,
+  at::Tensor global_lens,
+  at::Tensor sched_req,
+  at::Tensor sched_tile,
+  at::Tensor row_kptr,
+  at::Tensor row_vptr,
+  at::Tensor row_cap,
+  at::Tensor part_code,
+  at::Tensor part_den,
+  at::Tensor part_rs
+) {
+    TORCH_CHECK(part_code.numel() > 0, "picokv_decode_tail_global_part_fn: empty part_code");
+    picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
+      packed_projected_query,
+      packed_key,
+      packed_value_sign,
+      query_scale,
+      dense_lse,
+      glob_code_output,
+      glob_den,
+      exp_bits,
+      tile_size,
+      key_transposed,
+      attention_scale,
+      global_lens,
+      sched_req,
+      sched_tile,
+      row_kptr,
+      row_vptr,
+      row_cap,
+      part_code,
+      part_den,
+      part_rs
+    );
+}
+
+// picokv_decode_tail_global(_rows)_fn with the query quantizer fused into
+// the tail (no prep op): reads the bf16 projected query; glob_code_output /
+// glob_den must be zeroed by the caller (the shared Triton qproj does it).
+// Empty row_* = batched storage.
+void picokv_decode_tail_global_q_fn(
+  at::Tensor projected_query,
+  at::Tensor packed_projected_query,
+  at::Tensor packed_key,
+  at::Tensor packed_value_sign,
+  at::Tensor query_scale,
+  at::Tensor dense_lse,
+  at::Tensor glob_code_output,
+  at::Tensor glob_den,
+  int exp_bits,
+  int tile_size,
+  int key_transposed,
+  double attention_scale,
+  at::Tensor global_lens,
+  at::Tensor sched_req,
+  at::Tensor sched_tile,
+  at::Tensor row_kptr,
+  at::Tensor row_vptr,
+  at::Tensor row_cap
+) {
+    TORCH_CHECK(projected_query.numel() > 0, "picokv_decode_tail_global_q_fn: empty projected_query");
+    picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
+      packed_projected_query,
+      packed_key,
+      packed_value_sign,
+      query_scale,
+      dense_lse,
+      glob_code_output,
+      glob_den,
+      exp_bits,
+      tile_size,
+      key_transposed,
+      attention_scale,
+      global_lens,
+      sched_req,
+      sched_tile,
+      row_kptr,
+      row_vptr,
+      row_cap,
+      at::Tensor(),
+      at::Tensor(),
+      at::Tensor(),
+      projected_query
+    );
+}
+
+int64_t picokv_tail_block_tiles_fn(int64_t L, int64_t BKVH) {
+    return picokv_tail_block_tiles((int)L, (int)BKVH);
+}
+
 void picokv_global_code_output_v1_exp8_tiled_gqa8_bmma_score_atomic_fn(
   at::Tensor packed_projected_query,
   at::Tensor packed_key,
@@ -510,4 +696,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("picokv_window_attn_fn", &picokv_window_attn_fn, "picokv_window_attn_fn");
   m.def("picokv_decode_tail_prep_fn", &picokv_decode_tail_prep_fn, "picokv_decode_tail_prep_fn");
   m.def("picokv_decode_tail_main_fn", &picokv_decode_tail_main_fn, "picokv_decode_tail_main_fn");
+  m.def("picokv_decode_tail_global_fn", &picokv_decode_tail_global_fn, "picokv_decode_tail_global_fn");
+  m.def("picokv_decode_tail_global_rows_fn", &picokv_decode_tail_global_rows_fn, "picokv_decode_tail_global_rows_fn");
+  m.def("picokv_decode_tail_global_part_fn", &picokv_decode_tail_global_part_fn, "picokv_decode_tail_global_part_fn");
+  m.def("picokv_decode_tail_global_q_fn", &picokv_decode_tail_global_q_fn, "picokv_decode_tail_global_q_fn");
+  m.def("picokv_tail_block_tiles_fn", &picokv_tail_block_tiles_fn, "picokv_tail_block_tiles_fn");
 }

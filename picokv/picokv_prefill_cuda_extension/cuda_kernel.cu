@@ -3332,7 +3332,372 @@ blockk_fixed_frag_d128_kernel(
   }
 }
 
-std::vector<at::Tensor> picokv_prefill_blockk_fixed(
+// One-band-per-warp fixed cascade (PICOKV_FIXED_BAND, default on).  The frag
+// kernel above walks two 16-token bands per warp at 128 tokens per CTA, so a
+// short input (decode slide, short prompts: 8-16 CTAs) runs a long serial
+// mma chain on a handful of SMs.  Here each warp owns one band and a CTA
+// holds NB bands (16*NB tokens), the residual stays in registers as raw
+// m16n8k16 A fragments, B fragments come from ldmatrix, and the sign / bit
+// pack is branch-free.  Every output element still comes from the same
+// HMMA.16816.F32.BF16 sequence (m16n16k16 mma_sync = two m16n8k16 n-halves,
+// k chained in order from a +0 accumulator; the C @ D update chained over
+// the two 16-code halves), the same bf16 roundings and the same norm fma
+// order, so codes and errors are bitwise identical to the frag kernel.
+__device__ __forceinline__ void band_ldsm_x4(uint32_t (&r)[4], const __nv_bfloat16 *p) {
+  const uint32_t a = static_cast<uint32_t>(__cvta_generic_to_shared(p));
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
+}
+
+__device__ __forceinline__ void band_ldsm_x4_t(uint32_t (&r)[4], const __nv_bfloat16 *p) {
+  const uint32_t a = static_cast<uint32_t>(__cvta_generic_to_shared(p));
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+               : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
+}
+
+// d = A[16x16] @ B[16x8] + c (m16n8k16, bf16 in, f32 accumulate).
+__device__ __forceinline__ void band_mma(float (&d)[4], const uint32_t (&a)[4], uint32_t b0,
+                                         uint32_t b1, const float *c) {
+  asm volatile(
+      "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+      "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+      : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
+      : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1),
+        "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
+}
+
+__device__ __forceinline__ uint32_t band_pack_bf16(float lo, float hi) {
+  const __nv_bfloat162 v = __floats2bfloat162_rn(lo, hi);
+  return *reinterpret_cast<const uint32_t *>(&v);
+}
+
+__device__ __forceinline__ float band_lo(uint32_t v) { return __uint_as_float(v << 16); }
+__device__ __forceinline__ float band_hi(uint32_t v) { return __uint_as_float(v & 0xffff0000u); }
+
+template <int NB>
+__global__ void __launch_bounds__(NB * 32)
+blockk_fixed_band_d128_kernel(
+    const __nv_bfloat16 *__restrict__ full_states,
+    const __nv_bfloat16 *__restrict__ encoders,
+    const __nv_bfloat16 *__restrict__ decoders,
+    int64_t *__restrict__ packed_out,
+    float *__restrict__ err,
+    int total_len,
+    int glob_start,
+    int glob_len,
+    int code_dim,
+    int zerorope,
+    bool apply_zerorope,
+    bool key_layout) {
+  constexpr int kDim = 128;
+  constexpr int kGb = 32;
+  constexpr int kLd = 136;
+  constexpr int kThreads = NB * 32;
+  constexpr int kStage = 2 * kGb * kLd;  // one (E, D) group pair, bf16 elements
+  // NB <= 4: the residual staging tile fits ring slot 1, which is first
+  // written (group 1 prefetch) after the group-0 barrier, once every warp
+  // has its fragments.
+  constexpr bool kAlias = NB * 16 <= 2 * kGb;
+  const int row = blockIdx.y;
+  const int groups = code_dim / kGb;
+  const int words = code_dim >> 6;
+  const int warp = threadIdx.x >> 5;
+  const int lane = threadIdx.x & 31;
+  const int lg = lane >> 2;
+  const int lc = lane & 3;
+  const int band_tok = blockIdx.x * (16 * NB) + warp * 16;
+  const bool active = band_tok < glob_len;  // warp-uniform
+  // ldmatrix lane roles: matrix m = lane / 8, row r = lane % 8 within it.
+  const int lm = lane >> 3;
+  const int lr = lane & 7;
+
+  extern __shared__ __align__(16) unsigned char band_smem[];
+  __nv_bfloat16 *ring = reinterpret_cast<__nv_bfloat16 *>(band_smem);
+  __nv_bfloat16 *rs = ring + (kAlias ? kStage : 2 * kStage) + warp * 16 * kLd;
+
+  const __nv_bfloat16 *e_row = encoders + static_cast<int64_t>(row) * code_dim * kDim;
+  const __nv_bfloat16 *d_row = decoders + static_cast<int64_t>(row) * code_dim * kDim;
+  auto stage_group = [&](int gg) {
+    __nv_bfloat16 *e_dst = ring + (gg & 1) * kStage;
+    __nv_bfloat16 *d_dst = e_dst + kGb * kLd;
+    const __nv_bfloat16 *e_g = e_row + static_cast<int64_t>(gg) * kGb * kDim;
+    const __nv_bfloat16 *d_g = d_row + static_cast<int64_t>(gg) * kGb * kDim;
+    #pragma unroll
+    for (int i = threadIdx.x; i < kGb * (kDim / 8); i += kThreads) {
+      const int rr = i >> 4;
+      const int cc = i & 15;
+      __pipeline_memcpy_async(e_dst + rr * kLd + cc * 8, e_g + i * 8, 16);
+      __pipeline_memcpy_async(d_dst + rr * kLd + cc * 8, d_g + i * 8, 16);
+    }
+  };
+  stage_group(0);
+  __pipeline_commit();
+  // Residual A fragments r[k] (dims 16k..16k+15): a0 (lg, 2lc..), a1 (lg+8,
+  // 2lc..), a2 (lg, 2lc+8..), a3 (lg+8, 2lc+8..) -- the wmma x[] order.
+  uint32_t r[8][4];
+  if (active) {
+    const __nv_bfloat16 *src =
+        full_states + (static_cast<int64_t>(row) * total_len + glob_start + band_tok) * kDim;
+    #pragma unroll
+    for (int j = 0; j < 8; ++j) {
+      const int i = j * 32 + lane;
+      const int t = i >> 4;
+      const int c = i & 15;
+      uint4 v = make_uint4(0u, 0u, 0u, 0u);
+      if (band_tok + t < glob_len) {
+        v = __ldg(reinterpret_cast<const uint4 *>(src + t * kDim + c * 8));
+        if (apply_zerorope) {
+          uint32_t *w = reinterpret_cast<uint32_t *>(&v);
+          #pragma unroll
+          for (int e = 0; e < 8; ++e) {
+            const int d = c * 8 + e;
+            if (d < zerorope || (d >= kDim / 2 && d < kDim / 2 + zerorope)) {
+              w[e >> 1] &= (e & 1) ? 0x0000ffffu : 0xffff0000u;  // bf16 +0
+            }
+          }
+        }
+      }
+      *reinterpret_cast<uint4 *>(rs + t * kLd + c * 8) = v;
+    }
+    __syncwarp();
+    #pragma unroll
+    for (int k = 0; k < 8; ++k) {
+      band_ldsm_x4(r[k], rs + ((lm & 1) * 8 + lr) * kLd + k * 16 + (lm >> 1) * 8);
+    }
+  }
+
+  const float zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  uint64_t pw0 = 0;  // packed bits of rows lg / lg+8 across 2 groups
+  uint64_t pw1 = 0;
+  for (int g = 0; g < groups; ++g) {
+    __pipeline_wait_prior(0);
+    __syncthreads();
+    if (g + 1 < groups) {
+      stage_group(g + 1);
+    }
+    __pipeline_commit();
+    if (!active) {
+      continue;
+    }
+    const __nv_bfloat16 *e_smem = ring + (g & 1) * kStage;
+    const __nv_bfloat16 *d_smem = e_smem + kGb * kLd;
+
+    // Y[16x32] = R @ E_g^T: acc[ct][h] = codes 16ct + 8h .. +7.
+    float acc[2][2][4];
+    #pragma unroll
+    for (int ct = 0; ct < 2; ++ct) {
+      #pragma unroll
+      for (int k = 0; k < 8; ++k) {
+        uint32_t b[4];
+        band_ldsm_x4(b, e_smem + (ct * 16 + (lm >> 1) * 8 + lr) * kLd + k * 16 + (lm & 1) * 8);
+        band_mma(acc[ct][0], r[k], b[0], b[1], k == 0 ? zero : acc[ct][0]);
+        band_mma(acc[ct][1], r[k], b[2], b[3], k == 0 ? zero : acc[ct][1]);
+      }
+    }
+
+    // Sign (reference bf16 score rounding) -> C A-fragments and code bits.
+    uint32_t c[2][4];
+    uint32_t bits0 = 0;  // row lg, bit = code col - 2lc
+    uint32_t bits1 = 0;  // row lg+8
+    #pragma unroll
+    for (int ct = 0; ct < 2; ++ct) {
+      #pragma unroll
+      for (int h = 0; h < 2; ++h) {
+        #pragma unroll
+        for (int p = 0; p < 2; ++p) {  // p = 0: row lg, 1: row lg+8
+          uint32_t cw = 0;
+          #pragma unroll
+          for (int q = 0; q < 2; ++q) {
+            const float score = __bfloat162float(__float2bfloat16(acc[ct][h][2 * p + q]));
+            const bool neg = score < 0.0f;
+            cw |= (neg ? 0xbf80u : 0x3f80u) << (16 * q);
+            const bool bit = key_layout ? neg : (score > 0.0f);
+            const uint32_t m = bit ? (uint32_t{1} << (ct * 16 + h * 8 + q)) : 0u;
+            if (p == 0) {
+              bits0 |= m;
+            } else {
+              bits1 |= m;
+            }
+          }
+          c[ct][2 * h + p] = cw;
+        }
+      }
+    }
+    bits0 <<= 2 * lc;
+    bits1 <<= 2 * lc;
+    bits0 |= __shfl_xor_sync(0xffffffffu, bits0, 1);
+    bits0 |= __shfl_xor_sync(0xffffffffu, bits0, 2);
+    bits1 |= __shfl_xor_sync(0xffffffffu, bits1, 1);
+    bits1 |= __shfl_xor_sync(0xffffffffu, bits1, 2);
+    // R = bf16(R - C @ D_g), elementwise on the fragments.
+    #pragma unroll
+    for (int ct = 0; ct < 8; ++ct) {
+      float u[2][4];
+      #pragma unroll
+      for (int kk = 0; kk < 2; ++kk) {
+        uint32_t b[4];
+        band_ldsm_x4_t(b, d_smem + (kk * 16 + (lm & 1) * 8 + lr) * kLd + ct * 16 + (lm >> 1) * 8);
+        band_mma(u[0], c[kk], b[0], b[1], kk == 0 ? zero : u[0]);
+        band_mma(u[1], c[kk], b[2], b[3], kk == 0 ? zero : u[1]);
+      }
+      #pragma unroll
+      for (int a = 0; a < 4; ++a) {  // a = 2h + p: u[h][2p], u[h][2p+1]
+        const float *uh = u[a >> 1] + 2 * (a & 1);
+        r[ct][a] = band_pack_bf16(band_lo(r[ct][a]) - uh[0], band_hi(r[ct][a]) - uh[1]);
+      }
+    }
+
+    // Pack two groups per uint64 word; lane lc==0 of each quad writes.
+    if ((g & 1) == 0) {
+      pw0 = bits0;
+      pw1 = bits1;
+    } else {
+      pw0 |= static_cast<uint64_t>(bits0) << 32;
+      pw1 |= static_cast<uint64_t>(bits1) << 32;
+      if (lc == 0) {
+        const int w = g >> 1;
+        const int tok0 = band_tok + lg;
+        const int tok1 = tok0 + 8;
+        if (key_layout) {
+          const int64_t base = (static_cast<int64_t>(row) * words + w) * glob_len;
+          if (tok0 < glob_len) packed_out[base + tok0] = static_cast<int64_t>(pw0);
+          if (tok1 < glob_len) packed_out[base + tok1] = static_cast<int64_t>(pw1);
+        } else {
+          if (tok0 < glob_len)
+            packed_out[(static_cast<int64_t>(row) * glob_len + tok0) * words + w] =
+                static_cast<int64_t>(pw0);
+          if (tok1 < glob_len)
+            packed_out[(static_cast<int64_t>(row) * glob_len + tok1) * words + w] =
+                static_cast<int64_t>(pw1);
+        }
+      }
+    }
+  }
+  if (!active) {
+    return;
+  }
+
+  // Per-token residual norm, same fma order as the frag kernel: per k,
+  // x[0], x[1], x[4], x[5] (row lg) and x[2], x[3], x[6], x[7] (row lg+8).
+  float n0 = 0.0f, n1 = 0.0f;
+  #pragma unroll
+  for (int k = 0; k < 8; ++k) {
+    float v;
+    v = band_lo(r[k][0]); n0 = fmaf(v, v, n0);
+    v = band_hi(r[k][0]); n0 = fmaf(v, v, n0);
+    v = band_lo(r[k][1]); n1 = fmaf(v, v, n1);
+    v = band_hi(r[k][1]); n1 = fmaf(v, v, n1);
+    v = band_lo(r[k][2]); n0 = fmaf(v, v, n0);
+    v = band_hi(r[k][2]); n0 = fmaf(v, v, n0);
+    v = band_lo(r[k][3]); n1 = fmaf(v, v, n1);
+    v = band_hi(r[k][3]); n1 = fmaf(v, v, n1);
+  }
+  n0 += __shfl_xor_sync(0xffffffffu, n0, 1);
+  n0 += __shfl_xor_sync(0xffffffffu, n0, 2);
+  n1 += __shfl_xor_sync(0xffffffffu, n1, 1);
+  n1 += __shfl_xor_sync(0xffffffffu, n1, 2);
+  if (lc == 0) {
+    const int tok0 = band_tok + lg;
+    if (tok0 < glob_len)
+      err[static_cast<int64_t>(row) * glob_len + tok0] = sqrtf(fmaxf(n0, 0.0f));
+    if (tok0 + 8 < glob_len)
+      err[static_cast<int64_t>(row) * glob_len + tok0 + 8] = sqrtf(fmaxf(n1, 0.0f));
+  }
+}
+
+template <int NB>
+void launch_blockk_fixed_band(const at::Tensor &x, const at::Tensor &e, const at::Tensor &d,
+                              at::Tensor &packed, at::Tensor &err, int rows, int total_len,
+                              int glob_start, int glob_len, int code_dim, int zerorope,
+                              bool apply_zerorope, bool key_layout, cudaStream_t stream) {
+  // two (E, D) ring slots + (NB > 4) a separate residual staging tile
+  constexpr int kSmem = 2 * (2 * 32 * 136 * 2) + (NB * 16 <= 64 ? 0 : NB * 16 * 136 * 2);
+  static bool ready = false;
+  if (!ready) {
+    AT_CUDA_CHECK(cudaFuncSetAttribute(blockk_fixed_band_d128_kernel<NB>,
+                                       cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
+    ready = true;
+  }
+  dim3 grid(static_cast<unsigned int>(ceil_div_i64(glob_len, 16 * NB)), rows);
+  blockk_fixed_band_d128_kernel<NB><<<grid, NB * 32, kSmem, stream>>>(
+      reinterpret_cast<const __nv_bfloat16 *>(x.data_ptr<at::BFloat16>()),
+      reinterpret_cast<const __nv_bfloat16 *>(e.data_ptr<at::BFloat16>()),
+      reinterpret_cast<const __nv_bfloat16 *>(d.data_ptr<at::BFloat16>()),
+      packed.data_ptr<int64_t>(),
+      err.data_ptr<float>(),
+      total_len,
+      glob_start,
+      glob_len,
+      code_dim,
+      zerorope,
+      apply_zerorope,
+      key_layout);
+}
+
+// Bands per CTA: the smallest NB in {1, 2, 4} whose grid fits one wave
+// (<= #SMs CTAs: short inputs, latency-bound chain); else 8 up to
+// PICOKV_FIXED_BAND_WIDE CTAs (shared E/D staging over 8 bands); else 4
+// (long prompts: occupancy).  PICOKV_FIXED_BAND=0 keeps the frag kernel.
+int blockk_fixed_band_auto(int64_t glob_len, int rows) {
+  static const int mode = [] {
+    const char *s = getenv("PICOKV_FIXED_BAND");
+    return s ? atoi(s) : 1;
+  }();
+  static const int64_t wide = [] {
+    const char *s = getenv("PICOKV_FIXED_BAND_WIDE");
+    return s ? atoll(s) : 1024;
+  }();
+  if (mode == 0) {
+    return 0;
+  }
+  static int sms = 0;
+  if (sms == 0) {
+    int dev = 0;
+    AT_CUDA_CHECK(cudaGetDevice(&dev));
+    AT_CUDA_CHECK(cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev));
+  }
+  for (int nb : {1, 2, 4}) {
+    if (ceil_div_i64(glob_len, 16 * nb) * rows <= sms) {
+      return nb;
+    }
+  }
+  return ceil_div_i64(glob_len, 128) * rows <= wide ? 8 : 4;
+}
+
+bool launch_blockk_fixed_band_nb(int nb, const at::Tensor &x, const at::Tensor &e,
+                                 const at::Tensor &d, at::Tensor &packed, at::Tensor &err,
+                                 int rows, int total_len, int glob_start, int glob_len,
+                                 int code_dim, int zerorope, bool apply_zerorope,
+                                 bool key_layout, cudaStream_t stream) {
+  switch (nb) {
+    case 1:
+      launch_blockk_fixed_band<1>(x, e, d, packed, err, rows, total_len, glob_start, glob_len,
+                                  code_dim, zerorope, apply_zerorope, key_layout, stream);
+      return true;
+    case 2:
+      launch_blockk_fixed_band<2>(x, e, d, packed, err, rows, total_len, glob_start, glob_len,
+                                  code_dim, zerorope, apply_zerorope, key_layout, stream);
+      return true;
+    case 4:
+      launch_blockk_fixed_band<4>(x, e, d, packed, err, rows, total_len, glob_start, glob_len,
+                                  code_dim, zerorope, apply_zerorope, key_layout, stream);
+      return true;
+    case 8:
+      launch_blockk_fixed_band<8>(x, e, d, packed, err, rows, total_len, glob_start, glob_len,
+                                  code_dim, zerorope, apply_zerorope, key_layout, stream);
+      return true;
+    default:
+      return false;
+  }
+}
+
+static void blockk_fixed_launch(const at::Tensor &full_states, const at::Tensor &encoders,
+                                const at::Tensor &decoders, int64_t glob_start,
+                                int64_t glob_len, int64_t zerorope, bool apply_zerorope,
+                                bool pack_key_layout, int64_t band_nb, at::Tensor &packed,
+                                at::Tensor &err, cudaStream_t stream);
+
+std::vector<at::Tensor> picokv_prefill_blockk_fixed_variant(
     at::Tensor full_states,
     at::Tensor encoders,
     at::Tensor decoders,
@@ -3340,7 +3705,8 @@ std::vector<at::Tensor> picokv_prefill_blockk_fixed(
     int64_t glob_len,
     int64_t zerorope,
     bool apply_zerorope,
-    bool pack_key_layout) {
+    bool pack_key_layout,
+    int64_t band_nb) {
   TORCH_CHECK(full_states.is_cuda() && encoders.is_cuda() && decoders.is_cuda(),
               "full_states/encoders/decoders must be CUDA");
   TORCH_CHECK(full_states.is_contiguous() && encoders.is_contiguous() && decoders.is_contiguous(),
@@ -3371,14 +3737,28 @@ std::vector<at::Tensor> picokv_prefill_blockk_fixed(
 
   at::cuda::CUDAGuard device_guard(full_states.device());
   auto stream = at::cuda::getCurrentCUDAStream(full_states.device().index());
-  const int rows = B * H;
   const int words = C >> 6;
 
   auto packed = pack_key_layout
       ? at::empty({B, H, words, static_cast<int>(glob_len)}, full_states.options().dtype(at::kLong))
       : at::empty({B, H, static_cast<int>(glob_len), words}, full_states.options().dtype(at::kLong));
   auto err = at::empty({B, H, static_cast<int>(glob_len)}, full_states.options().dtype(at::kFloat));
+  blockk_fixed_launch(full_states, encoders, decoders, glob_start, glob_len, zerorope,
+                      apply_zerorope, pack_key_layout, band_nb, packed, err, stream);
+  return {packed, err};
+}
 
+// The launch half of picokv_prefill_blockk_fixed_variant (inputs validated,
+// packed / err allocated by the caller): the same kernel choice, hence the
+// same codes for the same input rows.
+static void blockk_fixed_launch(const at::Tensor &full_states, const at::Tensor &encoders,
+                                const at::Tensor &decoders, int64_t glob_start,
+                                int64_t glob_len, int64_t zerorope, bool apply_zerorope,
+                                bool pack_key_layout, int64_t band_nb, at::Tensor &packed,
+                                at::Tensor &err, cudaStream_t stream) {
+  const int rows = full_states.size(0) * full_states.size(1);
+  const int total_len = full_states.size(2);
+  const int C = encoders.size(2);
   dim3 grid(static_cast<unsigned int>(ceil_div_i64(glob_len, kFixedThreads)), rows);
   if (full_states.scalar_type() == at::kBFloat16) {
     static bool wmma_smem_ready = false;
@@ -3400,6 +3780,24 @@ std::vector<at::Tensor> picokv_prefill_blockk_fixed(
           cudaFuncAttributeMaxDynamicSharedMemorySize,
           kFragSmemBytes));
       frag_smem_configured = true;
+    }
+    // Band kernel (bitwise == frag): band_nb < 0 = auto (PICOKV_FIXED_BAND=0
+    // keeps the frag kernel), 0 = frag, > 0 = forced NB (tests).
+    if (band_nb < 0) {
+      band_nb = blockk_fixed_band_auto(glob_len, rows);
+    }
+    const bool band_aligned =
+        ((reinterpret_cast<uintptr_t>(full_states.data_ptr()) |
+          reinterpret_cast<uintptr_t>(encoders.data_ptr()) |
+          reinterpret_cast<uintptr_t>(decoders.data_ptr())) & 15) == 0;
+    if (band_nb > 0 && band_aligned && phase_mask == 0x1f &&
+        launch_blockk_fixed_band_nb(static_cast<int>(band_nb), full_states, encoders,
+                                    decoders, packed, err, rows, total_len, static_cast<int>(glob_start),
+                                    static_cast<int>(glob_len), C,
+                                    static_cast<int>(zerorope), apply_zerorope,
+                                    pack_key_layout, stream)) {
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+      return;
     }
     dim3 wmma_grid(
         static_cast<unsigned int>(ceil_div_i64(glob_len, kFixedFragTile)), rows);
@@ -3435,7 +3833,20 @@ std::vector<at::Tensor> picokv_prefill_blockk_fixed(
         pack_key_layout);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return {packed, err};
+}
+
+std::vector<at::Tensor> picokv_prefill_blockk_fixed(
+    at::Tensor full_states,
+    at::Tensor encoders,
+    at::Tensor decoders,
+    int64_t glob_start,
+    int64_t glob_len,
+    int64_t zerorope,
+    bool apply_zerorope,
+    bool pack_key_layout) {
+  return picokv_prefill_blockk_fixed_variant(full_states, encoders, decoders, glob_start,
+                                             glob_len, zerorope, apply_zerorope,
+                                             pack_key_layout, -1);
 }
 
 std::vector<at::Tensor> picokv_prefill_blockk_fast(
@@ -3936,7 +4347,7 @@ std::vector<at::Tensor> picokv_prefill_gather_pack(
 }
 
 
-std::vector<at::Tensor> picokv_prefill_gather_pack_from_packed(
+static std::vector<at::Tensor> gather_pack_from_packed_impl(
     at::Tensor full_key,
     at::Tensor full_value,
     at::Tensor packed_key_all,
@@ -3944,7 +4355,9 @@ std::vector<at::Tensor> picokv_prefill_gather_pack_from_packed(
     at::Tensor eas_indices,
     at::Tensor kept_indices,
     int64_t sink_size,
-    int64_t local_size) {
+    int64_t local_size,
+    const at::Tensor *dense_key_out,
+    const at::Tensor *dense_value_out) {
   TORCH_CHECK(full_key.is_cuda() && full_value.is_cuda(), "full key/value must be CUDA");
   TORCH_CHECK(packed_key_all.is_cuda() && packed_value_token.is_cuda(), "packed codes must be CUDA");
   TORCH_CHECK(eas_indices.is_cuda() && kept_indices.is_cuda(), "indices must be CUDA");
@@ -3991,8 +4404,21 @@ std::vector<at::Tensor> picokv_prefill_gather_pack_from_packed(
   at::cuda::CUDAGuard device_guard(full_key.device());
   auto stream = at::cuda::getCurrentCUDAStream(full_key.device().index());
   auto long_options = full_key.options().dtype(at::kLong);
-  auto dense_key = at::empty({B, H, dense_len, D}, full_key.options());
-  auto dense_value = at::empty({B, H, dense_len, D}, full_value.options());
+  at::Tensor dense_key, dense_value;
+  if (dense_key_out != nullptr) {
+    const std::vector<int64_t> dense_shape{B, H, dense_len, D};
+    for (const at::Tensor *t : {dense_key_out, dense_value_out}) {
+      TORCH_CHECK(t->device() == full_key.device() && t->scalar_type() == full_key.scalar_type(),
+                  "dense outputs must match full key device/dtype");
+      TORCH_CHECK(t->is_contiguous() && t->sizes() == at::IntArrayRef(dense_shape),
+                  "dense outputs must be contiguous [B,H,dense_len,D]");
+    }
+    dense_key = *dense_key_out;
+    dense_value = *dense_value_out;
+  } else {
+    dense_key = at::empty({B, H, dense_len, D}, full_key.options());
+    dense_value = at::empty({B, H, dense_len, D}, full_value.options());
+  }
   auto packed_key = at::empty({B, H, key_blocks, kept_len}, long_options);
   auto packed_value = at::empty({B, H, value_groups, Cv}, long_options);
 
@@ -4053,6 +4479,204 @@ std::vector<at::Tensor> picokv_prefill_gather_pack_from_packed(
         value_groups);
   }
 
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {dense_key, dense_value, packed_key, packed_value};
+}
+
+std::vector<at::Tensor> picokv_prefill_gather_pack_from_packed(
+    at::Tensor full_key,
+    at::Tensor full_value,
+    at::Tensor packed_key_all,
+    at::Tensor packed_value_token,
+    at::Tensor eas_indices,
+    at::Tensor kept_indices,
+    int64_t sink_size,
+    int64_t local_size) {
+  return gather_pack_from_packed_impl(full_key, full_value, packed_key_all, packed_value_token,
+                                      eas_indices, kept_indices, sink_size, local_size, nullptr, nullptr);
+}
+
+// The same, with the dense window gathered into caller-provided [B,H,dense_len,D]
+// tensors (e.g. views of one buffer shared by several prompts) instead of two
+// fresh allocations; returns them as the first two outputs.
+std::vector<at::Tensor> picokv_prefill_gather_pack_from_packed_out(
+    at::Tensor full_key,
+    at::Tensor full_value,
+    at::Tensor packed_key_all,
+    at::Tensor packed_value_token,
+    at::Tensor eas_indices,
+    at::Tensor kept_indices,
+    int64_t sink_size,
+    int64_t local_size,
+    at::Tensor dense_key_out,
+    at::Tensor dense_value_out) {
+  return gather_pack_from_packed_impl(full_key, full_value, packed_key_all, packed_value_token,
+                                      eas_indices, kept_indices, sink_size, local_size,
+                                      &dense_key_out, &dense_value_out);
+}
+
+namespace {
+
+// prepare_fast's K/V split: token rows [0, len) of a token-major K/V source
+// (row t at src + t * ts, side s at + s * ss, head h at + h * hs; VecT units)
+// -> the global tokens [sink, len - local) into glob [2,H,glen,D] and the
+// dense window (tokens [0, sink) ++ [len - local, len)) into dk / dv
+// [H,sink+local,D]. A copy: every element lands bit for bit.
+template <typename VecT>
+__global__ void prep_split_kv_kernel(const VecT *__restrict__ src, int64_t ts, int64_t ss,
+                                     int64_t hs, VecT *__restrict__ glob, VecT *__restrict__ dk,
+                                     VecT *__restrict__ dv, int len, int H, int dvec, int sink,
+                                     int local) {
+  const int glen = len - sink - local;
+  const int W = sink + local;
+  const int total = len * 2 * H * dvec;
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < total; i += gridDim.x * blockDim.x) {
+    const int c = i % dvec;
+    int r = i / dvec;
+    const int h = r % H;
+    r /= H;
+    const int s = r & 1;
+    const int t = r >> 1;
+    const VecT v = src[t * ts + s * ss + h * hs + c];
+    const int g = t - sink;
+    if (g >= 0 && g < glen) {
+      glob[((static_cast<int64_t>(s) * H + h) * glen + g) * dvec + c] = v;
+    } else {
+      const int j = g < 0 ? t : t - glen;
+      (s ? dv : dk)[(static_cast<int64_t>(h) * W + j) * dvec + c] = v;
+    }
+  }
+}
+
+template <typename VecT>
+void launch_prep_split_kv(const at::BFloat16 *base, int64_t ts, int64_t ss, int64_t hs,
+                          at::Tensor &glob, at::Tensor &dk, at::Tensor &dv, int len, int H,
+                          int D, int sink, int local, cudaStream_t stream) {
+  constexpr int kVec = sizeof(VecT) / sizeof(at::BFloat16);
+  const int64_t total = static_cast<int64_t>(len) * 2 * H * (D / kVec);
+  const int blocks = static_cast<int>(std::min<int64_t>(ceil_div_i64(total, 256), 4096));
+  prep_split_kv_kernel<VecT><<<blocks, 256, 0, stream>>>(
+      reinterpret_cast<const VecT *>(base), ts / kVec, ss / kVec, hs / kVec,
+      reinterpret_cast<VecT *>(glob.data_ptr<at::BFloat16>()),
+      reinterpret_cast<VecT *>(dk.data_ptr<at::BFloat16>()),
+      reinterpret_cast<VecT *>(dv.data_ptr<at::BFloat16>()), len, H, D / kVec, sink, local);
+}
+
+}  // namespace
+
+// PICOKV_FAST_PREPARE's per-layer work for one compressed prompt in ONE call
+// (offline projections, eas = 0: the kept map is the identity). Token rows
+// [off, off + len) of the token-major kv [T,2,H,D] (e.g. the strided K/V view
+// of the qkv projection) are split into the global tokens and the dense window
+// by one copy kernel (instead of a [2,H,len,D] copy + the window gather), then
+// blockk_fixed's V and K launches run over the global tokens and
+// gather_pack_from_packed's value 64-token regroup over V's words. With the
+// identity kept map the key gather is a plain copy, so K's packed codes are
+// returned as they are. Same kernels on the same token rows: bitwise the
+// {dense_key, dense_value, packed_key, packed_value} of blockk_fixed x 2 +
+// gather_pack_from_packed. dense_*_out: optional contiguous [1,H,sink+local,D].
+std::vector<at::Tensor> picokv_prefill_prepare_fast(
+    at::Tensor kv, int64_t off, int64_t len,
+    at::Tensor enc_k, at::Tensor dec_k, at::Tensor enc_v, at::Tensor dec_v,
+    at::Tensor kept_indices, int64_t sink_size, int64_t local_size, int64_t zerorope,
+    c10::optional<at::Tensor> dense_key_out, c10::optional<at::Tensor> dense_value_out) {
+  TORCH_CHECK(kv.is_cuda() && kv.scalar_type() == at::kBFloat16 && kv.dim() == 4 &&
+                  kv.size(1) == 2, "kv must be CUDA bf16 [T,2,H,D]");
+  const int H = kv.size(2);
+  const int D = kv.size(3);
+  TORCH_CHECK(D == kFixedDim && kv.stride(3) == 1, "kv rows must be contiguous, head_dim 128");
+  TORCH_CHECK(off >= 0 && len > 0 && off + len <= kv.size(0), "invalid token slice");
+  const int64_t glen = len - sink_size - local_size;
+  TORCH_CHECK(sink_size >= 0 && local_size >= 0 && glen > 0, "prompt must exceed sink+local");
+  TORCH_CHECK(len * 2 * H * D < INT_MAX, "prompt too long for prepare_fast");
+  const int W = static_cast<int>(sink_size + local_size);
+  for (const at::Tensor *t : {&enc_k, &dec_k, &enc_v, &dec_v}) {
+    TORCH_CHECK(t->is_cuda() && t->is_contiguous() && t->scalar_type() == at::kBFloat16 &&
+                    t->dim() == 4 && t->size(0) == 1 && t->size(1) == H && t->size(3) == D &&
+                    t->size(2) > 0 && t->size(2) % 64 == 0,
+                "projections must be contiguous bf16 [1,H,C,D], C % 64 == 0");
+  }
+  TORCH_CHECK(dec_k.size(2) == enc_k.size(2) && dec_v.size(2) == enc_v.size(2),
+              "encoder/decoder code_dim mismatch");
+  TORCH_CHECK(zerorope >= 0 && zerorope <= D / 2, "invalid zerorope");
+  TORCH_CHECK(kept_indices.is_cuda() && kept_indices.is_contiguous() &&
+                  kept_indices.scalar_type() == at::kInt && kept_indices.dim() == 3 &&
+                  kept_indices.size(0) == 1 && kept_indices.size(1) == H &&
+                  kept_indices.size(2) == glen, "kept_indices must be contiguous int32 [1,H,glen]");
+
+  at::cuda::CUDAGuard device_guard(kv.device());
+  auto stream = at::cuda::getCurrentCUDAStream(kv.device().index());
+  auto opts = kv.options();
+  if (dense_key_out.has_value() || dense_value_out.has_value()) {
+    TORCH_CHECK(dense_key_out.has_value() && dense_value_out.has_value(),
+                "pass both dense outputs or neither");
+    const std::vector<int64_t> dense_shape{1, H, W, D};
+    for (const at::Tensor *t : {&*dense_key_out, &*dense_value_out}) {
+      TORCH_CHECK(t->device() == kv.device() && t->scalar_type() == at::kBFloat16 &&
+                      t->is_contiguous() && t->sizes() == at::IntArrayRef(dense_shape),
+                  "dense outputs must be contiguous bf16 [1,H,sink+local,D]");
+    }
+  }
+  // Allocation order and sizes as the separate path's: the K/V block and the
+  // scratch (value words, errors) first, the outputs the cache keeps after them,
+  // so the freed scratch leaves one hole the next layer's scratch refills. glob
+  // [2,H,glen,D] is carved from a [2,H,len,D]-sized block (the separate path's
+  // K/V copy): a block that small (<= 1 MiB below ~576 tokens) would come from
+  // the caching allocator's small pool, which no other size reuses.
+  auto glob = at::empty({2 * H * len * D}, opts).narrow(0, 0, 2 * H * glen * D).view({2, H, glen, D});
+  auto long_opts = opts.dtype(at::kLong);
+  const int key_words = enc_k.size(2) >> 6;
+  const int value_words = enc_v.size(2) >> 6;
+  auto value_token = at::empty({1, H, glen, value_words}, long_opts);
+  auto err = at::empty({1, H, glen}, opts.dtype(at::kFloat));
+  at::Tensor dense_key, dense_value;
+  if (dense_key_out.has_value()) {
+    dense_key = *dense_key_out;
+    dense_value = *dense_value_out;
+  } else {
+    dense_key = at::empty({1, H, W, D}, opts);
+    dense_value = at::empty({1, H, W, D}, opts);
+  }
+  auto packed_key = at::empty({1, H, key_words, glen}, long_opts);
+  const int Cv = value_words * 64;
+  const int value_groups = static_cast<int>(ceil_div_i64(glen, 64));
+  auto packed_value = at::empty({1, H, value_groups, Cv}, long_opts);
+  const at::BFloat16 *base = kv.data_ptr<at::BFloat16>() + off * kv.stride(0);
+  const int64_t ts = kv.stride(0), ss = kv.stride(1), hs = kv.stride(2);
+  const bool vec = ((reinterpret_cast<uintptr_t>(base) |
+                     reinterpret_cast<uintptr_t>(dense_key.data_ptr()) |
+                     reinterpret_cast<uintptr_t>(dense_value.data_ptr())) & 15) == 0 &&
+                   ts % 8 == 0 && ss % 8 == 0 && hs % 8 == 0;
+  if (vec) {
+    launch_prep_split_kv<uint4>(base, ts, ss, hs, glob, dense_key, dense_value,
+                                static_cast<int>(len), H, D, static_cast<int>(sink_size),
+                                static_cast<int>(local_size), stream);
+  } else {
+    launch_prep_split_kv<uint16_t>(base, ts, ss, hs, glob, dense_key, dense_value,
+                                   static_cast<int>(len), H, D, static_cast<int>(sink_size),
+                                   static_cast<int>(local_size), stream);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+  // blockk_fixed over the global tokens: V (token-word layout), then K (key
+  // layout, zero-rope dims); one shared error buffer (written, never read)
+  blockk_fixed_launch(glob.narrow(0, 1, 1), enc_v, dec_v, 0, glen, 0, false, false, -1,
+                      value_token, err, stream);
+  blockk_fixed_launch(glob.narrow(0, 0, 1), enc_k, dec_k, 0, glen, zerorope, true, true, -1,
+                      packed_key, err, stream);
+
+  // gather_pack_from_packed's value regroup: [1,H,glen,VW] -> [1,H,G,Cv]
+  dim3 value_grid(value_groups, value_words, H);
+  pack_value_from_token_packed_tile_kernel<<<value_grid, 64, 0, stream>>>(
+      value_token.data_ptr<int64_t>(),
+      kept_indices.data_ptr<int>(),
+      packed_value.data_ptr<int64_t>(),
+      H,
+      static_cast<int>(glen),
+      Cv,
+      static_cast<int>(glen),
+      value_words,
+      value_groups);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dense_key, dense_value, packed_key, packed_value};
 }

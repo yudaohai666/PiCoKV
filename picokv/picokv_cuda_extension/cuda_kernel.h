@@ -261,8 +261,29 @@ void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
   double attention_scale,
   at::Tensor global_lens,
   at::Tensor sched_req,
-  at::Tensor sched_tile
+  at::Tensor sched_tile,
+  // Per-row packed storage (optional, TC sched path only): int64 [B] row
+  // addresses of [KVH, KB, cap] keys / [KVH, cap/64, Cv] values, int32 [B]
+  // caps (multiples of 512). packed_key / packed_value then only give shapes.
+  at::Tensor row_kptr = at::Tensor(),
+  at::Tensor row_vptr = at::Tensor(),
+  at::Tensor row_cap = at::Tensor(),
+  // Deterministic mode (optional, TC path only): fp32 per-block partials
+  // [S*GZ*GX, 4, 320] / [S*GZ*GX, 4] instead of atomics into glob_*; int32
+  // [B] first sched entry per row (sched grids). See det_tail_reduce.
+  at::Tensor part_code = at::Tensor(),
+  at::Tensor part_den = at::Tensor(),
+  at::Tensor part_rs = at::Tensor(),
+  // Fused query quantizer (optional, TC path only, not deterministic): the
+  // bf16 projected query [B,QH,S,320]; each tail block quantizes + packs its
+  // heads (bitwise the prep op's), packed_projected_query / query_scale only
+  // give shapes. glob_* must already be zero (no prep op ran).
+  at::Tensor projected_query = at::Tensor()
 );
+
+// Tiles (256 tokens) per block of the unscheduled tensor-core tail grid
+// (sched grids: 2); the deterministic reduction's tile size.
+int picokv_tail_block_tiles(int L, int BKVH);
 
 
 // Fused dense-window decode attention over the per-layer ring pools: softmax

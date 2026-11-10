@@ -31,6 +31,11 @@ class PreparedKVCache:
         repr=False,
     )
     _dense_stream: Optional[torch.cuda.Stream] = field(default=None, repr=False)
+    # Per-row packed storage (decode batches, PICOKV_ROWS): (row key addresses
+    # int64 [B], row value addresses int64 [B], row capacities int32 [B]) of
+    # rows stored apart instead of one rectangle; packed_key / packed_value
+    # then only carry the shapes. Read by the shared-projection tail only.
+    row_tables: Optional[tuple] = field(default=None, repr=False)
 
     @property
     def device(self) -> torch.device:

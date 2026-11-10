@@ -7,6 +7,7 @@ extension so experimental PiCoKV kernels do not modify the original extension.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import importlib.util
 from pathlib import Path
@@ -28,6 +29,39 @@ def _prebuilt_path() -> Path:
     return Path(__file__).resolve().parents[2] / "build" / "picokv_extensions"
 
 
+def _arch_error(so: Path):
+    """A prebuilt .so whose build (the build.ninja torch writes next to it)
+    has no code for the visible device: its kernels would fail at the first
+    launch ("no kernel image"). None when it fits or nothing can be checked."""
+    ninja = so.parent / "build.ninja"
+    if torch is None or not ninja.is_file() or not torch.cuda.is_available():
+        return None
+    try:
+        text = ninja.read_text(errors="ignore")
+    except OSError:
+        return None
+    sass, ptx = set(), set()
+    for kind, num in re.findall(r"code=\[?(sm|compute)_(\d+)a?", text):
+        (sass if kind == "sm" else ptx).add(int(num))
+    if not sass and not ptx:
+        return None
+    major, minor = torch.cuda.get_device_capability()
+    dev = 10 * major + minor
+    # SASS runs on the same major at >= minor; PTX JIT-compiles forward
+    if any(a // 10 == major and a % 10 <= minor for a in sass) or any(a <= dev for a in ptx):
+        return None
+    built = ", ".join([f"sm_{a}" for a in sorted(sass)] + [f"compute_{a}" for a in sorted(ptx)])
+    return (f"PiCoKV extension {so} was built for {built}, the device is sm_{dev}: "
+            f"rebuild with TORCH_CUDA_ARCH_LIST={major}.{minor} python "
+            f"picokv/build_cuda_extensions.py, or point PICOKV_PREBUILT_DIR at a "
+            f"matching build")
+
+
+def loaded_extension_path():
+    """Path of the loaded extension .so (None: none loaded yet)."""
+    return getattr(_EXTENSION, "__file__", None)
+
+
 def _load_prebuilt_extension():
     """Load the install-time .so without invoking torch's JIT builder."""
     if os.environ.get("PICOKV_DISABLE_PREBUILT") == "1":
@@ -40,6 +74,9 @@ def _load_prebuilt_extension():
     existing = sys.modules.get(module_name)
     if existing is not None:
         return existing
+    err = _arch_error(candidates[0])
+    if err is not None:
+        raise ImportError(err)
     spec = importlib.util.spec_from_file_location(module_name, candidates[0])
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load prebuilt PiCoKV extension: {candidates[0]}")

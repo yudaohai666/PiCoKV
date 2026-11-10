@@ -74,7 +74,8 @@ __device__ __forceinline__ float picokv_float_from_order_key(const int key) {
   return __int_as_float(key ^ ((key >> 31) & 0x7fffffff));
 }
 
-template <bool KeyTransposedFixed, int ExpBits, int CvT = 320, int MinBlocksPerSm = 4, int BlockTilesT = 2>
+template <bool KeyTransposedFixed, int ExpBits, int CvT = 320, int MinBlocksPerSm = 4, int BlockTilesT = 2,
+          bool FusedQ = false>
 __global__ void __launch_bounds__(256, MinBlocksPerSm) picokv_v1_expbits_atomic2_tc_kernel(
   const long *__restrict__ packed_projected_query,
   const long *__restrict__ packed_key,
@@ -96,7 +97,31 @@ __global__ void __launch_bounds__(256, MinBlocksPerSm) picokv_v1_expbits_atomic2
   const float prune_log_eps,
   const int *__restrict__ global_lens,
   const int *__restrict__ sched_req,
-  const int *__restrict__ sched_tile
+  const int *__restrict__ sched_tile,
+  // Per-row storage (optional): row b's keys [KVH, KB, cap_b] at row_kptr[b],
+  // values [KVH, cap_b/64, CvT] at row_vptr[b]; L / LGroups then unused.
+  const long long *__restrict__ row_kptr,
+  const long long *__restrict__ row_vptr,
+  const int *__restrict__ row_cap,
+  // Deterministic mode (optional): no atomics — each block plain-stores its
+  // partial into its own slot (blockIdx.y * gridDim.z + blockIdx.z) *
+  // gridDim.x + blockIdx.x of part_code [slots, 4, CvT] / part_den
+  // [slots, 4], and a fixed-order reduction (shared_proj.det_tail_reduce)
+  // sums each row's tiles. Sched grids: part_rs[b] = row b's first entry
+  // (a row lists its tiles contiguously from tile 0).
+  float *__restrict__ part_code = nullptr,
+  float *__restrict__ part_den = nullptr,
+  int *__restrict__ part_rs = nullptr,
+  // Sched split (BlockTilesT 1): 2^sched_shift blocks per 512-token sched
+  // entry, block x covering 256-token tile (sched_tile[x >> shift] << shift)
+  // + (x & mask) — a small batch's sched grid at the unscheduled BT1 width.
+  const int sched_shift = 0,
+  // Fused query quantizer (FusedQ: a separate instantiation, so the prep
+  // path's code and register allocation are unchanged): the bf16 projected
+  // query [B,QH,S,320]; each block quantizes + bit-slices its 4 heads itself
+  // (the prep warp kernel's arithmetic, bitwise), packed_projected_query /
+  // query_scale are then unread.
+  const __nv_bfloat16 *__restrict__ proj_query = nullptr
 ) {
   constexpr int Threads = 256;
   constexpr int GroupSize = 4;
@@ -123,11 +148,16 @@ __global__ void __launch_bounds__(256, MinBlocksPerSm) picokv_v1_expbits_atomic2
   static_assert(CvT % 16 == 0, "tc tail: Cv must be a multiple of 16");
   static_assert(kQMagBits == 7, "tc tail: int8 query (sign + 7 magnitude planes)");
   (void)KBlocks;
+  // No PDL trigger (griddepcontrol.launch_dependents) here: the value
+  // projection launched early as a dependent measured +1.6-3% per decode step
+  // at 4-16 rows (t63); it launches at this grid's completion instead.
   (void)Cv;
   (void)prune_log_eps;
 
-  const int _sched_bx = blockIdx.x;
-  const int tile_block_idx = (sched_tile != nullptr) ? sched_tile[_sched_bx] : _sched_bx;
+  const int _sched_bx = blockIdx.x >> sched_shift;
+  const int tile_block_idx = (sched_tile != nullptr)
+      ? (sched_tile[_sched_bx] << sched_shift) + (blockIdx.x & ((1 << sched_shift) - 1))
+      : _sched_bx;
   const int S_idx = blockIdx.y;
   const int BKVH_idx = blockIdx.z;
   const int B_idx = (sched_req != nullptr) ? sched_req[_sched_bx] : (BKVH_idx / KVH);
@@ -140,6 +170,9 @@ __global__ void __launch_bounds__(256, MinBlocksPerSm) picokv_v1_expbits_atomic2
   const int tig = lane_idx & 3;   // mma thread-in-group
 
   const int L_b = (global_lens != nullptr) ? global_lens[B_idx] : L;
+  if (part_rs != nullptr && tile_block_idx == 0 && S_idx == 0 && BKVH_idx == 0 && thread_idx == 0) {
+    part_rs[B_idx] = _sched_bx;
+  }
   if (tile_block_idx * (BlockTiles * kTileSize) >= L_b) return;
 
   __shared__ int query_sum[GroupSize];        // sum_i q_i (signed int8 query)
@@ -158,9 +191,15 @@ __global__ void __launch_bounds__(256, MinBlocksPerSm) picokv_v1_expbits_atomic2
   // thread) when transposed, else the tile's contiguous [token][kb] words;
   // values are the tile's contiguous [group][code] words.
   const long kv_head = (long)(B_idx * KVH + KVH_idx);
-  const long *__restrict__ key_src = packed_key + kv_head * L * KB + thread_idx;
-  const long *__restrict__ value_src = packed_value_sign + kv_head * LGroups * CvT + thread_idx;
-  const int group_end = min(LGroups, (L_b + 63) >> 6);  // groups holding a token < L_b
+  const int L_row = (row_cap != nullptr) ? row_cap[B_idx] : L;  // key row stride
+  const int LG_row = (row_cap != nullptr) ? (L_row >> 6) : LGroups;
+  const long *__restrict__ key_src =
+      ((row_cap != nullptr) ? reinterpret_cast<const long *>(row_kptr[B_idx]) + (long)KVH_idx * L_row * KB
+                            : packed_key + kv_head * L * KB) + thread_idx;
+  const long *__restrict__ value_src =
+      ((row_cap != nullptr) ? reinterpret_cast<const long *>(row_vptr[B_idx]) + (long)KVH_idx * LG_row * CvT
+                            : packed_value_sign + kv_head * LGroups * CvT) + thread_idx;
+  const int group_end = min(LG_row, (L_b + 63) >> 6);  // groups holding a token < L_b
   // Keys of `tile` with token < L_b.
   auto stage_keys = [&](const int tile) {
     #pragma unroll
@@ -168,7 +207,7 @@ __global__ void __launch_bounds__(256, MinBlocksPerSm) picokv_v1_expbits_atomic2
       const int i = r * Threads + thread_idx;
       if constexpr (KeyTransposedFixed) {
         if (tile * kTileSize + thread_idx < L_b) {
-          picokv_cp_async8(&key_stage[r * KeyStride + 2 * thread_idx], key_src + (long)r * L + tile * kTileSize);
+          picokv_cp_async8(&key_stage[r * KeyStride + 2 * thread_idx], key_src + (long)r * L_row + tile * kTileSize);
         }
       } else {
         const int tok = i / KB;
@@ -200,6 +239,54 @@ __global__ void __launch_bounds__(256, MinBlocksPerSm) picokv_v1_expbits_atomic2
   // Two's-complement query planes, bit-sliced: thread (head, 32-dim segment)
   // computes T = (M ^ S) + S per dimension lane with a ripple carry (M_7 = 0),
   // half-warp per head. Segment s holds key word s>>1, half s&1.
+  if constexpr (FusedQ) {
+    // Fused quantizer, warp per head (warps 0-3): the prep warp kernel's
+    // scale / round / clamp verbatim. Plane p of segment s is bit p of the
+    // int8 code v of dims 32 s + lane — for |v| <= 127 the same word as the
+    // packed path's ripple-carry T = (M ^ S) + S — and query_sum is sum v.
+    if (warp_idx < GroupSize) {
+      const int hrel = warp_idx;
+      const long qrow = (long)(B_idx * QH + qh_base + hrel) * S + S_idx;
+      const __nv_bfloat16 *__restrict__ src = proj_query + qrow * (KB * 64) + lane_idx;
+      float x[PlaneSegs];
+      float local_max = 0.0f;
+      #pragma unroll
+      for (int t = 0; t < PlaneSegs; t++) {
+        x[t] = __bfloat162float(src[t << 5]);
+        local_max = fmaxf(local_max, fabsf(x[t]));
+      }
+      #pragma unroll
+      for (int o = 16; o > 0; o >>= 1) {
+        local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffffu, local_max, o));
+      }
+      const float row_scale = fmaxf(local_max, 1.1920928955078125e-7f) / 127.0f;
+      int vsum = 0;
+      #pragma unroll
+      for (int t = 0; t < PlaneSegs; t++) {
+        int v = (int)nearbyintf(x[t] / row_scale);
+        v = v < -127 ? -127 : v;
+        v = v > 127 ? 127 : v;
+        vsum += v;
+        unsigned int mine = 0u;
+        #pragma unroll
+        for (int plane = 0; plane < 8; plane++) {
+          const unsigned int bits = __ballot_sync(0xffffffffu, ((v >> plane) & 1) != 0);
+          if (lane_idx == plane) {
+            mine = bits;
+          }
+        }
+        if (lane_idx < 8) {
+          query_planes[hrel][lane_idx][t] = mine;
+        }
+      }
+      vsum = __reduce_add_sync(0xffffffffu, vsum);
+      if (lane_idx == 0) {
+        query_sum[hrel] = vsum;
+        scale_cache[hrel] = row_scale * attention_scale;
+        lse_cache[hrel] = dense_lse[qrow];
+      }
+    }
+  } else {
   if (thread_idx < GroupSize * 16) {  // warps 0-1
     const int hrel = thread_idx >> 4;
     const int seg = thread_idx & 15;
@@ -237,6 +324,7 @@ __global__ void __launch_bounds__(256, MinBlocksPerSm) picokv_v1_expbits_atomic2
     scale_cache[thread_idx] = query_scale_value * attention_scale;
     lse_cache[thread_idx] = dense_lse[lse_idx];
   }
+  }  // !FusedQ
   __syncthreads();
 
   // Score B fragments are block-constant: column n = g -> (head g>>1, plane
@@ -486,6 +574,23 @@ __global__ void __launch_bounds__(256, MinBlocksPerSm) picokv_v1_expbits_atomic2
     __syncthreads();
   }
   picokv_cp_async_wait<0>();
+
+  if (part_code != nullptr) {
+    const long slot = ((long)S_idx * gridDim.z + blockIdx.z) * gridDim.x + blockIdx.x;
+    if (thread_idx < GroupSize) {
+      part_den[slot * GroupSize + thread_idx] = den_acc;
+    }
+    float *__restrict__ part = part_code + (slot * GroupSize + tig) * CvT;
+    #pragma unroll
+    for (int t = 0; t < WarpCodeTiles; t++) {
+      const int mt = warp_idx + t * QuantWarps;
+      if (mt < CodeTiles) {
+        part[mt * 16 + g] = acc[t][0];
+        part[mt * 16 + g + 8] = acc[t][1];
+      }
+    }
+    return;
+  }
 
   if (thread_idx < GroupSize) {
     const int qh = qh_base + thread_idx;

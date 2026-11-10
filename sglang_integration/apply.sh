@@ -3,7 +3,7 @@
 #
 # usage: apply.sh <sglang_dir> [--link]
 #   <sglang_dir>  root of an sglang source tree (the dir containing python/sglang)
-#   --link        symlink picokv_backend.py instead of copying it (edits in
+#   --link        symlink picokv_backend.py / picokv_radix_cache.py instead of copying (edits in
 #                 PiCoKV/sglang_integration/ then take effect without re-running)
 #
 # The patch was generated against upstream sgl-project/sglang commit BASE below;
@@ -40,10 +40,13 @@ else
   echo "[apply] patch does not apply cleanly to $SG" >&2; exit 1
 fi
 
-dst=$SG/python/sglang/srt/layers/attention/picokv_backend.py
-rm -f "$dst"
-if [ "$MODE" = --link ]; then
-  ln -s "$HERE/picokv_backend.py" "$dst"; echo "[apply] linked $dst"
-else
-  cp "$HERE/picokv_backend.py" "$dst"; echo "[apply] copied $dst"
-fi
+# new files (not in the patch): the backend + the PICOKV_RADIX=host radix cache
+for f in layers/attention/picokv_backend.py mem_cache/picokv_radix_cache.py; do
+  dst=$SG/python/sglang/srt/$f
+  rm -f "$dst"
+  if [ "$MODE" = --link ]; then
+    ln -s "$HERE/$(basename "$f")" "$dst"; echo "[apply] linked $dst"
+  else
+    cp "$HERE/$(basename "$f")" "$dst"; echo "[apply] copied $dst"
+  fi
+done

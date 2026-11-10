@@ -1,6 +1,7 @@
 #include "cuda_kernel.h"
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <math.h>
 #include <mutex>
 #include <unordered_map>
@@ -740,6 +741,88 @@ __global__ void picokv_quantize_pack_zero_projected_query_kernel(
       }
     }
     packed_projected_query[((long)row * KBlocks + kb) * 8 + plane] = (long)word;
+  }
+}
+
+
+// Warp-per-row variant of the kernel above (same math, bitwise-identical
+// outputs): lane l holds elements l + 32 t, the row max is a shuffle
+// reduction (max is exact in any order), each plane word of a 64-element
+// block is two ballots. The block-per-row kernel spends most of its time in
+// __syncthreads and its serial 64-bit pack loop with 216 of 256 threads idle
+// (C = 320: 40 words per row); this one has no block barrier.
+template <typename scalar_t>
+__global__ void picokv_quantize_pack_zero_projected_query_warp_kernel(
+  const scalar_t *__restrict__ projected_query, // [B,H,S,C]
+  long *__restrict__ packed_projected_query,    // [B,H,S,C/64,8]
+  float *__restrict__ query_scale,              // [B,H,S]
+  float *__restrict__ code_zero,                // [B,H,S,Cv]
+  float *__restrict__ den_zero,                 // [B,H,S]
+  const int rows,
+  const int C,
+  const int Cv
+) {
+  constexpr int MAXT = 16;  // C <= 512
+  const int lane = threadIdx.x & 31;
+  const int row = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
+  if (row >= rows) {
+    return;
+  }
+  const int T = C >> 5;
+  const long row_base = (long)row * C;
+  const long zero_base = (long)row * Cv;
+  for (int c = lane; c < Cv; c += 32) {
+    code_zero[zero_base + c] = 0.0f;
+  }
+  if (lane == 0) {
+    den_zero[row] = 0.0f;
+  }
+  float x[MAXT];
+  float local_max = 0.0f;
+  #pragma unroll
+  for (int t = 0; t < MAXT; t++) {
+    if (t < T) {
+      x[t] = picokv_to_float(projected_query[row_base + (t << 5) + lane]);
+      local_max = fmaxf(local_max, fabsf(x[t]));
+    }
+  }
+  #pragma unroll
+  for (int o = 16; o > 0; o >>= 1) {
+    local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffffu, local_max, o));
+  }
+  const float row_scale = fmaxf(local_max, 1.1920928955078125e-7f) / 127.0f;
+  if (lane == 0) {
+    query_scale[row] = row_scale;
+  }
+  int q[MAXT];
+  #pragma unroll
+  for (int t = 0; t < MAXT; t++) {
+    if (t < T) {
+      int v = (int)nearbyintf(x[t] / row_scale);
+      v = v < -127 ? -127 : v;
+      q[t] = v > 127 ? 127 : v;
+    }
+  }
+  const int KBlocks = C >> 6;
+  long *out = packed_projected_query + (long)row * KBlocks * 8;
+  #pragma unroll
+  for (int kb = 0; kb < MAXT / 2; kb++) {
+    if (kb < KBlocks) {
+      const int lo = q[2 * kb], hi = q[2 * kb + 1];
+      const int alo = lo < 0 ? -lo : lo, ahi = hi < 0 ? -hi : hi;
+      unsigned long long mine = 0ULL;
+      #pragma unroll
+      for (int plane = 0; plane < 8; plane++) {
+        const unsigned blo = __ballot_sync(0xffffffffu, plane == 0 ? lo < 0 : ((alo >> (plane - 1)) & 1));
+        const unsigned bhi = __ballot_sync(0xffffffffu, plane == 0 ? hi < 0 : ((ahi >> (plane - 1)) & 1));
+        if (lane == plane) {
+          mine = (unsigned long long)blo | ((unsigned long long)bhi << 32);
+        }
+      }
+      if (lane < 8) {
+        out[kb * 8 + lane] = (long)mine;
+      }
+    }
   }
 }
 
@@ -4662,6 +4745,27 @@ void picokv_quantize_pack_zero_projected_query(
 
   const int rows = B * H * S;
   const int threads = 256;
+  // PICOKV_QQ_WARP=0: the block-per-row kernel (A/B; outputs identical)
+  static const bool warp = [] {
+    const char *e = getenv("PICOKV_QQ_WARP");
+    return e == nullptr || e[0] != '0';
+  }();
+  if (warp && C % 64 == 0 && C <= 512) {
+    const int blocks = (rows + 7) / 8;
+    if (projected_query.scalar_type() == at::kBFloat16) {
+      picokv_quantize_pack_zero_projected_query_warp_kernel<__nv_bfloat16><<<blocks, threads, 0, stream>>>(
+        (const __nv_bfloat16*)projected_query.data_ptr<at::BFloat16>(),
+        packed_projected_query.data_ptr<long>(), query_scale.data_ptr<float>(),
+        code_zero.data_ptr<float>(), den_zero.data_ptr<float>(), rows, C, Cv);
+    } else {
+      picokv_quantize_pack_zero_projected_query_warp_kernel<float><<<blocks, threads, 0, stream>>>(
+        projected_query.data_ptr<float>(),
+        packed_projected_query.data_ptr<long>(), query_scale.data_ptr<float>(),
+        code_zero.data_ptr<float>(), den_zero.data_ptr<float>(), rows, C, Cv);
+    }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return;
+  }
   if (projected_query.scalar_type() == at::kBFloat16) {
     picokv_quantize_pack_zero_projected_query_kernel<__nv_bfloat16><<<rows, threads, 0, stream>>>(
       (const __nv_bfloat16*)projected_query.data_ptr<at::BFloat16>(),
@@ -5145,6 +5249,10 @@ static inline int picokv_tc_tail_block_tiles(int L, int BKVH, bool scheduled) {
   return 2;
 }
 
+int picokv_tail_block_tiles(int L, int BKVH) {
+  return picokv_tc_tail_block_tiles(L, BKVH, false);
+}
+
 void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
   at::Tensor packed_projected_query,
   at::Tensor packed_key,
@@ -5159,7 +5267,14 @@ void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
   double attention_scale,
   at::Tensor global_lens,
   at::Tensor sched_req,
-  at::Tensor sched_tile
+  at::Tensor sched_tile,
+  at::Tensor row_kptr,
+  at::Tensor row_vptr,
+  at::Tensor row_cap,
+  at::Tensor part_code,
+  at::Tensor part_den,
+  at::Tensor part_rs,
+  at::Tensor projected_query
 ) {
   at::cuda::CUDAGuard device_guard(packed_projected_query.device());
   cudaStream_t stream = at::cuda::getCurrentCUDAStream(); /* explicit_current_stream */
@@ -5182,9 +5297,85 @@ void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
   }
   const int *sr_ptr = (sched_req.defined() && sched_req.numel() > 0) ? sched_req.data_ptr<int>() : nullptr;
   const int *st_ptr = (sched_tile.defined() && sched_tile.numel() > 0) ? sched_tile.data_ptr<int>() : nullptr;
+  // the kernels read sched_tile[x] for every sched_req entry x
+  TORCH_CHECK((sr_ptr == nullptr) == (st_ptr == nullptr) &&
+                (sr_ptr == nullptr || sched_tile.numel() == sched_req.numel()),
+              "picokv tail: sched_req and sched_tile must both be empty or the same length");
   const int sched_gx = (sr_ptr != nullptr) ? (int)sched_req.numel() : (L + 511) / 512;
   const int sched_gz = (sr_ptr != nullptr) ? KVH : (B * KVH);
+  const bool rows = row_cap.defined() && row_cap.numel() > 0;
+  const long long *rk_ptr = nullptr;
+  const long long *rv_ptr = nullptr;
+  const int *rc_ptr = nullptr;
+  if (rows) {
+    TORCH_CHECK(row_kptr.defined() && row_vptr.defined() && row_kptr.numel() >= B &&
+                row_vptr.numel() >= B && row_cap.numel() >= B &&
+                row_kptr.scalar_type() == at::kLong && row_vptr.scalar_type() == at::kLong &&
+                row_cap.scalar_type() == at::kInt,
+                "picokv row tables: int64 row_kptr/row_vptr and int32 row_cap, >= B entries");
+    TORCH_CHECK(sr_ptr != nullptr && st_ptr != nullptr && gl_ptr != nullptr && key_transposed &&
+                group_size == 4 && KBlocks == 5 && Cv == 320 && picokv_tc_tail_enabled(),
+                "picokv row tables need the tensor-core sched path (GQA-4, Ck=Cv=320, "
+                "transposed keys, global_lens + sched tables, TC tail enabled)");
+    rk_ptr = reinterpret_cast<const long long *>(row_kptr.data_ptr<int64_t>());
+    rv_ptr = reinterpret_cast<const long long *>(row_vptr.data_ptr<int64_t>());
+    rc_ptr = row_cap.data_ptr<int>();
+  }
+  // Deterministic mode: per-block partials, no atomics (TC kernel only; the
+  // reduction's tile size is picokv_tail_block_tiles, or 2 for sched grids).
+  const bool part = part_code.defined() && part_code.numel() > 0;
+  float *pc_ptr = nullptr;
+  float *pd_ptr = nullptr;
+  int *prs_ptr = nullptr;
+  if (part) {
+    TORCH_CHECK(group_size == 4 && KBlocks == 5 && Cv == 320 && picokv_tc_tail_enabled(),
+                "picokv deterministic tail needs the tensor-core path (GQA-4, Ck=Cv=320, TC tail enabled)");
+    const int blk = 256 * picokv_tc_tail_block_tiles(L, B * KVH, sr_ptr != nullptr);
+    const long gx = (sr_ptr != nullptr) ? (long)sched_req.numel() : (long)((L + blk - 1) / blk);
+    const long slots = (long)S * sched_gz * gx;
+    TORCH_CHECK(part_code.scalar_type() == at::kFloat && part_den.defined() &&
+                part_den.scalar_type() == at::kFloat && part_code.is_contiguous() &&
+                part_den.is_contiguous() && part_code.numel() >= slots * 4 * 320 &&
+                part_den.numel() >= slots * 4,
+                "picokv deterministic tail: fp32 part_code >= [S*GZ*GX,4,320], part_den >= [S*GZ*GX,4]");
+    pc_ptr = part_code.data_ptr<float>();
+    pd_ptr = part_den.data_ptr<float>();
+    if (sr_ptr != nullptr) {
+      TORCH_CHECK(part_rs.defined() && part_rs.scalar_type() == at::kInt && part_rs.numel() >= B,
+                  "picokv deterministic sched tail: int32 part_rs >= [B]");
+      prs_ptr = part_rs.data_ptr<int>();
+    }
+  }
 
+  // Fused query quantizer (TC kernel only): the bf16 projected query replaces
+  // packed_projected_query / query_scale (still passed, for shapes only).
+  const bool fused_q = projected_query.defined() && projected_query.numel() > 0;
+  const __nv_bfloat16 *pjq_ptr = nullptr;
+  if (fused_q) {
+    TORCH_CHECK(group_size == 4 && KBlocks == 5 && Cv == 320 && exp_bits >= 4 &&
+                picokv_tc_tail_enabled() && !part,
+                "picokv fused-quantizer tail needs the tensor-core path (GQA-4, Ck=Cv=320, "
+                "exp_bits >= 4, TC tail enabled, not deterministic)");
+    TORCH_CHECK(projected_query.scalar_type() == at::kBFloat16 && projected_query.is_contiguous() &&
+                projected_query.numel() == (long)B * QH * S * 320,
+                "picokv fused-quantizer tail: contiguous bf16 projected_query [B,QH,S,320]");
+    pjq_ptr = reinterpret_cast<const __nv_bfloat16 *>(projected_query.data_ptr<at::BFloat16>());
+  }
+  // Sched split: a small batch's sched grid (512-token entries, BT 2) runs
+  // as 2 one-tile blocks per entry, the width the unscheduled grid picks below
+  // 2 waves (t62/mb/tail_bt.py: B1 x 1k 7.5 -> 5.0 us, B8 x 1k 9.0 -> 7.3).
+  // PICOKV_TC_SCHED_SPLIT=0 off, 1 always, default below 2 blocks per SM.
+  int sched_shift = 0;
+  if (sr_ptr != nullptr && !part) {
+    static const int split_env = []() {
+      const char *env = getenv("PICOKV_TC_SCHED_SPLIT");
+      return env ? atoi(env) : -1;
+    }();
+    static const int split_sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+    sched_shift = split_env == 1 ? 1
+                : split_env == 0 ? 0
+                : ((long)sched_gx * S * sched_gz < 2L * split_sms ? 1 : 0);
+  }
   TORCH_CHECK(QH == group_size * KVH && (group_size == 1 || group_size == 4 || group_size == 8), "v1 runtime-exp atomic path requires QH == KVH, 4 * KVH, or 8 * KVH");
   TORCH_CHECK(KBlocks == 2 || KBlocks == 3 || KBlocks == 4 || KBlocks == 5 || KBlocks == 6 || KBlocks == 7 || KBlocks == 8, "v1 runtime-exp atomic path currently requires Ck in {128,192,256,320,384,448,512}");
   TORCH_CHECK(tile_size == kTileSize, "v1 runtime-exp atomic path currently requires tile_size == 256");
@@ -5302,8 +5493,17 @@ void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
   )
 // Tensor-core tail kernel (GQA-4, Ck=320, Cv=320, LB 4). Unscheduled grid with
 // BT tiles per block, or the sched grid (BT 2, 512-token sched tiles).
-#define LAUNCH_V1_EXP_BITS_ATOMIC_TC_GRID(EB, KEY_T, BT, GRID, SR, ST) \
-  picokv_v1_expbits_atomic2_tc_kernel<KEY_T, EB, 320, 4, BT><<<GRID, partial_threads, 0, stream>>>( \
+#define LAUNCH_V1_EXP_BITS_ATOMIC_TC_GRID(EB, KEY_T, BT, GRID, SR, ST, SH) \
+  do { \
+    if (pjq_ptr != nullptr) { \
+      LAUNCH_V1_EXP_BITS_ATOMIC_TC_FQ(EB, KEY_T, BT, GRID, SR, ST, SH, (EB >= 4)); \
+    } else { \
+      LAUNCH_V1_EXP_BITS_ATOMIC_TC_FQ(EB, KEY_T, BT, GRID, SR, ST, SH, false); \
+    } \
+  } while (0)
+// FQ: the fused-quantizer instantiation (exp_bits >= 4 only: the op checks).
+#define LAUNCH_V1_EXP_BITS_ATOMIC_TC_FQ(EB, KEY_T, BT, GRID, SR, ST, SH, FQ) \
+  picokv_v1_expbits_atomic2_tc_kernel<KEY_T, EB, 320, 4, BT, FQ><<<GRID, partial_threads, 0, stream>>>( \
     packed_projected_query.data_ptr<long>(), \
     packed_key.data_ptr<long>(), \
     packed_value_sign.data_ptr<long>(), \
@@ -5317,20 +5517,30 @@ void picokv_global_code_output_v1_exp8_tiled_gqa4_atomic(
     0.0f, \
     gl_ptr, \
     SR, \
-    ST \
+    ST, \
+    rk_ptr, \
+    rv_ptr, \
+    rc_ptr, \
+    pc_ptr, \
+    pd_ptr, \
+    prs_ptr, \
+    SH, \
+    pjq_ptr \
   )
 #define LAUNCH_V1_EXP_BITS_ATOMIC_TC(EB, KEY_T) \
   do { \
-    if (sr_ptr != nullptr) { \
-      LAUNCH_V1_EXP_BITS_ATOMIC_TC_GRID(EB, KEY_T, 2, dim3(sched_gx, S, sched_gz), sr_ptr, st_ptr); \
+    if (sr_ptr != nullptr && sched_shift == 1) { \
+      LAUNCH_V1_EXP_BITS_ATOMIC_TC_GRID(EB, KEY_T, 1, dim3(2 * sched_gx, S, sched_gz), sr_ptr, st_ptr, 1); \
+    } else if (sr_ptr != nullptr) { \
+      LAUNCH_V1_EXP_BITS_ATOMIC_TC_GRID(EB, KEY_T, 2, dim3(sched_gx, S, sched_gz), sr_ptr, st_ptr, 0); \
     } else { \
       const int tc_bt = picokv_tc_tail_block_tiles(L, B * KVH, false); \
       if (tc_bt == 1) { \
-        LAUNCH_V1_EXP_BITS_ATOMIC_TC_GRID(EB, KEY_T, 1, dim3((L + 255) / 256, S, B * KVH), nullptr, nullptr); \
+        LAUNCH_V1_EXP_BITS_ATOMIC_TC_GRID(EB, KEY_T, 1, dim3((L + 255) / 256, S, B * KVH), nullptr, nullptr, 0); \
       } else if (tc_bt == 4) { \
-        LAUNCH_V1_EXP_BITS_ATOMIC_TC_GRID(EB, KEY_T, 4, dim3((L + 1023) / 1024, S, B * KVH), nullptr, nullptr); \
+        LAUNCH_V1_EXP_BITS_ATOMIC_TC_GRID(EB, KEY_T, 4, dim3((L + 1023) / 1024, S, B * KVH), nullptr, nullptr, 0); \
       } else { \
-        LAUNCH_V1_EXP_BITS_ATOMIC_TC_GRID(EB, KEY_T, 2, dim3((L + 511) / 512, S, B * KVH), nullptr, nullptr); \
+        LAUNCH_V1_EXP_BITS_ATOMIC_TC_GRID(EB, KEY_T, 2, dim3((L + 511) / 512, S, B * KVH), nullptr, nullptr, 0); \
       } \
     } \
   } while (0)

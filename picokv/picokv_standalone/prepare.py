@@ -106,6 +106,10 @@ def _apply_zerorope_(states: torch.Tensor, zerorope: int) -> None:
 # stable identity for the whole run; the H2D copy + group rearrange otherwise
 # costs ~0.3 ms of host time per layer per side, which dominates short-context
 # prefill.  Keyed on the *source* tensor identity plus the target geometry.
+# Each entry holds a reference to its source: a freed source's address could
+# otherwise be reused by another projection (a second load of the .pt in the
+# same process), which would hit this entry and get another layer's / side's
+# prepared matrix.
 _PREPARED_PROJ_CACHE: dict = {}
 
 
@@ -132,9 +136,9 @@ def _prepare_fixed_block32_cached(
     )
     hit = _PREPARED_PROJ_CACHE.get(key)
     if hit is None:
-        hit = _prepare_fixed_block32(encoders, batch, heads, bits, dim, device, dtype)
+        hit = (encoders, _prepare_fixed_block32(encoders, batch, heads, bits, dim, device, dtype))
         _PREPARED_PROJ_CACHE[key] = hit
-    return hit
+    return hit[1]
 
 
 def _select_eas_and_kept_indices(

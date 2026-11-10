@@ -1,3 +1,244 @@
+diff --git a/python/sglang/srt/arg_groups/attention_hook.py b/python/sglang/srt/arg_groups/attention_hook.py
+index b5ef4ed..ab0cbda 100644
+--- a/python/sglang/srt/arg_groups/attention_hook.py
++++ b/python/sglang/srt/arg_groups/attention_hook.py
+@@ -609,3 +609,184 @@ def handle_deterministic_inference(server_args: Any):
+                 logger.warning(
+                     "NCCL_ALGO is set to 'allreduce:tree', the NCCL channel count is pinned, and custom and symmetric-memory all reduce are disabled for deterministic inference when TP size > 1."
+                 )
++
++
++def handle_picokv_serving_constraints(server_args: Any):
++    """Serving constraints of the picokv attention backend.
++
++    PiCoKV keeps one compressed cache per request inside the backend; the
++    token-level KV pool is a no-op. Features that read or share KV through
++    that pool would silently lose context, so the defaults are turned off
++    here (radix cache, mixed chunked prefill, the full decode graph) and
++    explicit combinations without a working path are rejected. Chunked
++    prefill stays on: the backend's host chunk stage makes it exact. Runs
++    before handle_gpu_memory_settings so the memory budget sees the resolved
++    chunked_prefill_size.
++    """
++    cfg = resolving_view(server_args)
++    backends = attention_backends_of(cfg)
++    if "picokv" not in backends:
++        return
++    src = "_handle_picokv_serving_constraints"
++    if backends != ("picokv", "picokv"):
++        raise ValueError(
++            "picokv must serve both prefill and decode (got prefill=%r, "
++            "decode=%r): the compressed cache is built by the picokv prefill."
++            % backends
++        )
++    for name, bad in (
++        ("speculative decoding", cfg.speculative_algorithm is not None),
++        ("DP attention", cfg.enable_dp_attention),
++        ("pipeline parallelism", cfg.pp_size > 1),
++        ("decode context parallelism", cfg.dcp_size > 1),
++        ("hierarchical cache", cfg.enable_hierarchical_cache),
++        ("PD disaggregation", cfg.disaggregation_mode != "null"),
++        # a session turn extends the previous turn's KV, which the no-op
++        # pool does not hold (the backend's cache is per request)
++        ("streaming sessions", cfg.enable_streaming_session),
++        # a CP rank's prefill holds a slice of the sequence; the backend's
++        # cache is built from the whole prompt on one rank
++        ("prefill context parallelism",
++         bool(getattr(cfg, "enable_prefill_cp", False))
++         or (getattr(cfg, "attn_cp_size", 1) or 1) > 1),
++        ("diffusion LLM decoding", getattr(cfg, "dllm_algorithm", None) is not None),
++        # a multiplexed prefill and decode share the backend's per-request
++        # state from two streams
++        ("PD multiplexing", bool(getattr(cfg, "enable_pdmux", False))),
++        # MLP sync pads the attention batch with idle rows the backend
++        # would serve as req row 0; TBO splits one batch in two forwards
++        ("MoE all-to-all backends",
++         getattr(cfg, "moe_a2a_backend", None) not in (None, "none")),
++        ("--moe-dense-tp-size", getattr(cfg, "moe_dense_tp_size", None) is not None),
++        ("two-batch overlap", bool(getattr(cfg, "enable_two_batch_overlap", False))),
++        # the canary audits the token pool, which picokv does not write
++        ("KV canary", getattr(cfg, "kv_canary", None) not in (None, "none")),
++    ):
++        if bad:
++            raise ValueError(f"picokv attention backend does not support {name}")
++    # env enums: an unknown value would silently pick a default path
++    for env, default, ok in (
++        ("PICOKV_PREFILL", "fi", ("fi", "sdpa")),
++        ("PICOKV_CHUNK_STAGE", "host", ("host", "off")),
++        ("PICOKV_RADIX", "off", ("off", "host")),
++        ("PICOKV_LOST", "abort", ("abort", "keep")),
++    ):
++        val = os.environ.get(env, default).strip().lower()
++        if val not in ok:
++            raise ValueError(f"{env}={val!r}: expected one of {', '.join(ok)}")
++    # not validated with the per-layer breakable decode graph (it re-enters
++    # the backend's Python each layer)
++    if cfg.enable_torch_compile:
++        logger.warning("picokv: torch.compile disabled (not validated with the backend).")
++        declare_resolution(server_args, src, enable_torch_compile=False)
++    if cfg.enable_memory_saver:
++        logger.warning(
++            "picokv: release_memory_occupation frees the weights only: the "
++            "backend's caches, windows and chunk stage are not in the memory "
++            "saver's KV region (the token pool is a no-op)."
++        )
++    # the backend keeps its own K/V (bf16 dense window + key_bits/value_bits
++    # compressed, from the projection config); the pool's dtype is unused
++    if cfg.kv_cache_dtype not in (None, "auto", "bf16", "bfloat16"):
++        logger.warning(
++            "picokv: --kv-cache-dtype %s ignored (the backend stores a bf16 dense "
++            "window and a compressed cache sized by the projection's bits).",
++            cfg.kv_cache_dtype,
++        )
++        declare_resolution(server_args, src, kv_cache_dtype="auto")
++
++    staged = (
++        os.environ.get("PICOKV_CHUNK_STAGE", "host").strip().lower() != "off"
++        and os.environ.get("PICOKV_PREFILL", "fi").strip().lower() != "sdpa"
++    )
++    # radix cache: a hit skips the prefix, which the per-request compressed
++    # cache does not hold. PICOKV_RADIX=host keeps it on through the picokv
++    # radix backend (mem_cache/picokv_radix_cache.py: tree nodes own the
++    # prefix's raw K/V in the host stage; a hit streams it back, exact).
++    if not cfg.disable_radix_cache:
++        radix = os.environ.get("PICOKV_RADIX", "off").strip().lower()
++        if radix == "host" and staged:
++            if cfg.page_size not in (None, 1):
++                raise ValueError(
++                    "picokv with PICOKV_RADIX=host needs page_size 1 (host K/V "
++                    f"per token), got {cfg.page_size}"
++                )
++            if cfg.radix_cache_backend not in (None, "picokv"):
++                raise ValueError(
++                    "picokv with PICOKV_RADIX=host needs --radix-cache-backend "
++                    f"picokv, got {cfg.radix_cache_backend!r}"
++                )
++            import sglang.srt.mem_cache.picokv_radix_cache  # noqa: F401 (registers)
++
++            declare_resolution(server_args, src, radix_cache_backend="picokv")
++        else:
++            logger.warning(
++                "picokv: radix cache disabled (the prefix KV is compressed per "
++                "request; a radix hit would skip the prefix in the cache). "
++                "PICOKV_RADIX=host keeps it through host K/V."
++            )
++            declare_resolution(server_args, src, disable_radix_cache=True)
++
++    # chunked prefill: exact through the backend's chunk stage (continuation
++    # chunks attend the staged raw prefix ++ chunk; the compressed cache is
++    # merged per chunk), so SGLang's chunk size is kept (unset: the GPU
++    # default handle_gpu_memory_settings picks).
++    # PICOKV_CHUNK_STAGE=off (or PICOKV_PREFILL=sdpa, no stage): a
++    # continuation chunk would attend only itself, so chunking is turned off
++    # unless PICOKV_ALLOW_CHUNKED_PREFILL=1. A chunk size >= context_len
++    # never splits a prompt, so it is kept unless the memory budget is
++    # auto-sized (that estimate scales with it).
++    chunk = cfg.chunked_prefill_size
++    context_len = model_config_of(server_args).context_len
++    allow = staged or os.environ.get("PICOKV_ALLOW_CHUNKED_PREFILL", "0") == "1"
++    if chunk == 0 or (chunk is None and not staged):
++        declare_resolution(server_args, src, chunked_prefill_size=-1)
++    elif chunk is None:
++        pass  # the GPU default of handle_gpu_memory_settings
++    elif 0 < chunk < context_len and not allow:
++        logger.warning(
++            "picokv: chunked prefill (chunked_prefill_size=%d < context_len=%d) "
++            "disabled (no chunk stage: PICOKV_CHUNK_STAGE=off or "
++            "PICOKV_PREFILL=sdpa); set PICOKV_ALLOW_CHUNKED_PREFILL=1 to keep it.",
++            chunk,
++            context_len,
++        )
++        declare_resolution(server_args, src, chunked_prefill_size=-1)
++    elif chunk >= context_len and cfg.mem_fraction_static is None:
++        declare_resolution(server_args, src, chunked_prefill_size=-1)
++    if cfg.enable_mixed_chunk:
++        logger.warning("picokv: mixed chunked prefill disabled.")
++        declare_resolution(server_args, src, enable_mixed_chunk=False)
++
++    # decode: only the breakable graph re-enters the backend per layer.
++    # prefill: forward_extend has no eager break, a captured prefill graph
++    # would replay stale cache writes.
++    locked = getattr(server_args, "_cuda_graph_config_locked", set())
++    decode = cfg.cuda_graph_config.decode.backend
++    if decode not in (Backend.BREAKABLE, Backend.DISABLED):
++        if (Phase.DECODE, "backend") in locked:
++            raise ValueError(
++                f"picokv supports decode CUDA graph backend 'breakable' or "
++                f"'disabled', got {decode!r}"
++            )
++        declare_resolution(
++            server_args,
++            src,
++            cuda_graph_config=with_phase(
++                cfg.cuda_graph_config, Phase.DECODE, backend=Backend.BREAKABLE
++            ),
++        )
++        cfg = resolving_view(server_args)
++    prefill = cfg.cuda_graph_config.prefill.backend
++    if prefill != Backend.DISABLED:
++        if (Phase.PREFILL, "backend") in locked:
++            raise ValueError(
++                f"picokv supports no prefill CUDA graph, got {prefill!r}"
++            )
++        declare_resolution(
++            server_args,
++            src,
++            cuda_graph_config=with_phase(
++                cfg.cuda_graph_config, Phase.PREFILL, backend=Backend.DISABLED
++            ),
++        )
+diff --git a/python/sglang/srt/arg_groups/choices.py b/python/sglang/srt/arg_groups/choices.py
+index 1ac5b91..9377f13 100644
+--- a/python/sglang/srt/arg_groups/choices.py
++++ b/python/sglang/srt/arg_groups/choices.py
+@@ -81,6 +81,7 @@ ATTENTION_BACKEND_CHOICES = [
+     "qsa",
+     "dsv4",
+     "compressed",  # Deprecated alias for "dsv4"
++    "picokv",  # compressed per-request KV (layers/attention/picokv_backend.py)
+     # NVIDIA specific
+     "fa3",
+     "fa4",
+diff --git a/python/sglang/srt/arg_groups/pipeline.py b/python/sglang/srt/arg_groups/pipeline.py
+index 496f37c..3b5634e 100644
+--- a/python/sglang/srt/arg_groups/pipeline.py
++++ b/python/sglang/srt/arg_groups/pipeline.py
+@@ -231,6 +231,12 @@ def run_resolution_pipeline(server_args: Any) -> None:
+ 
+     run_hook(handle_platform_defaults, server_args)
+ 
++    # Must precede handle_gpu_memory_settings: the memory budget keys off the
++    # chunked_prefill_size the picokv constraints resolve.
++    from sglang.srt.arg_groups.attention_hook import handle_picokv_serving_constraints
++
++    run_hook(handle_picokv_serving_constraints, server_args)
++
+     # Handle memory-related, chunked prefill, and CUDA graph batch size configurations.
+     from sglang.srt.arg_groups.memory_hook import handle_gpu_memory_settings
+ 
+diff --git a/python/sglang/srt/beam_search/coordinator.py b/python/sglang/srt/beam_search/coordinator.py
+index 7d3ade0..38522c1 100644
+--- a/python/sglang/srt/beam_search/coordinator.py
++++ b/python/sglang/srt/beam_search/coordinator.py
+@@ -64,6 +64,7 @@ from sglang.srt.managers.schedule_batch import (
+     ScheduleBatch,
+ )
+ from sglang.srt.runtime_context import (
++    attention_backends,
+     get_disagg,
+     get_memory,
+     get_parallel,
+@@ -140,6 +141,10 @@ class BeamCoordinator(msgspec.Struct, kw_only=True):
+             return "Beam search is not supported with dp attention."
+         if get_memory().enable_hierarchical_cache:
+             return "Beam search is not supported with hierarchical cache."
++        if "picokv" in attention_backends():
++            # the backend keeps one compressed cache per request row; beam
++            # members fork rows it never prefilled
++            return "Beam search is not supported with the picokv attention backend."
+         if self.model_config.is_encoder_decoder:
+             return "Beam search is not supported with encoder-decoder models."
+         if self.tree_cache.supports_swa() or self.tree_cache.supports_mamba():
 diff --git a/python/sglang/srt/layers/attention/attention_registry.py b/python/sglang/srt/layers/attention/attention_registry.py
 index 2ed16e5..8e93d42 100644
 --- a/python/sglang/srt/layers/attention/attention_registry.py
@@ -18,11 +259,171 @@ index 2ed16e5..8e93d42 100644
  @register_attention_backend("flex_attention")
  def create_flex_attention_backend(runner):
      from sglang.srt.layers.attention.torch_flex_backend import TorchFlexAttnBackend
+diff --git a/python/sglang/srt/managers/schedule_batch.py b/python/sglang/srt/managers/schedule_batch.py
+index 9d9e09e..b16ddf6 100755
+--- a/python/sglang/srt/managers/schedule_batch.py
++++ b/python/sglang/srt/managers/schedule_batch.py
+@@ -54,6 +54,7 @@ ScheduleBatch -> ForwardBatch
+ import copy
+ import dataclasses
+ import logging
++import os
+ import re
+ import sys
+ from array import array
+@@ -2301,6 +2302,36 @@ def _compute_chunked_req_next_prompt_token(
+     return None
+ 
+ 
++_PICOKV_STABLE_ORDER = None
++
++
++def _picokv_stable_order() -> bool:
++    """PiCoKV decode keeps per-row window / packed buffers at the batch row
++    positions: an order-preserving filter shifts every row after a finished
++    one (O(B) row copies per finish), a hole fill moves one row per hole.
++    PICOKV_STABLE_ORDER=0 keeps sglang's order-preserving filter."""
++    global _PICOKV_STABLE_ORDER
++    if _PICOKV_STABLE_ORDER is None:
++        from sglang.srt.runtime_context import attention_backends
++
++        _PICOKV_STABLE_ORDER = (
++            attention_backends()[1] == "picokv"
++            and os.environ.get("PICOKV_STABLE_ORDER", "1") != "0"
++        )
++    return _PICOKV_STABLE_ORDER
++
++
++def _hole_fill_order(keep_indices: List[int]) -> List[int]:
++    """Order the kept rows so each one stays at its old position when that
++    position survives the shrink; rows past the new size fill the vacated
++    positions in order. Same rows (only the order differs), e.g.
++    [0, 2, 3, 5] of 6 rows -> [0, 5, 2, 3] (row 5 fills hole 1)."""
++    m = len(keep_indices)
++    kept = set(keep_indices)
++    movers = iter(sorted(i for i in keep_indices if i >= m))
++    return [p if p in kept else next(movers) for p in range(m)]
++
++
+ @dataclasses.dataclass
+ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
+     """Store all information of a batch on the scheduler."""
+@@ -2692,7 +2723,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
+         input_ids = [r.get_fill_ids()[len(r.prefix_indices) :] for r in reqs]
+         extend_num_tokens = sum(len(ids) for ids in input_ids)
+         seq_lens = [r.extend_range.end for r in reqs]
+-        orig_seq_lens = [max(r.extend_range.end, len(r.origin_input_ids)) for r in reqs]
++        # the request's full fill length (a retracted request re-prefills its
++        # prompt + output): a chunk ending before it is not the last chunk
++        orig_seq_lens = [
++            max(r.extend_range.end, len(r.full_untruncated_fill_ids)) for r in reqs
++        ]
+         prefix_lens = [len(r.prefix_indices) for r in reqs]
+         extend_lens = [r.extend_range.length for r in reqs]
+         extend_logprob_start_lens = [
+@@ -3620,6 +3655,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
+             # No need to filter
+             return
+ 
++        if self.spec_info is None and _picokv_stable_order():
++            keep_indices = _hole_fill_order(keep_indices)
++
+         keep_indices_device = torch.tensor(
+             keep_indices,
+             dtype=torch.int64,
+diff --git a/python/sglang/srt/managers/schedule_policy.py b/python/sglang/srt/managers/schedule_policy.py
+index f83b181..eeda2e4 100644
+--- a/python/sglang/srt/managers/schedule_policy.py
++++ b/python/sglang/srt/managers/schedule_policy.py
+@@ -1255,6 +1255,12 @@ class PrefillAdder:
+         # this returns 0, so the debit sites below reuse the value.
+         mamba_gap_reserve = self._mamba_gap_budget_for_req(req)
+         total_tokens += mamba_gap_reserve
++        # PiCoKV radix: a hit on a prefix a running request holds rebuilds its
++        # own compressed cache over it; charge it here (before the temporary pin
++        # below counts this request as a holder), hold it after commit.
++        picokv_charge = getattr(self.tree_cache, "picokv_charge", None)
++        picokv_charge = picokv_charge(req) if picokv_charge is not None else 0
++        total_tokens += picokv_charge
+ 
+         # The temporary pin excludes this prefix from the evictable budget.
+         # Selection itself neither allocates slots nor materializes host hits.
+@@ -1270,6 +1276,14 @@ class PrefillAdder:
+             if isinstance(admission, AddReqResult):
+                 return admission
+ 
++            # PiCoKV radix: rows with a prefix share the backend's stage
++            # reserve; one that would overflow it waits a round
++            picokv_stage_ok = getattr(self.tree_cache, "picokv_stage_ok", None)
++            if picokv_stage_ok is not None and not picokv_stage_ok(
++                req, admission.prefix_len + admission.extend_len, self.can_run_list
++            ):
++                return AddReqResult.OTHER
++
+             # A rejected candidate must not report prefillable or queue H2D.
+             if (self.prefill_delayer_single_pass is not None) and (
+                 not self.prefill_delayer_single_pass.negotiate_should_allow_prefill(
+@@ -1338,6 +1352,8 @@ class PrefillAdder:
+ 
+             # Successful materialization has no remaining admission gates.
+             self._commit_prefill_admission(req, admission, mamba_gap_reserve)
++            if picokv_charge:
++                self.tree_cache.picokv_admit(req, picokv_charge)
+ 
+         # This verdict controls the next candidate, not the committed request.
+         return self.budget_state()
+diff --git a/python/sglang/srt/managers/scheduler_components/batch_result_processor.py b/python/sglang/srt/managers/scheduler_components/batch_result_processor.py
+index 386e8d1..8ceeb10 100644
+--- a/python/sglang/srt/managers/scheduler_components/batch_result_processor.py
++++ b/python/sglang/srt/managers/scheduler_components/batch_result_processor.py
+@@ -302,6 +302,13 @@ class SchedulerBatchResultProcessor:
+ 
+             # Check finish conditions
+             logprob_pt = 0
++            # picokv: requests whose prompt prefix the backend could not attend
++            # (None for other attention backends)
++            picokv_lost = getattr(
++                getattr(getattr(self.model_worker, "model_runner", None), "attn_backend", None),
++                "picokv_lost_abort",
++                None,
++            )
+ 
+             for i, (req, next_token_id) in enumerate(zip(batch.reqs, next_token_ids)):
+                 should_commit_output = (
+@@ -317,6 +324,19 @@ class SchedulerBatchResultProcessor:
+                     sampling_mask_finish_reason = self.get_sampling_mask_finish_reason(
+                         status=status
+                     )
++                if picokv_lost is not None and req.inflight_middle_chunks <= 0:
++                    lost_msg = picokv_lost(req.rid)
++                    if (
++                        lost_msg is not None
++                        and should_commit_output
++                        and sampling_mask_finish_reason is None
++                    ):
++                        # aborted like a sampling-mask failure: no output, no insert
++                        sampling_mask_finish_reason = FINISH_ABORT(
++                            lost_msg,
++                            HTTPStatus.SERVICE_UNAVAILABLE,
++                            "ServiceUnavailableError",
++                        )
+                 if (
+                     batch.return_hidden_states
+                     and logits_output.hidden_states is not None
 diff --git a/python/sglang/srt/mem_cache/kv_cache_configurator.py b/python/sglang/srt/mem_cache/kv_cache_configurator.py
-index 6025de0..25bf018 100644
+index 6025de0..888b68e 100644
 --- a/python/sglang/srt/mem_cache/kv_cache_configurator.py
 +++ b/python/sglang/srt/mem_cache/kv_cache_configurator.py
-@@ -1971,6 +1971,11 @@ class KVCacheConfigurator:
+@@ -277,6 +277,8 @@ class KVCacheConfigurator:
+     hybrid_gdn_config: Optional[Any] = field(init=False)
+     is_hybrid_swa_mtp_draft: bool = field(init=False)
+     draft_swa_full_capacity: bool = field(init=False)
++    # picokv: request cap set by _picokv_reserve (None: no cap)
++    _picokv_req_cap: Optional[int] = field(init=False, default=None)
+ 
+     def __post_init__(self) -> None:
+         self.mambaish_config = mambaish_config(self.model_config)
+@@ -1971,6 +1973,11 @@ class KVCacheConfigurator:
      ) -> KVCache:
          if self.kv_cache_dtype_str == "mxfp8":
              pool_cls = MHATokenToKVPoolMXFP8
@@ -34,8 +435,79 @@ index 6025de0..25bf018 100644
          else:
              pool_cls = (
                  NoOpMHATokenToKVPool
+@@ -2312,6 +2319,17 @@ class KVCacheConfigurator:
+             requested_per_worker = None
+             max_num_reqs = min(estimated, token_capacity // 2)
+ 
++        picokv_cap = self._picokv_req_cap
++        if picokv_cap is not None and picokv_cap < max_num_reqs:
++            logger.warning(
++                "picokv: max_running_requests capped to %d (per dp worker): the "
++                "decode rows' dense windows + packed headroom are reserved per "
++                "request and may take at most half of the KV budget.",
++                picokv_cap,
++            )
++            max_num_reqs = picokv_cap
++            requested_per_worker = None  # warned here
++
+         capped_by_mamba = False
+         if self.mambaish_config is not None:
+             ratio = self._calculate_mamba_ratio()
+@@ -2370,6 +2388,43 @@ class KVCacheConfigurator:
+         config.mem_fraction_static = get_schedule().mem_fraction_static
+         return config
+ 
++    def _picokv_reserve(self, budget_bytes: int) -> int:
++        """PiCoKV: bytes of ``budget_bytes`` the per-token cell_size does not
++        cover — every decode row's dense window + packed headroom
++        (picokv_fixed_reserve_bytes) for max_running_requests rows (unset: the
++        4096 upper bound of resolve_max_num_reqs), plus the exact chunked
++        prefill stage's GPU layer buffers (picokv_stage_reserve_bytes; 0 when
++        chunked prefill never splits a prompt). The request count is capped
++        (_picokv_req_cap, applied by resolve_max_num_reqs) so the row reserve
++        takes at most half of the budget left after the stage."""
++        from sglang.srt.layers.attention.picokv_backend import (
++            picokv_fixed_reserve_bytes,
++            picokv_stage_reserve_bytes,
++        )
++
++        mc = self.model_config
++        n = mc.get_num_kv_heads(get_parallel().attn_tp_size, get_parallel().attn_dcp_size)
++        layers = self.layer_info.num_effective_layers
++        # the backend's windows / stage hold bf16 K/V (it rejects other model
++        # dtypes) whatever kv_cache_dtype resolves to (e.g. an fp8 checkpoint)
++        dtb = 2
++        stage = picokv_stage_reserve_bytes(
++            mc.context_len, get_schedule().chunked_prefill_size, n, mc.head_dim, dtb
++        )
++        budget_bytes = max(0, budget_bytes - stage)
++
++        def need(r):
++            return picokv_fixed_reserve_bytes(r, n, mc.head_dim, layers, dtb)
++
++        req = get_schedule().max_running_requests
++        hi = max(1, req // self.ps.attn_dp_size if req is not None else 4096)
++        lo = 1
++        while lo < hi:  # largest r <= hi with need(r) <= budget / 2
++            mid = (lo + hi + 1) // 2
++            lo, hi = (mid, hi) if need(mid) <= budget_bytes // 2 else (lo, mid - 1)
++        self._picokv_req_cap = lo
++        return need(lo) + stage
++
+     def config_from_budget(
+         self, budget_bytes: int, *, cap_tokens: Optional[int] = None
+     ) -> MemoryPoolConfig:
+@@ -2382,6 +2437,8 @@ class KVCacheConfigurator:
+         )
+ 
+         configurator = create_memory_pool_configurator(self)
++        if get_exec().kernel.attention_backend == "picokv":
++            budget_bytes = max(0, budget_bytes - self._picokv_reserve(budget_bytes))
+         config = configurator.calculate_pool_sizes(
+             budget_bytes, get_schedule().page_size
+         )
 diff --git a/python/sglang/srt/model_executor/forward_batch_info.py b/python/sglang/srt/model_executor/forward_batch_info.py
-index 94b7b59..242496f 100644
+index 94b7b59..995a130 100644
 --- a/python/sglang/srt/model_executor/forward_batch_info.py
 +++ b/python/sglang/srt/model_executor/forward_batch_info.py
 @@ -545,6 +545,9 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
@@ -48,19 +520,29 @@ index 94b7b59..242496f 100644
  
      # For logprob
      top_logprobs_nums: Optional[List[int]] = None
-@@ -906,6 +909,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
+@@ -906,6 +909,17 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
              seq_lens_sum=batch.seq_lens_sum,
              # Inputs aliased by reference from ScheduleBatch
              seq_lens_cpu=seq_lens_cpu,
-+            req_pool_indices_cpu=getattr(batch, "req_pool_indices_cpu", None),
++            # only the picokv backend reads it (other paths, e.g. TBO's
++            # filter_batch, reject unknown non-None fields)
++            req_pool_indices_cpu=(
++                getattr(batch, "req_pool_indices_cpu", None)
++                if "picokv"
++                in (
++                    getattr(model_runner, "decode_attention_backend_str", None),
++                    getattr(model_runner, "prefill_attention_backend_str", None),
++                )
++                else None
++            ),
              orig_seq_lens=batch.orig_seq_lens,
              out_cache_loc_dsv4=batch.out_cache_loc_dsv4,
              engram_history=batch.engram_history,
 diff --git a/python/sglang/srt/model_executor/pool_configurator.py b/python/sglang/srt/model_executor/pool_configurator.py
-index 89dfb69..d2dd995 100644
+index 89dfb69..deecdb1 100644
 --- a/python/sglang/srt/model_executor/pool_configurator.py
 +++ b/python/sglang/srt/model_executor/pool_configurator.py
-@@ -409,6 +409,16 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
+@@ -409,6 +409,24 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
                  * kv_size
              )
  
@@ -69,10 +551,18 @@ index 89dfb69..d2dd995 100644
 +                # per token / kv-head / layer) instead of full-precision K/V, so
 +                # the per-token KV budget is far smaller -> a much larger
 +                # max_total_num_tokens (admission ceiling) fits the same memory.
-+                import os as _os
++                # Dense bf16 when the decode slide is off (decode tokens stay
++                # dense); the bits come from the projection config.
++                from sglang.srt.layers.attention.picokv_backend import (
++                    picokv_cell_size_bytes,
++                )
 +
-+                _kb = int(_os.environ.get("PICOKV_KV_BITS", "320"))
-+                cell_size = int(n * ((2 * _kb) // 8) * effective_num_layers)
++                cell_size = picokv_cell_size_bytes(
++                    n,
++                    model_config.head_dim,
++                    effective_num_layers,
++                    model_config.num_attention_heads // max(1, tp_size),
++                )
 +
              if is_float4_e2m1fn_x2(kv_cache_dtype):
                  from sglang.srt.layers.quantization.fp4_kv_cache_quant_method import (
@@ -168,3 +658,282 @@ index 32aa6a9..12b813f 100644
 +        val = getattr(output, f.name)
 +        if torch.is_tensor(val) and val.dim() > 0:
 +            yield f.name, val
+diff --git a/python/sglang/srt/model_executor/runner_backend_utils/breakable_cuda_graph/breakable_cuda_graph.py b/python/sglang/srt/model_executor/runner_backend_utils/breakable_cuda_graph/breakable_cuda_graph.py
+index 0f4847c..1c4fcc9 100644
+--- a/python/sglang/srt/model_executor/runner_backend_utils/breakable_cuda_graph/breakable_cuda_graph.py
++++ b/python/sglang/srt/model_executor/runner_backend_utils/breakable_cuda_graph/breakable_cuda_graph.py
+@@ -71,6 +71,80 @@ _forked_streams_var: ContextVar[set[torch.Stream] | None] = ContextVar(
+ )
+ 
+ 
++# Composed replay (opt-in, enable_compose(); picokv). A break whose replay
++# work is "launch this captured graph" hands the graph over (defer_graph)
++# instead of launching it; when every break of a replay does, the segments
++# and the handed-over graphs run as ONE composed CUDA graph (child graph
++# nodes in replay order): no per-graph launch boundary between them. A break
++# that cannot (a capture, an eager fallback) calls defer_flush() first: the
++# segments up to it and the graphs handed over so far replay in order, the
++# rest of that replay runs as usual. Eager work a deferring break enqueues
++# runs before the composed graph, so it must read and write nothing the
++# segments touch. Only breaks declared composable (eager_on_graph(...,
++# composable=True)) take part; any other break keeps the per-segment loop.
++_compose_enabled = False
++_defer_var: ContextVar["_Deferral | None"] = ContextVar("bcg_defer", default=None)
++# replays by outcome: composed launch / in-order (set first seen) / flushed;
++# composed graphs instantiated / dropped for _COMPOSED_KEEP
++compose_stats = {"composed": 0, "ordered": 0, "flushed": 0, "built": 0, "evicted": 0}
++# breakable graphs (weakrefs, oldest first) holding a composed exec: each
++# graph-size bucket has its own graph, and a bucket the batch left keeps an
++# exec whose handed-over graphs are usually gone, so at most this many live
++_COMPOSED_KEEP = 2
++_composed_owners: list = []
++
++
++def enable_compose() -> bool:
++    """Capture later breakable graphs with their raw graphs kept (composable)."""
++    global _compose_enabled
++    if rt is None or is_hip() or _is_xpu:
++        return False
++    _compose_enabled = True
++    return True
++
++
++class _Deferral:
++    __slots__ = ("bcg", "graphs", "idx", "flushed")
++
++    def __init__(self, bcg: "BreakableCUDAGraph"):
++        self.bcg = bcg
++        self.graphs: list = []
++        self.idx = 0
++        self.flushed = False
++
++
++def deferring() -> bool:
++    d = _defer_var.get()
++    return d is not None and not d.flushed
++
++
++def defer_graph(graph) -> bool:
++    """Hand a captured torch CUDAGraph (keep_graph=True, instantiated) over to
++    the composed replay instead of replaying it now. False: not deferring
++    (the caller replays it itself). A ``compose_raw`` attribute on the graph
++    (a cudaGraph_t doing the same work, owned by the caller) is composed in
++    place of its own raw graph."""
++    d = _defer_var.get()
++    if d is None or d.flushed:
++        return False
++    d.graphs.append(graph)
++    return True
++
++
++def defer_flush() -> None:
++    """Leave the composed replay: run the segments up to the current break
++    and the graphs handed over so far, in order. No-op when not deferring."""
++    d = _defer_var.get()
++    if d is None or d.flushed:
++        return
++    d.flushed = True
++    segs = d.bcg._segments
++    for i in range(d.idx + 1):
++        segs[i].replay()
++        if i < len(d.graphs):
++            d.graphs[i].replay()
++
++
+ def get_current_stream(device: torch.device | None = None) -> torch.Stream:
+     stream = _current_stream_var.get()
+     if stream is None:
+@@ -216,7 +290,9 @@ def _copy_output(dst: Any, src: Any) -> Any:
+     return src
+ 
+ 
+-def eager_on_graph(enable: bool, capture_stub: Optional[Callable] = None):
++def eager_on_graph(
++    enable: bool, capture_stub: Optional[Callable] = None, composable: bool = False
++):
+     def decorator(inner: Callable):
+         if not enable:
+             return inner
+@@ -261,6 +337,7 @@ def eager_on_graph(enable: bool, capture_stub: Optional[Callable] = None):
+                 new_out = captured_inner(*captured_args, **captured_kwargs)
+                 return _copy_output(captured_output, new_out)
+ 
++            replay_fn._composable = composable
+             capture.cuda_graph._break_fns.append(replay_fn)
+ 
+             # Start a fresh CUDAGraph segment for the remainder of the forward.
+@@ -280,11 +357,27 @@ class BreakableCUDAGraph:
+         self._segments: list[Any] = []
+         self._break_fns: list[Callable[[], Any]] = []
+         self._deduped_cuda_graph = deduped_cuda_graph
++        self._kept = 0  # segments captured with their raw graph kept
++        self._can_compose: bool | None = None
++        # composed exec: (weakrefs to the handed-over graphs, cudaGraphExec_t);
++        # _seen: the previous replay's set (composed when it repeats)
++        self._composed = None
++        self._seen = None
+ 
+     def replay(self) -> None:
+         stream = get_device_module().current_stream()
+         token = _current_stream_var.set(stream)
+         try:
++            if self._can_compose is None:
++                self._can_compose = (
++                    _compose_enabled
++                    and len(self._break_fns) > 0
++                    and self._kept == len(self._segments)
++                    and all(getattr(f, "_composable", False) for f in self._break_fns)
++                )
++            if self._can_compose:
++                self._replay_composed(stream)
++                return
+             for i, seg in enumerate(self._segments):
+                 seg.replay()
+                 if i < len(self._break_fns):
+@@ -292,12 +385,113 @@ class BreakableCUDAGraph:
+         finally:
+             _current_stream_var.reset(token)
+ 
++    def _replay_composed(self, stream) -> None:
++        d = _Deferral(self)
++        tok = _defer_var.set(d)
++        nb = len(self._break_fns)
++        try:
++            for j in range(nb):
++                d.idx = j
++                self._break_fns[j]()
++                if d.flushed:
++                    break
++                # a composable break either hands its graph over or flushes
++                # before any work of its own that follows the segments
++                assert len(d.graphs) == j + 1, "composable break neither deferred nor flushed"
++        finally:
++            _defer_var.reset(tok)
++        if d.flushed:
++            compose_stats["flushed"] += 1
++            for i in range(d.idx + 1, len(self._segments)):
++                self._segments[i].replay()
++                if i < nb:
++                    self._break_fns[i]()
++            return
++        exe = self._composed_exec(d.graphs)
++        if exe is None:
++            # a graph set not seen on the previous replay: run it in order
++            # (same work, same order as the composed graph); compose on a repeat
++            compose_stats["ordered"] += 1
++            for i, seg in enumerate(self._segments):
++                seg.replay()
++                if i < nb:
++                    d.graphs[i].replay()
++            return
++        checkCudaErrors(rt.cudaGraphLaunch(exe, stream.cuda_stream))
++        compose_stats["composed"] += 1
++
++    @staticmethod
++    def _same_graphs(refs, graphs: list) -> bool:
++        return (
++            refs is not None
++            and len(refs) == len(graphs)
++            and all(w() is g for w, g in zip(refs, graphs))
++        )
++
++    def _composed_exec(self, graphs: list) -> Any:
++        """The composed exec of these handed-over graphs; None (no build) the
++        first time a set shows up, so a set that changes every replay never
++        pays an instantiation."""
++        import weakref
++
++        c = self._composed
++        if c is not None and self._same_graphs(c[0], graphs):
++            return c[1]
++        self._drop_composed()
++        if not self._same_graphs(self._seen, graphs):
++            self._seen = tuple(weakref.ref(g) for g in graphs)
++            return None
++        self._seen = None
++        parent = checkCudaErrors(rt.cudaGraphCreate(0))
++        try:
++            prev: list = []
++            for i, seg in enumerate(self._segments):
++                parts = [seg] + ([graphs[i]] if i < len(graphs) else [])
++                for g in parts:
++                    # a handed-over graph may supply its own variant for
++                    # composition (same work, ``compose_raw``)
++                    child = getattr(g, "compose_raw", None)
++                    if child is None:
++                        child = rt.cudaGraph_t(init_value=g.raw_cuda_graph())
++                    node = checkCudaErrors(
++                        rt.cudaGraphAddChildGraphNode(parent, prev, len(prev), child)
++                    )
++                    prev = [node]
++            exe = checkCudaErrors(rt.cudaGraphInstantiate(parent, 0))
++        finally:
++            checkCudaErrors(rt.cudaGraphDestroy(parent))
++        self._composed = (tuple(weakref.ref(g) for g in graphs), exe)
++        compose_stats["built"] += 1
++        owners = [w for w in _composed_owners
++                  if w() is not None and w() is not self and w()._composed is not None]
++        while len(owners) >= _COMPOSED_KEEP:
++            o = owners.pop(0)()
++            if o is not None:
++                o._drop_composed()
++                compose_stats["evicted"] += 1
++        owners.append(weakref.ref(self))
++        _composed_owners[:] = owners
++        return exe
++
++    def _drop_composed(self) -> None:
++        c, self._composed = self._composed, None
++        if c is not None and rt is not None:
++            # an in-flight launch completes first (the driver frees on completion)
++            checkCudaErrors(rt.cudaGraphExecDestroy(c[1]))
++
++    def __del__(self):
++        try:
++            self._drop_composed()
++        except Exception:
++            pass
++
+     def _append_segment(self, graph, needs_instantiate: bool) -> None:
+         if self._deduped_cuda_graph is not None:
+             self._segments.append(self._deduped_cuda_graph.register(graph))
+             return
+         if needs_instantiate:
+             graph.instantiate()
++            self._kept += 1
+         self._segments.append(graph)
+ 
+ 
+@@ -366,7 +560,9 @@ class BreakableCUDAGraphCapture:
+         # keep_graph retains the raw graph for dedup; skip it on the plain path.
+         # Dedup is CUDA-only (it introspects the raw graph via cuda-python), so
+         # XPU always takes the plain path below.
+-        if self.cuda_graph._deduped_cuda_graph is not None:
++        if self.cuda_graph._deduped_cuda_graph is not None or (
++            _compose_enabled and not _is_xpu
++        ):
+             try:
+                 graph = graph_cls(keep_graph=True)
+                 self._current_graph_needs_instantiate = True
+diff --git a/python/sglang/srt/models/utils.py b/python/sglang/srt/models/utils.py
+index e8a03a2..9cd6c67 100644
+--- a/python/sglang/srt/models/utils.py
++++ b/python/sglang/srt/models/utils.py
+@@ -32,6 +32,7 @@ from sglang.kernels.ops.layernorm.norm import (
+ from sglang.srt.environ import envs
+ from sglang.srt.layers.cp.utils import is_cp_active
+ from sglang.srt.layers.radix_attention import RadixAttention
++from sglang.srt.mem_cache.memory_pool import NoOpMHATokenToKVPool
+ from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool
+ from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+ from sglang.srt.model_executor.forward_context import get_token_to_kv_pool
+@@ -297,6 +298,9 @@ def enable_fused_set_kv_buffer(forward_batch: ForwardBatch):
+         _is_cuda
+         and pool.dtype == torch.bfloat16
+         and not isinstance(pool, SWAKVPool)
++        # picokv / skip-KV modes: a [page_size, H, D] placeholder pool (the
++        # fused RoPE store would write out_cache_loc rows out of bounds)
++        and not isinstance(pool, NoOpMHATokenToKVPool)
+         and not is_cp_active(forward_batch)
+         and getattr(forward_batch, "dcp_kv_mask", None) is None
+     ) or (_is_hip and getattr(forward_batch, "dcp_kv_mask", None) is None)
