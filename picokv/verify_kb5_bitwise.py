@@ -15,10 +15,20 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
 import torch
+
+# The direct kernel calls below read fixed["batched"] as one per-request
+# projection and packed codes [B, KVH, ., global length]. The serving
+# defaults store per-row codes (PICOKV_ROWS), one shared projection per layer
+# (PICOKV_SHARED_PROJ) and slide headroom past the global length
+# (PICOKV_SLIDE, PICOKV_PREALLOC), which those calls would overrun, and
+# padded tiles would add atomic writers to the single-writer shapes.
+for _k in ("PICOKV_ROWS", "PICOKV_SHARED_PROJ", "PICOKV_SLIDE", "PICOKV_PREALLOC"):
+    os.environ.setdefault(_k, "0")
 
 BACKEND = (
     Path(__file__).resolve().parents[2]
@@ -49,10 +59,10 @@ class _Runner:
     tp_size = 1
 
 
-def _fb(rids, eseq=None):
-    fb = SimpleNamespace(req_pool_indices=list(rids))
+def _fb(rids, eseq=None):  # backend reads req_pool_indices.shape[0]
+    fb = SimpleNamespace(req_pool_indices=torch.tensor(list(rids), dtype=torch.int64))
     if eseq is not None:
-        fb.extend_seq_lens = list(eseq)
+        fb.extend_seq_lens = torch.tensor(list(eseq), dtype=torch.int32)
     return fb
 
 
@@ -68,14 +78,16 @@ def get_ext():
 
 
 def build_case(be, mod, lengths):
-    LAYER = SimpleNamespace(layer_id=1)
+    # layer 0: the backend creates a request's cache and builds the decode
+    # batch at layer 0
+    LAYER = SimpleNamespace(layer_id=0)
     for rid, L in enumerate(lengths):
         q, k, v = _fresh(L)
         be.forward_extend(q, k, v, LAYER, _fb([rid], [L]))
     rids = list(range(len(lengths)))
     q, k, v = _fresh(len(rids))
     be.forward_decode(q, k, v, LAYER, _fb(rids))
-    return be._batch["fixed"][1]
+    return be._batch["fixed"][0]
 
 
 def run_all() -> dict:
