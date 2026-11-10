@@ -31,6 +31,7 @@ Hard requirements of the PiCoKV decode kernel: GQA=4, head_dim=128, bf16.
 from __future__ import annotations
 
 import array
+import bisect
 import contextlib
 import itertools
 import logging
@@ -390,6 +391,102 @@ _RADIX_CODES_CHECK = os.environ.get("PICOKV_RADIX_CODES_CHECK") == "1"
 
 def _round_up(x: int, m: int) -> int:
     return (int(x) + m - 1) // m * m
+
+
+def _kvp_seg(n: int) -> int:
+    """Segment the classic caching allocator creates for an n-byte block."""
+    if n <= (1 << 20):
+        return 2 << 20
+    if n < (10 << 20):
+        return 20 << 20
+    return -(-n // (2 << 20)) * (2 << 20)
+
+
+def _kvp_freed(acc, gen, n):
+    if gen == acc[2]:
+        acc[0] -= n  # into the current pool
+    else:
+        acc[1] += n  # into a dropped pool
+
+
+class _KVPool:
+    """PICOKV_KV_POOL: the caching-allocator pool of the full-capacity packed
+    buffers (and the radix hot tier). A live MemPool never returns its free
+    blocks, not to empty_cache and not to another allocation's out-of-memory
+    retry (use_on_oom lends only a block the request fits in). Batches of
+    prompts growing in length (each batch's buffers too big for the last
+    one's blocks) piled 40-53 GiB of them under the classic allocator and the
+    activations ran out of memory (NIAH, 16 rows per length). Past
+    PICOKV_KV_POOL_SLACK_MB of cached free bytes (confirmed by a pool
+    snapshot) the pool is replaced: dropping the old one releases its free
+    segments; its live buffers stay valid, and empty_cache releases them
+    once that many bytes are freed into dropped pools. Free bytes are
+    modeled without a snapshot: a block outside every known segment starts
+    a new one (sized as the allocator does), live bytes are tracked by
+    storage finalizers. Expandable segments are not modeled (off)."""
+
+    def __init__(self, slack: int):
+        self.pool = torch.cuda.MemPool(use_on_oom=True)
+        self.slack = slack
+        self.acc = [0, 0, 0]  # live bytes, bytes freed into dropped pools, generation
+        self.model = None if slack > 0 else False  # None: no block yet
+        self.bases, self.size, self.res = [], {}, 0
+        self.off, self.next, self.rotations = 0, slack, 0
+
+    def use(self):
+        return torch.cuda.use_mem_pool(self.pool)
+
+    def _sync(self, snap):
+        self.bases = sorted(s["address"] for s in snap)
+        self.size = {s["address"]: s["total_size"] for s in snap}
+        self.res = sum(self.size.values())
+
+    def track(self, *ts):
+        acc = self.acc
+        for t in ts:
+            if t is None:
+                continue
+            st = t.untyped_storage()
+            n = max(512, _round_up(st.nbytes(), 512))
+            acc[0] += n
+            weakref.finalize(st, _kvp_freed, acc, acc[2], n)
+            if self.model:
+                p, b = st.data_ptr(), self.bases
+                j = bisect.bisect_right(b, p) - 1
+                if j < 0 or p >= b[j] + self.size[b[j]]:
+                    bisect.insort(b, p)
+                    self.size[p] = s = _kvp_seg(n)
+                    self.res += s
+            elif self.model is None:
+                snap = self.pool.snapshot()
+                self.model = not any(s["is_expandable"] for s in snap)
+                if self.model:
+                    self._sync(snap)
+
+    def check(self):
+        """Eager, before an extend's first allocation."""
+        if not self.model:
+            return
+        acc = self.acc
+        if acc[1] > self.slack:
+            acc[1] = 0
+            torch.cuda.empty_cache()
+        if self.res - acc[0] + self.off <= self.next:
+            return
+        snap = self.pool.snapshot()
+        free = sum(s["total_size"] - s["allocated_size"] for s in snap)
+        self._sync(snap)
+        if free <= self.slack:
+            self.off = free - (self.res - acc[0])  # block rounding the model misses
+            self.next = max(self.slack, free + self.slack // 2)
+            return
+        self.pool = torch.cuda.MemPool(use_on_oom=True)  # the old one's free segments go
+        acc[0], acc[2] = 0, acc[2] + 1
+        self.bases, self.size, self.res = [], {}, 0
+        self.off, self.next = 0, self.slack
+        self.rotations += 1
+        logger.info(f"[PicoKVAttnBackend] KV pool replaced: {free / (1 << 30):.2f} GiB of "
+                    f"cached free blocks released ({self.rotations} so far)")
 
 
 def _pk_full(t):
@@ -1158,7 +1255,7 @@ class _ChunkStage:
             return
         ok = True
         try:
-            with (torch.cuda.use_mem_pool(self.hpool) if self.hpool is not None
+            with (self.hpool.use() if self.hpool is not None
                   else contextlib.nullcontext()):
                 for p in made:
                     hot[p][0] = torch.empty((self.L, self.BLK, 2, self.H, self.D),
@@ -1168,6 +1265,8 @@ class _ChunkStage:
                                                 dtype=torch.int64, device=self.dev)
                         hot[p][5] = torch.empty((self.L, self.H, self.BLK, self.code[3]),
                                                 dtype=torch.int64, device=self.dev)
+                    if self.hpool is not None:
+                        self.hpool.track(hot[p][0], hot[p][4], hot[p][5])
         except RuntimeError:
             ok = False
         if self.sync is not None:
@@ -2710,11 +2809,12 @@ class PicoKVAttnBackend(AttentionBackend):
         # blocks the extend's activations just freed, and the remainders no
         # later activation or buffer fits pile up (~25% of every long prompt's
         # buffers at 120k). use_on_oom: the pool's cached free blocks serve
-        # other allocations as a last resort.
+        # other allocations as a last resort. _KVPool bounds those blocks.
         self._kvpool = None
         if self._prealloc and os.environ.get("PICOKV_KV_POOL", "1") == "1":
             try:
-                self._kvpool = torch.cuda.MemPool(use_on_oom=True)
+                self._kvpool = _KVPool(
+                    int(float(os.environ.get("PICOKV_KV_POOL_SLACK_MB", "2048")) * (1 << 20)))
             except Exception:  # no MemPool (older torch): the default pool
                 self._kvpool = None
         self._fused_append = os.environ.get("PICOKV_FUSED_APPEND", "1") == "1"
@@ -3425,9 +3525,11 @@ class PicoKVAttnBackend(AttentionBackend):
             KS, zq = glen, 0
         else:
             pool = self._kvpool if not torch.cuda.is_current_stream_capturing() else None
-            with torch.cuda.use_mem_pool(pool) if pool is not None else contextlib.nullcontext():
+            with pool.use() if pool is not None else contextlib.nullcontext():
                 pka = torch.empty((1, H, KW, cap), dtype=torch.int64, device=dev)
                 pv = torch.empty((1, H, cap // 64, CV), dtype=torch.int64, device=dev)
+            if pool is not None:
+                pool.track(pka, pv)
             pka._pk_full = pv._pk_full = True
             KS, zq = cap, triton.cdiv(cap - glen, 64)
         dw = torch.empty((2, H, sink + local, D), dtype=dt, device=dev)
@@ -3636,9 +3738,10 @@ class PicoKVAttnBackend(AttentionBackend):
                 continue
             _, H, KW, _ = pk.shape
             if pool is not None:
-                with torch.cuda.use_mem_pool(pool):
+                with pool.use():
                     kf = alloc(1, H, KW, cap, dtype=pk.dtype, device=pk.device)
                     vf = alloc(1, H, cap // 64, int(pv.shape[-1]), dtype=pv.dtype, device=pv.device)
+                pool.track(kf, vf)
             else:
                 kf = alloc(1, H, KW, cap, dtype=pk.dtype, device=pk.device)
                 vf = alloc(1, H, cap // 64, int(pv.shape[-1]), dtype=pv.dtype, device=pv.device)
@@ -3704,6 +3807,8 @@ class PicoKVAttnBackend(AttentionBackend):
                     b.setdefault("stale", set()).update(sl)
             self._prune_finished(rids)
             self._release_dead(rids)
+            if self._kvpool is not None and not torch.cuda.is_current_stream_capturing():
+                self._kvpool.check()
         # extend_prefix_lens > 0 marks a chunked-prefill continuation: the
         # request already holds its prefix's compressed cache.
         if not self._ext_fast:
