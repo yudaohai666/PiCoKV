@@ -267,7 +267,9 @@ configuration.
 | `PICOKV_FILL_GROUP_MB` | `512` | Per-row storage: a rebuild or slot change fills its new rows in layer groups, each allocating at most this many MB of new row storage before those layers' request copies are freed, so new long rows never hold two copies of every layer at once (16 new 120k rows in one group needed +38 GB) |
 | `PICOKV_ROWS_SHARE_CAP` | `2048` | Per-row storage: rows of the same capacity `<=` this many tokens share one buffer per side per 16 rows, across all layers (fewer allocations when many short rows join: about 2 tensors per new short row instead of 2 per row and layer; a survivor pins at most 15 other short rows) |
 | `PICOKV_PREALLOC` | `1` | With dedup and the fast prepare: at a long request's first compressed chunk, each compressed layer's packed codes move into one key and one value buffer at the capacity its decode row will need (the whole prompt, from the scheduler's `orig_seq_lens`, plus the window catch-up and slide headroom, rounded up to 512 tokens); the request cache holds prefix views of them. Later chunks append their codes in place (no regrown copy per chunk and layer), and the decode batch adopts the buffers as the row's storage (per-row storage, the one-row rectangle and in-place slot changes: no copy, no free). Requests up to `PICOKV_ROWS_SHARE_CAP` tokens keep the old path (short rows share decode storage); prompts up to `sink + local` stay dense as before and compress once they reach that length. Same codes and kernels: bitwise (unit tests: chunk sizes not multiples of 64, many chunks, dense and short requests, decode batch changes, re-added rows, late joins, several slide epochs; greedy engine runs with `PICOKV_DET=1` identical to `0` at chunk 2048 and 8192). Prefill at SGLang's default chunk size 1.3-2.6% faster on 32k-120k prompts; decode within 0.2%. `0` = grow a copy per chunk (previous behavior) |
-| `PICOKV_KV_POOL` | `1` | With `PICOKV_PREALLOC`: the full-capacity buffers come from their own PyTorch caching-allocator pool (`torch.cuda.MemPool(use_on_oom=True)`), outside graph capture. Allocated mid-forward from the default pool they carve the blocks the extend's activations just freed, and the remainders that no later activation or buffer fits pile up (reserved minus allocated grew about 5 GB per million prompt tokens). The pool's cached free blocks still serve other allocations as a last resort. Needs torch with `MemPool` (otherwise the default pool). See the memory capacity table. `0` = default pool |
+| `PICOKV_KV_POOL` | `1` | With `PICOKV_PREALLOC`: the full-capacity buffers come from their own PyTorch caching-allocator pool (`torch.cuda.MemPool(use_on_oom=True)`), outside graph capture. Allocated mid-forward from the default pool they carve the blocks the extend's activations just freed, and the remainders that no later activation or buffer fits pile up (reserved minus allocated grew about 5 GB per million prompt tokens). The pool's cached free blocks still serve other allocations as a last resort. A live pool never returns its free blocks (not to `empty_cache`, not to another allocation's out-of-memory retry), so batches of prompts growing in length piled 40-53 GiB of them under the classic allocator and the activations ran out of memory (NIAH, 16 rows per length); past `PICOKV_KV_POOL_SLACK_MB` of cached free bytes the pool is replaced (the old one's live buffers stay valid; its free segments are released). Needs torch with `MemPool` (otherwise the default pool). See the memory capacity table. `0` = default pool |
+| `PICOKV_KV_POOL_SLACK_MB` | `2048` | Cached free bytes of the `PICOKV_KV_POOL` pool (modeled from its segments and the live buffers, confirmed by a pool snapshot) past which the pool is replaced. Classic allocator, NIAH 4k-128k x 16 rows: no out-of-memory (peak 54.7 / 58.7 GiB per shard), 98.35 vs flashinfer 98.12. `0` = never replace |
+| `PICOKV_KV_POOL_ARENA_MB` | `256` | With `PICOKV_KV_POOL` and a slack above 0: the classic allocator gives a block of 10 MiB or more its own segment rounded up to 2 MiB (smaller blocks share 20 MiB segments), so a 32,768-token prompt's 10.31 MiB key and value buffers held 12 MiB each. Before a full-capacity buffer pair that the newest arena's free tail does not fit, one block of about this size (a whole number of pairs) is cached in the pool, and the pairs are carved from it back to back. Only for pairs whose own segments would leave at least 2% unused: at 24 x 122,880 (0.5% unused) the arena's cached tail raised the peak by 76 MiB. Memory layout only: bitwise (ERA ruler `det_exact` 1.0), ITL and chunked TTFT within 0.3% on one GPU. Peak at 96 x 32,768: 77.3 -> 68.7 GiB; 48 x 65,536: 73.9 -> 71.2 GiB; 24 x 120,000: 72.9 -> 71.5 GiB; same concurrency and time. `0` = one segment per buffer |
 | `PICOKV_PREALLOC_MAX_TOKENS` | `16384` | `PICOKV_PREALLOC` only in extends of at most this many tokens (chunked prefill; SGLang's default chunk on this GPU is 8192). A larger extend (chunking off, or a larger chunk size) keeps the previous path, whose decode batch builds the row capacity after the extend from its freed activations: there the buffers would be allocated while the extend's activations peak (`chunked_prefill_size=1 << 20`, 8000 x 16, three prompts per extend: peak +0.6 GB, +1.0 GB with the pool; 32k x 8: +0.8 GB with the pool). A request whose first chunk lands in such an extend runs exactly as with `PICOKV_PREALLOC=0` |
 | `PICOKV_FI_NOSYNC` | `1` | FlashInfer decode re-plan without the device-to-host sync (`fast_decode_plan`); only used when FA3 is off |
 | `PICOKV_GRAPHS` | `1` | Per-layer CUDA-graph replay (`PICOKV_GRAPH_WARMUP=3`). A batch that captures more than its budget (signature churn: 160, or 16 per layer with the slide) runs eager; recaptures forced by a schedule, pool or FA3-metadata reallocation (e.g. a one-row batch's schedule grows every ~2 x `PICOKV_SLIDE_HEADROOM` generated tokens) are not charged to it. A failed capture runs that batch eager; three failures in a row (a successful capture resets the count) turn graphs off for 1, 2, 4, ... 32 minutes, after which the next batch change (a rebuild or an in-place slot change) re-arms them |
@@ -282,6 +284,11 @@ configuration.
 | `PICOKV_NO_TC` | unset | `1` uses the popc tail instead of the tensor-core tail |
 | `PICOKV_QQ_WARP` | `1` | Decode query quantize + bit-plane pack with one warp per row (ballot-packed planes; bitwise the old kernel's codes, 0.80 -> 0.29 ms per step at 160 rows over 32 layers). Needs an extension rebuilt from this tree. `0` = old one-thread-per-word kernel |
 | `PICOKV_TAIL_QUANT` | `1` | Shared tail without the query prep op: the Triton query projection also zeroes the tail accumulators, and each tensor-core tail block quantizes and bit-packs its 4 query heads itself from the bf16 projected query (`picokv_decode_tail_global_q_fn`). Bitwise the prep op's codes; one launch fewer per layer. Used only for tail grids of `<= PICOKV_TAIL_QUANT_BLOCKS` (`1024`) blocks (schedule entries x kv heads): every block pays the quantizer, which past about 2 waves of blocks costs more than the launch it saves (8 rows x 32k: +9.8 us per layer), so long contexts keep the prep op. Not with `PICOKV_DET`. Needs an extension rebuilt from this tree. `0` = prep op always |
+| `PICOKV_QPROJ_QUANT` | `1` | Above the `PICOKV_TAIL_QUANT` gate (long contexts) the prep op (quantize + bit-pack the projected query, zero the tail accumulators) runs inside the Triton query projection launch (`shared_proj.shared_query_projection_quant`) instead of as its own launch. On the forked dense branch the separate prep op launched behind FA3, which fills every SM, and finished only as FA3 did, so the tail waited on it. Bitwise the prep op's codes, scales and zeroed buffers (272 cases: 1-8 kv heads, groups 1-8, up to 32 rows, strided / zero / outlier queries). Only for one decode token, bf16, `B x group <= PICOKV_QPROJ_QUANT_ROWS`; not with `PICOKV_DET`. `0` = separate prep op |
+| `PICOKV_QPROJ_QUANT_ROWS` | `32` | Largest `B x group` (query rows per kv head) for `PICOKV_QPROJ_QUANT`: each program (16 rows x 64 columns) recomputes the row max over all columns, which past ~32 rows costs more than the separate op (64 rows: 13.0 vs 7.4 us) |
+| `PICOKV_WIN_TRITON` | `1` | With FA3 and the forked dense branch (`PICOKV_GRAPH_FORK`): the dense-window attention of a batch of `<= PICOKV_WIN_TRITON_MAX_BS` rows (window pools up to 2048 tokens) runs as Triton kernels (`picokv_standalone/window_attn.py`, one program per row and kv head) instead of FA3. The fork launches the log-sum-exp kernel first (all the tail needs to merge), the tail waits only for it, and the window output kernel runs on the dense stream under the tail; the value projection joins both. Not bitwise FA3: fp32 accumulation with P = exp(s - row max) as FA3 (the row max is stored by the LSE kernel, `B x heads` floats), mean absolute error against an fp64 reference 1.03x FA3's (median over shapes), same max error. Never with `PICOKV_DET` (keeps FA3 and its order). Gain with `PICOKV_QPROJ_QUANT` (ERA run, ms/step, before -> both): 32768x8 9.86 -> 9.47, 122880x1 8.22 -> 7.86, 512x1 unchanged. `0` = FA3 |
+| `PICOKV_WIN_TRITON_MAX_BS`, `PICOKV_WIN_SPLIT_MAX_BS` | `16`, `16` | Largest batch for the Triton window; forked batches up to `PICOKV_WIN_SPLIT_MAX_BS` rows split it into the LSE and output kernels (larger: the one-pass kernel, joined before the tail) |
+| `PICOKV_WIN_TRITON_SERIAL`, `PICOKV_WIN_TRITON_PDL` | `0`, `1` | `PICOKV_WIN_TRITON_SERIAL=1` also uses the one-pass Triton window on the serial path (off: 512x1 measured 6.59 ms/token vs FA3 6.52), there as a programmatic dependent of the append when `PICOKV_WIN_TRITON_PDL=1` |
 | `PICOKV_PDL` | `1` | Programmatic dependent launch (sm_90, Triton with `gdc_wait`) in the per-layer decode graph. On the fused-quantizer path (`PICOKV_TAIL_QUANT`, serial graph) the layer runs query projection -> append -> FA3 -> tail -> value projection: the query projection triggers the append's early launch at its entry (the append reads nothing it writes and waits for it before exiting, so FA3 starts after both), and the value projection launches as a dependent of the tail and waits for it before any access. On the other paths only the value projection is a dependent launch. Same kernels and arithmetic: bitwise the serial order's outputs (300 graph replays with fresh inputs at 1-160 rows). FA3 with scheduler metadata cannot be launched as a dependent, and an early trigger inside the tail measured +1.6-3% per step at 4-16 rows, so the tail does not trigger. Gain: -0.7 to -0.8% per step at 512 x 1 / 4096 x 4, neutral (within 0.1%) from 8k x 16 up. Both launch variants of each Triton kernel are compiled on the first eager decode call (the per-layer graphs capture with no eager step before them). `0` = serial order, no PDL |
 | `PICOKV_TC_SCHED_SPLIT` | auto | Tensor-core tail on a schedule table (slot mode, per-row storage): below 2 blocks per SM (entries x kv heads < 2 x SM count, 264 on H100) each 512-token entry runs as 2 one-tile blocks, the width the unscheduled grid already picks for small grids (global kernel, 1 row x 1k compressed tokens: 7.5 -> 5.0 us per layer). The float atomics then add 2 partials per entry instead of 1 (last-bit differences, like any tile split). `1` always, `0` never |
 | `PICOKV_COMPOSE` | `1` | Composed decode replay (breakable decode graph, needs `cuda-python` and the patched `breakable_cuda_graph.py`): a decode step whose 32 layer breaks all replay an existing per-layer graph runs SGLang's 33 graph segments and those 32 graphs as one composed CUDA graph (child-graph nodes in order) instead of 65 graph launches; the layer boundaries' launch gaps go away. The layers' eager step work (step begin, slide merge / quantize / regrow) touches only picokv state and is enqueued before the launch. A set of graphs is composed after it repeats on two consecutive steps; a step that captures, rebuilds or runs a layer eagerly replays in order as before (a fixed batch composes every step after warm-up; 160 concurrent mixed-length requests: 80% of steps compose, 19% replay in order around captures, rebuilds and slot changes). Same kernels in the same dependency order: bitwise (greedy engine runs with `PICOKV_DET=1` give identical tokens at 1-16 rows, dense -> slide, compressed prefixes, staggered finishes). Device memory: one composed exec per graph bucket, at most 2 kept (about 2-3 MiB each; measured peak +4 to +6 MiB at fixed batches, +14 MiB at 160 concurrent requests; KV pool unchanged); host: the raw graphs are kept. Gain (Llama-3.1-8B-Instruct, sm_90, graph decode): -1.2 to -2.0% per step (512x1 6.67 -> 6.58 ms, 8192x16 8.66 -> 8.56, 122880x1 8.37 -> 8.25). `0` = per-graph replay |
@@ -303,25 +310,25 @@ its best mode, the full decode graph.
 
 | Prompt | Batch | picokv | flashinfer |
 |---|---|---|---|
-| 512 | 1 | 6.51 | 6.17 |
+| 512 | 1 | 6.52 | 6.25 |
 | 4096 | 4 | 7.05 * | 7.12 |
 | 8k | 1 | 7.04 * | 6.62 * |
-| 8k | 16 | 8.41 | 11.85 |
-| 32k | 8 | 9.76 | 17.31 |
-| 64k | 4 | 9.69 | 17.25 |
-| 120k | 1 | 8.10 | 11.39 |
-| 120k | 2 | 9.57 | 16.59 |
+| 8k | 16 | 8.36 | 12.03 |
+| 32k | 8 | 9.36 | 17.34 |
+| 64k | 4 | 9.25 | 17.30 |
+| 120k | 1 | 7.73 | 11.46 |
+| 120k | 2 | 9.17 | 16.65 |
 | 120k | 16 | 25.45 ** | does not fit (max 2 concurrent: 16.30) |
 
-The unstarred rows come from one serial run on one idle GPU
-(`ITL_REPS=3 ITL_WARM_LEN=1024`, 128 generated tokens), picokv with and without
-`PICOKV_PREALLOC` and flashinfer interleaved per shape (with vs without: within
-0.15% at every shape). The benchmark prefills without chunking, so these
-extends exceed `PICOKV_PREALLOC_MAX_TOKENS` (512 x 1: below the share cap) and
-the default takes the path without; the table lists that run. The 512 x 1,
-8k x 16, 32k x 8 and 120k x 1 rows are from a later serial run with the band
-quantizer (`PICOKV_FIXED_BAND`), the previous build and flashinfer interleaved
-per shape (previous build: 6.53 / 8.44 / 9.78 / 8.12 ms, same memory).
+The unstarred rows come from one serial run on one GPU with no other compute
+process (`ITL_REPS=3 ITL_WARM_LEN=1024`, 128 generated tokens, SGLang's classic
+allocator), picokv and flashinfer interleaved per shape, with the fused
+long-context query quantizer (`PICOKV_QPROJ_QUANT`) and the Triton split window
+(`PICOKV_WIN_TRITON`). The previous build in the same harness read 6.50 / 8.51
+/ 9.74 / 9.70 / 8.12 / 9.59 ms (flashinfer within 1%), same memory. The
+benchmark prefills without chunking, so these extends exceed
+`PICOKV_PREALLOC_MAX_TOKENS` (512 x 1: below the share cap) and the default
+takes the path without.
 * an earlier run (previous code version).
 ** 1024 generated tokens, `mem_fraction_static=0.70` (earlier code: 26.76);
 with 128 tokens at 0.9 it reads 28.37 ms (the shorter run weighs the first
@@ -445,28 +452,38 @@ output is identical across runs.
 Memory capacity (`scripts/serving/bench_capacity.py`: N random prompts of
 one length submitted at once, SGLang's default chunked prefill (8192) and its
 default CUDA allocator (no `expandable_segments`), no radix cache,
-`mem_fraction_static=0.9`, 256 generated tokens each). "Concurrent" is the
-largest `#running-req` the scheduler logged; peak is the GPU's memory over the
-run (nvidia-smi); time is the whole run, all N requests:
+`mem_fraction_static=0.9`, `max_running_requests=N`, 256 generated tokens each
+unless noted). "Concurrent" is the largest `#running-req` the scheduler logged;
+peak is the GPU's memory over the run (nvidia-smi); time is the whole run, all
+N requests:
 
 | Prompt | N | picokv pool (tokens) | picokv concurrent | picokv peak | picokv time | flashinfer pool | flashinfer concurrent | flashinfer peak | flashinfer time |
 |---|---|---|---|---|---|---|---|---|---|
-| 32k | 96 | 2.33M | 72 | 70.2 GiB | 131 s | 456k | 14 | 74.4 GiB | 188 s |
-| 64k | 48 | 2.57M | 39 | 70.5 GiB | 171 s | 456k | 7 | 74.3 GiB | 263 s |
-| 120k | 24 | 2.69M | 22 | 72.9 GiB | 228 s | 456k | 3 | 74.3 GiB | 374 s |
+| 122,880 | 24 | 2.69M | 21 | 69.4 GiB | 233 s | 456k | 3 | 74.3 GiB | 390 s |
+| 65,536 | 48 | 2.57M | 39 | 71.2 GiB | 176 s | 456k | 6 | 74.3 GiB | 273 s |
+| 32,768 | 96 | 2.33M | 70 | 68.7 GiB | 136 s | 456k | 13 | 74.3 GiB | 194 s |
+| 8,192 | 256 | 1.52M | 180 | 67.1 GiB | 70 s | 456k | 53 | 74.5 GiB | 88 s |
+| 512, 4096 generated | 256 | 1.52M | 256 | 67.4 GiB | 88 s | 456k | 98 | 74.5 GiB | 205 s |
+| 512 | 512 | 1.43M | 274 | 44.4 GiB | 15.4 s | 456k | 512 | 75.0 GiB | 13.6 s |
 
-picokv admits 5.1-7.3x as many long requests and finishes the batch 1.4-1.6x
-sooner. Before `PICOKV_PREALLOC` this allocator ran out of memory at 64k x 48
-and 120k x 24 (holes left by the per-chunk regrown copies: up to 10 GiB
-reserved but unallocated) and 32k x 96 peaked at 78.3 GiB; with
-`expandable_segments:True` those runs peaked at 75.3-78.5 GiB, now 69.9-71.1
-GiB. Both backends stop at their token pool (picokv usage 0.98-1.00, the pool
-depends slightly on `max_running_requests`, which picokv reserves per row;
-flashinfer 0.98, at 120k 0.79: a fourth prompt does not fit) and every request
-completes, without an out-of-memory error. flashinfer's peak is its
-preallocated pool. picokv's pool is an accounting budget (about 23 KB per
-token over 32 layers vs 128 KB of bf16 K/V) and its peak is what the rows
-actually hold.
+picokv admits 5.4-7x as many 32k-120k requests and finishes the batch 1.4-1.7x
+sooner; 8k x 256 runs 3.4x as many rows (1.26x sooner), and 512-token prompts
+generating 4096 tokens 2.6x (2.3x sooner: flashinfer's pool holds 98 such
+rows). 512 x 512 is the one shape where picokv is slower: it caps
+`max_running_requests` at 274 at this memory fraction (each request reserves
+its decode row's dense window and packed headroom, at most half of the KV
+budget), flashinfer runs all 512 at once. In the 8k-120k rows both backends
+stop at their token pool (picokv usage 0.96-1.00; flashinfer 0.81-0.98: the
+next whole prompt does not fit). Every request completes, without an
+out-of-memory error. flashinfer's peak is its preallocated pool. picokv's pool is an
+accounting budget (about 23 KB per token over 32 layers vs 128 KB of bf16 K/V)
+and its peak is what the rows actually hold. Before `PICOKV_KV_POOL_ARENA_MB`
+96 x 32,768 peaked at 77.3 GiB, above flashinfer (12 MiB segments under
+10.31 MiB buffers), 48 x 65,536 at 73.9 GiB and 24 x 120,000 at 72.9 GiB (now
+71.5 GiB); 122,880-token buffers fill their segments (unchanged). Before
+`PICOKV_PREALLOC` this allocator ran out of memory at 64k x 48 and 120k x 24
+(holes left by the per-chunk regrown copies: up to 10 GiB reserved but
+unallocated).
 
 Mixed-length decode batch (`PICOKV_ROWS`): one 122,739-token NIAH prompt and
 N MATH-500 prompts in one `generate` call (`mem_fraction_static=0.9`,
