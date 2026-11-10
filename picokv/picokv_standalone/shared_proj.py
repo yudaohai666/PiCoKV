@@ -22,6 +22,10 @@ try:  # programmatic dependent launch (sm90+, Triton >= 3.4)
 except ImportError:
     gdc_launch_dependents = gdc_wait = None
     PDL_OK = False
+try:
+    from triton.language.extra import libdevice
+except ImportError:  # older Triton
+    from triton.language.extra.cuda import libdevice
 
 
 @triton.jit(do_not_specialize=["R"])  # one variant for every batch size
@@ -56,6 +60,60 @@ def _qproj_kernel(q_ptr, p_ptr, o_ptr, R, sqb, sqh, QH: tl.constexpr, G: tl.cons
                  mask=rm[:, None] & nm[None, :])
         if tl.program_id(2) == 0:
             tl.store(zd_ptr + row, tl.zeros((BM,), dtype=tl.float32), mask=rm)
+
+
+@triton.jit(do_not_specialize=["R"])  # one variant for every batch size
+def _qproj_quant_kernel(q_ptr, p_ptr, o_ptr, pk_ptr, qs_ptr, zc_ptr, zd_ptr, R, sqb, sqh,
+                        QH: tl.constexpr, G: tl.constexpr, D: tl.constexpr,
+                        C: tl.constexpr, BM: tl.constexpr, BK: tl.constexpr,
+                        CPP: tl.constexpr):
+    # _qproj_kernel (BK-column chunks of one D-wide dot each) plus the prep
+    # op (picokv_quantize_pack_zero_projected_query) in the same launch, its
+    # arithmetic bit for bit: scale = max(max|bf16 o|, 2^-23) / 127 (IEEE
+    # division), v = clamp(rint(o / scale), +-127), per 64 columns 8 int64
+    # bit-plane words (plane 0: v < 0; plane p: bit p-1 of |v|; bit j:
+    # column kb*64 + j), written here as their little-endian bytes (pk_ptr:
+    # the packed buffer as uint8); zeroes the tail accumulators code[row, :C]
+    # (Cv == C) / den[row]. Program (h, rows, z) owns chunks z*CPP.. and
+    # computes the row max over all of them (the dots are cheap).
+    h = tl.program_id(0)
+    z = tl.program_id(2)
+    r = tl.program_id(1) * BM + tl.arange(0, BM)
+    rm = r < R
+    b, hq = r // G, h * G + r % G
+    row = b * QH + hq
+    d = tl.arange(0, D)
+    j = tl.arange(0, BK)
+    q = tl.load(q_ptr + (b * sqb + hq * sqh)[:, None] + d[None, :], mask=rm[:, None], other=0.0)
+    m = tl.zeros((BM, BK), dtype=tl.float32)
+    for kb in tl.static_range(C // BK):
+        p = tl.load(p_ptr + h * D * C + d[:, None] * C + (kb * BK + j)[None, :])
+        x = tl.dot(q, p).to(o_ptr.dtype.element_ty).to(tl.float32)
+        m = tl.maximum(m, tl.abs(x))
+    scale = libdevice.div_rn(tl.maximum(tl.max(m, axis=1), 1.1920928955078125e-7), 127.0)
+    if z == 0:
+        tl.store(qs_ptr + row, scale, mask=rm)
+        tl.store(zd_ptr + row, tl.zeros((BM,), dtype=tl.float32), mask=rm)
+    pl = tl.arange(0, 8)[None, :, None, None]
+    sh = tl.maximum(pl - 1, 0)
+    jj = tl.arange(0, 8)[None, None, None, :]
+    kk = tl.arange(0, 8)
+    for c in tl.static_range(CPP):
+        kb = z * CPP + c
+        n = kb * BK + j
+        p = tl.load(p_ptr + h * D * C + d[:, None] * C + n[None, :])
+        xo = tl.dot(q, p).to(o_ptr.dtype.element_ty)
+        tl.store(o_ptr + row[:, None] * C + n[None, :], xo, mask=rm[:, None])
+        tl.store(zc_ptr + row[:, None] * C + n[None, :], tl.zeros((BM, BK), dtype=tl.float32),
+                 mask=rm[:, None])
+        v = libdevice.rint(libdevice.div_rn(xo.to(tl.float32), scale[:, None]))
+        v = tl.minimum(tl.maximum(v, -127.0), 127.0).to(tl.int32)
+        v4 = tl.reshape(v, (BM, 1, BK // 8, 8))  # [row, -, byte k, bit jj]
+        a4 = tl.abs(v4)
+        bit = tl.where(pl == 0, (v4 < 0).to(tl.int32), (a4 >> sh) & 1)
+        byte = tl.sum(bit << jj, axis=3)  # [row, plane, k]; disjoint bits: sum == or
+        off = ((row * (C // BK) + kb) * 8)[:, None, None] + tl.arange(0, 8)[None, :, None]
+        tl.store(pk_ptr + off * 8 + kk[None, None, :], byte.to(tl.uint8), mask=rm[:, None, None])
 
 
 @triton.jit(do_not_specialize=["R"])  # one variant for every batch size
@@ -187,7 +245,44 @@ def shared_query_projection(query, key_projection_t, out, zero=None, pdl=False):
           _qproj_tiles, out, launch)
     _warm(("qz", QH, G, D, C, q.device.index), (cfg, pdl) if zc is not None else None,
           _qproj_tiles, out, launch_z)
+    # and the fused prep variant (shared_query_projection_quant), which a
+    # batch first reaches at a recapture (the tail grid outgrew the gate)
+    if C % 64 == 0:
+        def launch_qq(c, o, p):
+            if p:
+                return
+            f32 = dict(dtype=torch.float32, device=o.device)
+            _qproj_quant_kernel[(1, 1, 1)](
+                q, P, o, torch.empty(o.shape[:-1] + (C // 64, 8), dtype=torch.int64,
+                                     device=o.device).view(torch.uint8),
+                torch.empty(o.shape[:-1], **f32), torch.empty(o.shape, **f32),
+                torch.empty(o.shape[:-1], **f32), B * G, q.stride(0), q.stride(1),
+                QH=QH, G=G, D=D, C=C, BM=16, BK=64, CPP=1, num_warps=4)
+
+        _warm(("qq", QH, G, D, C, q.device.index), None, lambda b: (16, 64, 1), out, launch_qq)
     launch(cfg, out, pdl, (KVH, triton.cdiv(B * G, cfg[0]), triton.cdiv(C, cfg[1])), zc, zd)
+    return out
+
+
+def shared_query_projection_quant(query, key_projection_t, out, packed, query_scale,
+                                  code, den):
+    """shared_query_projection then the prep op (quantize + pack ``out``
+    into ``packed`` [B,QH,1,C/64,8] int64 / ``query_scale`` [B,QH,1] fp32,
+    zero ``code`` [B,QH,1,C] / ``den`` [B,QH,1]) as one launch, bitwise
+    both. On the forked dense branch the prep op, launched after the
+    projection, waited for FA3 to free the SMs; this kernel runs before it."""
+    B, QH, _, D = query.shape
+    P = key_projection_t[0]
+    KVH, C = int(P.shape[0]), int(P.shape[-1])
+    G = QH // KVH
+    q = query if query.stride(-1) == 1 else query.contiguous()
+    # one 64-column chunk per program (CPP=1, 4 warps; B=8 4.6 us vs 5.1 for
+    # projection + prep op, B=1 5.5 vs 4.8; past 32 rows the pair is faster)
+    BM, CPP = 16, 1
+    _qproj_quant_kernel[(KVH, triton.cdiv(B * G, BM), C // 64 // CPP)](
+        q, P, out, packed.view(torch.uint8), query_scale, code, den, B * G,
+        q.stride(0), q.stride(1), QH=QH, G=G, D=D, C=C, BM=BM, BK=64, CPP=CPP,
+        num_warps=4)
     return out
 
 

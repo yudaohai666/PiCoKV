@@ -169,7 +169,46 @@ __global__ void __launch_bounds__(256, MinBlocksPerSm) picokv_v1_expbits_atomic2
   const int g = lane_idx >> 2;    // mma groupID
   const int tig = lane_idx & 3;   // mma thread-in-group
 
+  // Every block-constant global load is issued here at once, so the prolog
+  // waits one load latency instead of a dependent chain (lengths -> row
+  // tables -> cp.async -> query words) while warps 2-7 sit at the barrier.
   const int L_b = (global_lens != nullptr) ? global_lens[B_idx] : L;
+  const int L_row = (row_cap != nullptr) ? row_cap[B_idx] : L;  // key row stride
+  const long long row_k = (row_cap != nullptr) ? row_kptr[B_idx] : 0ll;
+  const long long row_v = (row_cap != nullptr) ? row_vptr[B_idx] : 0ll;
+  unsigned int q_words[kQMagBits + 1];  // packed path: sign, then magnitude planes
+  float q_scale_raw = 0.0f;
+  float q_lse = 0.0f;
+  float q_x[PlaneSegs];                 // fused path: the head's bf16 query
+  if constexpr (FusedQ) {
+    if (warp_idx < GroupSize) {
+      const long qrow = (long)(B_idx * QH + qh_base + warp_idx) * S + S_idx;
+      const __nv_bfloat16 *__restrict__ src = proj_query + qrow * (KB * 64) + lane_idx;
+      #pragma unroll
+      for (int t = 0; t < PlaneSegs; t++) {
+        q_x[t] = __bfloat162float(src[t << 5]);
+      }
+      if (lane_idx == 0) {
+        q_lse = dense_lse[qrow];
+      }
+    }
+  } else {
+    if (thread_idx < GroupSize * 16 && (thread_idx & 15) < PlaneSegs) {
+      const int seg = thread_idx & 15;
+      const int qh = qh_base + (thread_idx >> 4);
+      const unsigned int *__restrict__ q32 = reinterpret_cast<const unsigned int *>(packed_projected_query) +
+        ((((long)(B_idx * QH + qh) * S + S_idx) * KB + (seg >> 1)) * 8) * 2 + (seg & 1);
+      #pragma unroll
+      for (int p = 0; p <= kQMagBits; p++) {
+        q_words[p] = q32[2 * p];
+      }
+    }
+    if (thread_idx < GroupSize) {
+      const long lse_idx = (long)(B_idx * QH + qh_base + thread_idx) * S + S_idx;
+      q_scale_raw = query_scale_numel == 1 ? query_scale[0] : query_scale[lse_idx];
+      q_lse = dense_lse[lse_idx];
+    }
+  }
   if (part_rs != nullptr && tile_block_idx == 0 && S_idx == 0 && BKVH_idx == 0 && thread_idx == 0) {
     part_rs[B_idx] = _sched_bx;
   }
@@ -191,13 +230,12 @@ __global__ void __launch_bounds__(256, MinBlocksPerSm) picokv_v1_expbits_atomic2
   // thread) when transposed, else the tile's contiguous [token][kb] words;
   // values are the tile's contiguous [group][code] words.
   const long kv_head = (long)(B_idx * KVH + KVH_idx);
-  const int L_row = (row_cap != nullptr) ? row_cap[B_idx] : L;  // key row stride
   const int LG_row = (row_cap != nullptr) ? (L_row >> 6) : LGroups;
   const long *__restrict__ key_src =
-      ((row_cap != nullptr) ? reinterpret_cast<const long *>(row_kptr[B_idx]) + (long)KVH_idx * L_row * KB
+      ((row_cap != nullptr) ? reinterpret_cast<const long *>(row_k) + (long)KVH_idx * L_row * KB
                             : packed_key + kv_head * L * KB) + thread_idx;
   const long *__restrict__ value_src =
-      ((row_cap != nullptr) ? reinterpret_cast<const long *>(row_vptr[B_idx]) + (long)KVH_idx * LG_row * CvT
+      ((row_cap != nullptr) ? reinterpret_cast<const long *>(row_v) + (long)KVH_idx * LG_row * CvT
                             : packed_value_sign + kv_head * LGroups * CvT) + thread_idx;
   const int group_end = min(LG_row, (L_b + 63) >> 6);  // groups holding a token < L_b
   // Keys of `tile` with token < L_b.
@@ -246,13 +284,10 @@ __global__ void __launch_bounds__(256, MinBlocksPerSm) picokv_v1_expbits_atomic2
     // packed path's ripple-carry T = (M ^ S) + S — and query_sum is sum v.
     if (warp_idx < GroupSize) {
       const int hrel = warp_idx;
-      const long qrow = (long)(B_idx * QH + qh_base + hrel) * S + S_idx;
-      const __nv_bfloat16 *__restrict__ src = proj_query + qrow * (KB * 64) + lane_idx;
-      float x[PlaneSegs];
+      const float *x = q_x;
       float local_max = 0.0f;
       #pragma unroll
       for (int t = 0; t < PlaneSegs; t++) {
-        x[t] = __bfloat162float(src[t << 5]);
         local_max = fmaxf(local_max, fabsf(x[t]));
       }
       #pragma unroll
@@ -283,7 +318,7 @@ __global__ void __launch_bounds__(256, MinBlocksPerSm) picokv_v1_expbits_atomic2
       if (lane_idx == 0) {
         query_sum[hrel] = vsum;
         scale_cache[hrel] = row_scale * attention_scale;
-        lse_cache[hrel] = dense_lse[qrow];
+        lse_cache[hrel] = q_lse;
       }
     }
   } else {
@@ -292,14 +327,11 @@ __global__ void __launch_bounds__(256, MinBlocksPerSm) picokv_v1_expbits_atomic2
     const int seg = thread_idx & 15;
     int part = 0;
     if (seg < PlaneSegs) {
-      const int qh = qh_base + hrel;
-      const unsigned int *__restrict__ q32 = reinterpret_cast<const unsigned int *>(packed_projected_query) +
-        ((((long)(B_idx * QH + qh) * S + S_idx) * KB + (seg >> 1)) * 8) * 2 + (seg & 1);
-      const unsigned int sign = q32[0];
+      const unsigned int sign = q_words[0];
       unsigned int carry = sign;  // +1 on negated dimensions
       #pragma unroll
       for (int plane = 0; plane < kQMagBits; plane++) {
-        const unsigned int x = q32[2 * (plane + 1)] ^ sign;
+        const unsigned int x = q_words[plane + 1] ^ sign;
         const unsigned int t = x ^ carry;
         carry &= x;
         query_planes[hrel][plane][seg] = t;
@@ -318,11 +350,8 @@ __global__ void __launch_bounds__(256, MinBlocksPerSm) picokv_v1_expbits_atomic2
     }
   }
   if (thread_idx < GroupSize) {
-    const int qh = qh_base + thread_idx;
-    const long lse_idx = (long)(B_idx * QH + qh) * S + S_idx;
-    const float query_scale_value = query_scale_numel == 1 ? query_scale[0] : query_scale[lse_idx];
-    scale_cache[thread_idx] = query_scale_value * attention_scale;
-    lse_cache[thread_idx] = dense_lse[lse_idx];
+    scale_cache[thread_idx] = q_scale_raw * attention_scale;
+    lse_cache[thread_idx] = q_lse;
   }
   }  // !FusedQ
   __syncthreads();
@@ -571,7 +600,11 @@ __global__ void __launch_bounds__(256, MinBlocksPerSm) picokv_v1_expbits_atomic2
         }
       }
     }
-    __syncthreads();
+    // Protects value_stage (and the quantizer outputs) from the next tile;
+    // the last tile has no successor.
+    if (block_tile + 1 < BlockTiles) {
+      __syncthreads();
+    }
   }
   picokv_cp_async_wait<0>();
 

@@ -2457,6 +2457,35 @@ class PicoKVAttnBackend(AttentionBackend):
         self._pdl = _pk_decode.pdl_enabled() and _gdc_wait is not None
         self._pdl_warm = set()  # append ROW widths whose PDL variant is compiled
         logger.info(f"[PicoKVAttnBackend] programmatic dependent launch: {'on' if self._pdl else 'off'}")
+        # PICOKV_WIN_TRITON (default on; never with PICOKV_DET, which keeps
+        # FA3 and its order): the dense window as Triton kernels
+        # (picokv_standalone/window_attn.py) instead of FA3, on batches up to
+        # PICOKV_WIN_TRITON_MAX_BS rows and pools up to 2048 tokens (one
+        # program per (row, KV head): no split over the window). The forked
+        # dense branch launches the LSE alone (all the tail reads) and the
+        # output from it under the tail; the serial path the one-pass kernel.
+        # PICOKV_WIN_SPLIT_MAX_BS: forked batches up to this many rows split
+        # (larger ones: the one-pass kernel, joined before the tail);
+        # PICOKV_WIN_TRITON_SERIAL=1: the serial path too (default FA3 there:
+        # in-server 512x1 the one-pass kernel, PDL after the append, measured
+        # 6.59 ms/token vs FA3 6.52), PICOKV_WIN_TRITON_PDL: there a
+        # programmatic dependent of the append
+        self._tri_win = None
+        self._tri_win_bs = int(os.environ.get("PICOKV_WIN_TRITON_MAX_BS", "16"))
+        self._tri_split_bs = int(os.environ.get("PICOKV_WIN_SPLIT_MAX_BS", "16"))
+        self._tri_serial = os.environ.get("PICOKV_WIN_TRITON_SERIAL", "0") == "1"
+        self._tri_pdl = os.environ.get("PICOKV_WIN_TRITON_PDL", "1") == "1"
+        if (self._fa3 is not None and not self._det
+                and os.environ.get("PICOKV_WIN_TRITON", "1") == "1"
+                and self.head_dim & (self.head_dim - 1) == 0
+                and self.num_q_heads % self.num_kv_heads == 0):
+            try:
+                from picokv.picokv_standalone import window_attn as _wa
+                self._tri_win = _wa
+            except Exception as e:
+                logger.warning(f"[PicoKVAttnBackend] Triton window unavailable ({e!r})")
+        logger.info(f"[PicoKVAttnBackend] Triton dense window: "
+                    f"{f'B<={self._tri_win_bs}' if self._tri_win is not None else 'off'}")
         # PICOKV_COMPOSE: under the breakable decode graph, a step whose every
         # layer replays an existing per-layer graph runs the engine's segments
         # and those graphs as ONE composed CUDA graph (child nodes in order:
@@ -6024,14 +6053,34 @@ class PicoKVAttnBackend(AttentionBackend):
             return None
         return m
 
-    def _window_attn(self, kbuf, vbuf, lpl, q_, out, lse, meta=None):
+    def _window_attn(self, kbuf, vbuf, lpl, q_, out, lse, meta=None, pdl=False,
+                     split=False):
         """Plan-free dense-window attention over the token-major pools with
-        device lens ``lpl``: FA3 (ln-LSE returned, ``lse`` unused; ``meta``:
-        its scheduler metadata for these lens, _fa3_sched) or the custom
-        kernel (writes ``out``/``lse`` in place). Returns
-        (out [B,QH,1,D], ln-LSE [B,QH,1])."""
+        device lens ``lpl``: the Triton kernels (_tri_win; ``pdl``: launched
+        as programmatic dependents; ``split``: the LSE now, and a third
+        return value that launches the output from it), FA3 (ln-LSE
+        returned, ``lse`` unused; ``meta``: its scheduler metadata for these
+        lens, _fa3_sched) or the custom kernel (writes ``out``/``lse`` in
+        place). Returns (out [B,QH,1,D], ln-LSE [B,QH,1][, out_fn])."""
         B = kbuf.shape[0]
         o4 = out.view(B, self.num_q_heads, 1, self.head_dim)
+        w = self._tri_win
+        if (w is not None and B <= self._tri_win_bs and kbuf.shape[1] <= 2048
+                and q_.dim() == 3 and q_.stride(-1) == 1 and out.is_contiguous()
+                and lse.is_contiguous() and kbuf.is_contiguous() and vbuf.is_contiguous()):
+            # compile every variant on the eager steps (a no-op after the
+            # first call and inside a capture, which reaches the split pair)
+            w.warm(q_, kbuf, vbuf, lpl, lse, out, self.scaling)
+        else:
+            w = None
+        if w is not None and (split or self._tri_serial):
+            sc = self.scaling
+            l3 = lse.view(B, self.num_q_heads, 1)
+            if split and B <= self._tri_split_bs:
+                w.window_lse(q_, kbuf, lpl, lse, sc, pdl=pdl)
+                return o4, l3, lambda: w.window_out_from_lse(q_, kbuf, vbuf, lpl, lse, out, sc)
+            w.window_attn(q_, kbuf, vbuf, lpl, lse, out, sc, pdl=pdl)
+            return o4, l3
         if self._fa3 is not None:
             _, l, *_ = self._fa3(q_.unsqueeze(1), kbuf, vbuf, cache_seqlens=lpl,
                                  softmax_scale=self.scaling, causal=False,
@@ -6194,15 +6243,18 @@ class PicoKVAttnBackend(AttentionBackend):
             st = None if fixed["equal"] else fixed["sched_tile"]
             batched = fixed["batched"]
 
-            def dense_fn(out=None, pdl=False):
+            def dense_fn(out=None, pdl=False, split=False):
                 # append this step's K/V, then exact dense-window attention
-                # (window path: into ``out`` [B,QH,1,D] if given)
+                # (window path: into ``out`` [B,QH,1,D] if given; the Triton
+                # window a programmatic dependent of the append under PDL;
+                # ``split``: see decode_attention's dense_split)
                 self._append_kv(kbuf, vbuf, sh, ks, vs, pdl=pdl)
                 if sh["win"]:
                     return self._window_attn(
                         kbuf, vbuf, sh["lpl"], qs,
                         bufs["fi_out"] if out is None else out.view(bufs["fi_out"].shape),
-                        bufs["win_lse"], meta=self._fa3_meta(sh, kbuf))
+                        bufs["win_lse"], meta=self._fa3_meta(sh, kbuf),
+                        pdl=pdl and self._tri_pdl, split=split)
                 fi = self._fi["wrapper"]
                 out, lse2 = fi.run(qs, (kt, vt),
                                    out=bufs["fi_out"], lse=bufs["fi_lse"], return_lse=True)
@@ -6268,6 +6320,7 @@ class PicoKVAttnBackend(AttentionBackend):
                             dense_stream=self._fork_stream if fork else None,
                             query_first=qf,
                             fork_large=not forced,
+                            dense_split=self._tri_win is not None,
                             out=ov,
                             **self._scfg.decode_kwargs(),
                         )

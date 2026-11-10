@@ -63,6 +63,17 @@ _TAIL_QUANT_BLOCKS = int(os.environ.get("PICOKV_TAIL_QUANT_BLOCKS", "1024"))
 # 4096x64 10.89 -> 10.85, r160 B 97-160 p50 -1.5%; but 8192x16 8.49 ->
 # 8.53, 8192x24 9.44 -> 9.45, 8192x32 10.23 -> 10.29.
 _FORK_B = tuple(int(x) for x in os.environ.get("PICOKV_FORK_B", "8,48").split(","))
+# Above that gate the prep op (quantize + pack + zero) is folded into the
+# Triton query projection (shared_proj.shared_query_projection_quant,
+# bitwise the prep op's output). On the forked dense branch the separate
+# prep op launched behind FA3, which fills every SM, and finished only as
+# FA3 did, so the tail waited on it; the fused launch runs before FA3.
+# PICOKV_QPROJ_QUANT=0 keeps the separate prep op.
+_QPROJ_QUANT = os.environ.get("PICOKV_QPROJ_QUANT", "1") == "1"
+# ... up to this many query rows per KV head (B * G): one program per 16
+# rows x 64 columns recomputes the row max over all columns, which past ~32
+# rows costs more than the separate prep op (B=64: 13.0 vs 7.4 us).
+_QPROJ_QUANT_ROWS = int(os.environ.get("PICOKV_QPROJ_QUANT_ROWS", "32"))
 
 
 def _c_atoi(s: Optional[str]) -> int:
@@ -384,18 +395,40 @@ def _tail_blocks(cache, projected_query, sr=None) -> int:
     return gx * int(cache.packed_key.shape[1])
 
 
+def _qproj_quant_ok(query, cache, projected_query, packed_query, global_code) -> bool:
+    """The prep op folds into the query projection launch
+    (shared_query_projection_quant, bitwise the same codes, scales and
+    zeroed accumulators): bf16 projected query, 64-column blocks, Cv == C,
+    one decode token, contiguous workspace."""
+    if not _QPROJ_QUANT or DETERMINISTIC:  # DET keeps the prep op
+        return False
+    B, QH, S, C = projected_query.shape
+    D = int(query.shape[-1])
+    KVH = int(cache.key_projection_t.shape[1])
+    return (S == 1 and QH % KVH == 0 and B * (QH // KVH) <= _QPROJ_QUANT_ROWS and projected_query.dtype == torch.bfloat16 and query.dtype == torch.bfloat16
+            and C % 64 == 0 and D >= 16 and D & (D - 1) == 0
+            and tuple(packed_query.shape) == (B, QH, S, C // 64, 8)
+            and packed_query.dtype == torch.int64 and tuple(global_code.shape) == (B, QH, S, C)
+            and projected_query.is_contiguous() and packed_query.is_contiguous()
+            and global_code.is_contiguous())
+
+
 def shared_tail_prep(extension, cache, query, workspace, sr=None, pdl=False):
     """The shared tail's query side (needs only q): Triton query projection,
     then either the prep op (quantize+pack, zero accumulators) or, under
     _tail_quant, the accumulator zeroing inside the projection launch.
     Returns whether the global kernel must quantize the query itself.
     ``pdl``: the projection triggers the next kernel's programmatic launch."""
-    from .shared_proj import shared_query_projection
+    from .shared_proj import shared_query_projection, shared_query_projection_quant
     projected_query, packed_query, query_scale, global_code, global_den, _ = workspace
     if _tail_quant(extension, cache, projected_query, sr):
         shared_query_projection(query, cache.key_projection_t, projected_query,
                                 zero=(global_code, global_den), pdl=pdl)
         return True
+    if _qproj_quant_ok(query, cache, projected_query, packed_query, global_code):
+        shared_query_projection_quant(query, cache.key_projection_t, projected_query,
+                                      packed_query, query_scale, global_code, global_den)
+        return False
     shared_query_projection(query, cache.key_projection_t, projected_query)
     extension.picokv_decode_tail_prep_fn(
         projected_query, packed_query, query_scale, global_code, global_den)
@@ -403,10 +436,12 @@ def shared_tail_prep(extension, cache, query, workspace, sr=None, pdl=False):
 
 
 def _shared_tail_rest(extension, cache, query, workspace, dense_output, dense_lse,
-                      output, scale, gl, sr, st, projected=None):
+                      output, scale, gl, sr, st, projected=None, join=None):
     """Shared-projection tail: the query side (shared_tail_prep, unless done:
     ``projected`` is then its result), the global-only kernel, then the
-    Triton value projection + epilogue into ``output``."""
+    Triton value projection + epilogue into ``output``. ``join`` (split
+    dense branch): called between the two; it waits for ``dense_output``,
+    which only the value projection reads."""
     from .shared_proj import shared_value_projection
     projected_query, packed_query, query_scale, global_code, global_den, _ = workspace
     if projected is None:
@@ -431,6 +466,8 @@ def _shared_tail_rest(extension, cache, query, workspace, dense_output, dense_ls
             packed_query, cache.packed_key, cache.packed_value, query_scale,
             dense_lse.contiguous(), global_code, global_den, cache.exp_bits,
             256, 1, float(scale), gl, sr, st)
+    if join is not None:
+        join()
     shared_value_projection(dense_output, global_code, global_den,
                             cache.value_projection, output, pdl=pdl_enabled())
     return output
@@ -552,6 +589,7 @@ def _decode_cuda(
     dense_stream: Optional[torch.cuda.Stream] = None,
     query_first: bool = False,
     fork_large: bool = False,
+    dense_split: bool = False,
 ) -> torch.Tensor:
     """Launch the measured GQA-4 CUDA decode path."""
     if load_picokv_extension is None:
@@ -654,25 +692,42 @@ def _decode_cuda(
                 projected_query, packed_query, query_scale, global_code, global_den)
             return False
 
+        # dense_split (forked branch, shared tail): dense_fn(split=True) may
+        # return (out, lse, out_fn). The tail reads only the LSE: it waits
+        # on an event recorded after the LSE launch, out_fn (the window
+        # output from that LSE) runs on dense_stream under the tail, and the
+        # value projection (the output's first reader) joins the rest.
+        split = dense_split and shared and dense_stream is not None
+        lse_ev = join = None
         if qf:
             fused_q = query_side()
         if dense_stream is not None:
             dense_stream.wait_stream(current_stream)
             with torch.cuda.stream(dense_stream):
-                dense_output, dense_lse = dense_fn()
+                r = dense_fn(split=True) if split else dense_fn()
+                dense_output, dense_lse = r[0], r[1]
+                if len(r) > 2:
+                    lse_ev = torch.cuda.Event()
+                    lse_ev.record(dense_stream)
+                    r[2]()
         else:
             dense_output, dense_lse = dense_fn(pdl=True) if qf else dense_fn()
         if not qf:
             fused_q = query_side()
         if dense_stream is not None:
-            current_stream.wait_stream(dense_stream)
+            if lse_ev is not None:
+                current_stream.wait_event(lse_ev)
+                join = lambda: current_stream.wait_stream(dense_stream)  # noqa: E731
+            else:
+                current_stream.wait_stream(dense_stream)
             if not torch.cuda.is_current_stream_capturing():
                 dense_output.record_stream(current_stream)
                 dense_lse.record_stream(current_stream)
         if shared:
             return _shared_tail_rest(
                 extension, cache, query, ws,
-                dense_output, dense_lse, output, scale, gl, sr, st, projected=fused_q)
+                dense_output, dense_lse, output, scale, gl, sr, st, projected=fused_q,
+                join=join)
         extension.picokv_decode_tail_main_fn(
             packed_query,
             cache.packed_key,
@@ -779,6 +834,7 @@ def decode_attention(
     dense_stream: Optional[torch.cuda.Stream] = None,
     query_first: bool = False,
     fork_large: bool = False,
+    dense_split: bool = False,
 ) -> torch.Tensor:
     """Run one bf16 CUDA decode-attention step over ``cache``.
 
@@ -801,7 +857,10 @@ def decode_attention(
     programmatic dependent of the query projection; else dense first.
     ``fork_large``: use ``dense_stream`` only on a tail grid above the fused
     quantizer's gate (_TAIL_QUANT_BLOCKS) at the batch sizes of _FORK_B,
-    else the serial order above.
+    else the serial order above. ``dense_split``: on the forked branch call
+    ``dense_fn(split=True)``, which may return ``(out, lse, out_fn)``: the
+    tail waits only for the LSE, ``out_fn`` runs on ``dense_stream`` and
+    the value projection joins it.
     """
     if query.dim() != 4 or query.shape[-2] != 1:
         raise ValueError(f"query must be [B,QH,1,D]; got {tuple(query.shape)}")
@@ -847,6 +906,7 @@ def decode_attention(
         dense_stream=dense_stream,
         query_first=bool(query_first),
         fork_large=bool(fork_large),
+        dense_split=bool(dense_split),
     )
 
 
