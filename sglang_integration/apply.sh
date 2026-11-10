@@ -3,7 +3,8 @@
 #
 # usage: apply.sh <sglang_dir> [--link]
 #   <sglang_dir>  root of an sglang source tree (the dir containing python/sglang)
-#   --link        symlink picokv_backend.py / picokv_radix_cache.py instead of copying (edits in
+#   --link        symlink the new files (picokv_backend.py, picokv_radix_cache.py, picokv_mla/*.py,
+#                 picokv_mla_sm90/decode_i8.cuh) instead of copying (edits in
 #                 PiCoKV/sglang_integration/ then take effect without re-running)
 #
 # The patch was generated against upstream sgl-project/sglang commit BASE below;
@@ -40,13 +41,23 @@ else
   echo "[apply] patch does not apply cleanly to $SG" >&2; exit 1
 fi
 
-# new files (not in the patch): the backend + the PICOKV_RADIX=host radix cache
-for f in layers/attention/picokv_backend.py mem_cache/picokv_radix_cache.py; do
-  dst=$SG/python/sglang/srt/$f
+# new files (not in the patch): the GQA backend + its PICOKV_RADIX=host radix cache, the GLM / MLA
+# backend (picokv_mla) and its decode kernel; <path under sglang_integration>:<path under python/sglang>
+for e in picokv_backend.py:srt/layers/attention/picokv_backend.py \
+         picokv_radix_cache.py:srt/mem_cache/picokv_radix_cache.py \
+         picokv_mla/__init__.py:srt/layers/attention/picokv_mla/__init__.py \
+         picokv_mla/backend.py:srt/layers/attention/picokv_mla/backend.py \
+         picokv_mla/codec.py:srt/layers/attention/picokv_mla/codec.py \
+         picokv_mla/decode_i8.py:srt/layers/attention/picokv_mla/decode_i8.py \
+         picokv_mla/pool.py:srt/layers/attention/picokv_mla/pool.py \
+         picokv_mla/radix.py:srt/layers/attention/picokv_mla/radix.py \
+         picokv_mla_sm90/decode_i8.cuh:kernels/jit/csrc/picokv_mla_sm90/decode_i8.cuh; do
+  src=$HERE/${e%%:*}; dst=$SG/python/sglang/${e#*:}
+  mkdir -p "$(dirname "$dst")"
   rm -f "$dst"
   if [ "$MODE" = --link ]; then
-    ln -s "$HERE/$(basename "$f")" "$dst"; echo "[apply] linked $dst"
+    ln -s "$src" "$dst"; echo "[apply] linked $dst"
   else
-    cp "$HERE/$(basename "$f")" "$dst"; echo "[apply] copied $dst"
+    cp "$src" "$dst"; echo "[apply] copied $dst"
   fi
 done

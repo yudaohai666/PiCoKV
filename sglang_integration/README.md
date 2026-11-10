@@ -33,14 +33,21 @@ with continuous batching and decode CUDA graphs.
 Hard requirements of the decode kernel: bf16, GQA = 4, head_dim = 128 (for
 example Llama-3.1-8B). Attention TP (`tp_size` > 1) is supported.
 
+The same patch adds a second backend, `picokv_mla`, for MLA latent caches
+(GLM-4.7-Flash: b1280 codes over the 512-dim latent, radix cache on); see
+[GLM-4.7-Flash](#glm-47-flash-picokv_mla).
+
 ## Contents
 
 | Path | What |
 |---|---|
 | `picokv_backend.py` | The backend (`python/sglang/srt/layers/attention/picokv_backend.py` in the SGLang tree) |
 | `picokv_radix_cache.py` | Radix cache backend `picokv` for `PICOKV_RADIX=host` (`python/sglang/srt/mem_cache/picokv_radix_cache.py`) |
-| `sglang_picokv.patch` | Changes to 15 SGLang files, against upstream `sgl-project/sglang@567d5925` |
-| `apply.sh` | Install the patch and both modules into an SGLang checkout |
+| `sglang_picokv.patch` | Changes to 19 SGLang files, against upstream `sgl-project/sglang@567d5925` |
+| `picokv_mla/` | MLA backend `picokv_mla` for GLM-4.7-Flash (`python/sglang/srt/layers/attention/picokv_mla/`: `backend.py`, `pool.py`, `codec.py`, `decode_i8.py`, `radix.py`); see [GLM-4.7-Flash](#glm-47-flash-picokv_mla) |
+| `picokv_mla_sm90/decode_i8.cuh` | Its path B decode kernels, JIT-compiled on first use (`python/sglang/kernels/jit/csrc/picokv_mla_sm90/`) |
+| `../offline_projection/projections/GLM-4.7-Flash_b1280/` | GLM-4.7-Flash b1280 projections, one `proj_L{layer}_b1280.pt` per layer (47 files, 118 MB) |
+| `apply.sh` | Install the patch and the new files into an SGLang checkout |
 | `export_from_sglang.sh` | Maintainer helper: regenerate the patch and module copies from a working checkout |
 | `run_itl.sh`, `scripts/bench_itl.py` | Decode inter-token-latency benchmark (picokv vs flashinfer) |
 | `scripts/niah_engine_check.py` | Quick real-weight needle check through the engine |
@@ -49,7 +56,7 @@ example Llama-3.1-8B). Attention TP (`tp_size` > 1) is supported.
 
 What the patch changes in SGLang:
 
-- `attention_registry.py`: registers backend `picokv`;
+- `attention_registry.py`: registers backend `picokv` (and `picokv_mla`, below);
   `arg_groups/choices.py` adds it to the `--attention-backend` CLI choices.
 - `arg_groups/attention_hook.py`, `arg_groups/pipeline.py`: the serving
   guard (`handle_picokv_serving_constraints`, see Running; with
@@ -98,6 +105,25 @@ What the patch changes in SGLang:
   (`enable_fused_set_kv_buffer`, used by e.g. Qwen3-MoE / GPT-OSS) is off for
   the no-op pool, whose one-page placeholder buffer it would write out of
   bounds.
+- `mem_cache/registry.py`: with `attention_backend="picokv_mla"` and the radix
+  cache on, the tree cache is the backend's R-exact tree
+  (`picokv_mla/radix.py`); every other configuration gets the default one.
+- `model_executor/model_runner.py`: after the forward, calls the attention
+  backend's `after_forward(forward_batch)` if it has one (`picokv_mla`
+  compresses a request's prompt there, after the extend that reaches its fire
+  point). No other backend defines it.
+- `picokv_mla` hooks in files listed above, all keyed on that backend name:
+  `attention_registry.py` / `arg_groups/choices.py` register it;
+  `kv_cache_configurator.py` builds its token pool and page-4 allocator, shows
+  the scheduler the dense-only capacity, takes its fixed buffers out of the KV
+  budget and caps `max_running_requests` at the path B decode workspace;
+  `pool_configurator.py` sizes the pool by its slot size;
+  `forward_batch_info.py` carries each extend request's fire point;
+  `managers/schedule_policy.py` ends a prefill chunk at the fire point
+  (`SGLANG_PICOKV_MLA_FIRE_CAP`) and holds back a request that would hit an
+  in-flight prefill's insert (`SGLANG_PICOKV_MLA_HOLD`).
+- `models/deepseek_common/attention_backend_handler.py`, `utils.py`:
+  `picokv_mla` takes the fa3 handler and the absorbed MLA core path.
 
 ## Setup
 
@@ -260,6 +286,18 @@ configuration.
 | `PICOKV_RADIX_HOT_GB` | `8` | Radix mode: device memory cap of the hot tier's mirrors, per attention rank (a page is 1.2 GB: about 6 pages = 54k prefix tokens). Past it the least recently used page without a live slot loses its mirror (its host K/V stays, a later hit streams it again). Larger caps buy longer mirrored prefixes for hit latency; they are device memory the pool held anyway, so they cost the compressed cache's capacity |
 | `PICOKV_RADIX_HOT_FREE` | `0.1` | Radix mode: a mirror is taken only while this fraction of the token pool stays free after it |
 | `PICOKV_RADIX_CODES` | `1` | With the hot tier and the fast prepare: mirrors keep their tokens' codes too (`[L,H,5,8192]` / `[L,H,8192,5]` int64 per page, +16% mirror bytes), so a hit recomputes nothing for its cached span: the leading run of a hit's global tokens whose codes a mirror holds is read back and only its new tokens' codes are computed (blockk on the suffix), written to their mirrors on the way. Codes are per token, so the cache is bitwise the one a full recompress builds (`PICOKV_RADIX_CODES_CHECK=1` compares every prepare). `0` = a hit recompresses its whole prompt |
+| `PICOKV_RADIX_ANSWER` | `1` | Radix mode with the slide: a finished request's generated tokens are inserted into the tree with its prompt (raw K/V as decoded, host slots taken at each slide epoch and at finish; see Limitations, radix). `0` = only prompt tokens are cached (a follow-up re-prefills the answer) |
+| `PICOKV_RADIX_APPEND_CODES` | `1` | Radix mode with the hot tier's codes: an incremental (append) prefill chunk writes its new compressed tokens' codes to the mirrors too, as a first chunk does, so the first hit after a chunked prompt reads them instead of recomputing them. `0` = only first chunks write codes |
+| `PICOKV_RADIX_FULL` | `16` | Radix extend: a hit's prefix copies are issued in groups of at most this many layers (one batched copy call per group). `0` = layer by layer, two layers ahead |
+| `PICOKV_RADIX_D2H_GROUP` | `8` | Radix extend: layers per batched device-to-host copy of the new tokens' K/V into host slots. `0` = per layer |
+| `PICOKV_RADIX_BATCH`, `PICOKV_RADIX_3D` | `1`, `1` | Radix copies through `cudaMemcpy3DBatchAsync` (CUDA >= 12.8: one call for many copies) and `cudaMemcpy3DAsync` (one call per block of window rows) instead of a call per copy; `0` = per-copy calls. Same bytes |
+| `PICOKV_ROWS_B1` | `1` | Per-row storage also for a one-row (graph bucket 1) slot batch: a fresh row of any length is adopted in place instead of rebuilding and re-capturing the rectangle when a request outgrows its width. `0` = one-row rectangle |
+| `PICOKV_SYNC_VIEWS` | `1` | A slot change syncs its leaving rows back with a few stacked window copies per row (all layers) and hands a row's codes over as views of its own storage. `0` = per-layer compact copies |
+| `PICOKV_RIDS_CHECK` | `async` | The request-id mirror check (see `PICOKV_RIDS_CPU`) runs on an event, without a device-to-host sync; a mismatch raises. `sync` = the blocking check before use |
+| `PICOKV_TLAUNCH` | `1` | The coded prepare's per-layer assembly kernel is launched through a cached launcher instead of Triton's Python launch path (same kernel, same arguments). `PICOKV_TLAUNCH_CHECK=1` also does the regular launch and asserts it picks the cached kernel (debug) |
+| `PICOKV_BLK_TABLES` | `0` | Per-row storage read through per-row 512-token block tables. Needs an extension built with the block-table overloads (not the build from this repo's `build_cuda_extensions.py`; startup fails with a message naming the knob). `0` = contiguous rows |
+| `PICOKV_RADIX_PAGES` | `0` | Needs `PICOKV_BLK_TABLES=1`: radix hits read their leading 512-token code blocks from pages shared by every row with the same prefix instead of each holding a copy. Lower peak with many concurrent hits on one prefix, but a single-row hit is slower, so off by default. `PICOKV_RADIX_PAGES_KEEP=1` (default) keeps a paged row's pages up to the next extend for repeat hits; `PICOKV_PG_DEBUG=1` logs each paged row |
+| `PICOKV_RADIX_ANSWER_DUMP` | unset | Debug: a directory where layer 0's captured answer K/V and each finished request's token ids are saved |
 | `PICOKV_RADIX_CODES_MIN` | `1024` | Radix mode: prompts shorter than this (tokens) take no code plan (a recompress is cheaper) |
 | `PICOKV_RADIX_STATS` | `0` | One stdout line per radix extend: tokens copied by path (mirror, host, dedup, window, new) and the mirror count |
 | `PICOKV_RADIX_CODES_CHECK` | `0` | Debug: every code-reusing prepare is compared field by field (and its full-capacity tail) with `_prepare_fast` over the same stage tokens; a mismatch is logged, the counts print at the last layer |
@@ -579,8 +617,11 @@ pass key is" vs " The grass is"; a near-tie, see Limitations, determinism).
   `cudaMemcpy2DAsync` per layer and slot run straight from the layer's K/V
   (no device copy; +2 ms at 1 x 512, host-side: the CUDA calls cost ~4 us
   in a loop but ~17 us inside the forward; +0.5-1.6% at 24 x 512, noise at
-  8k, +2% at 32k); only prompt tokens are cached (decode tokens have no
-  host K/V, so a multi-turn follow-up re-prefills the previous answer);
+  8k, +2% at 32k); a finished request's generated tokens join the tree too
+  (`PICOKV_RADIX_ANSWER=1`, default: their raw K/V as the decode steps wrote
+  it, copied to host slots as they leave the dense window at each slide epoch
+  and from the window at finish), so a multi-turn follow-up hits the previous
+  answer instead of re-prefilling it;
   every hit row
   rebuilds its own compressed cache over its prefix (no sharing between
   concurrent hits on one prefix: 48 hits on a 48k document take 4.9 s vs
@@ -599,6 +640,13 @@ pass key is" vs " The grass is"; a near-tie, see Limitations, determinism).
   across rows, dense attention of all rows in one ragged call): a 49-request
   hit prefill takes 129 ms instead of 202 (flashinfer radix about 40 ms),
   with bitwise the same outputs (48/48).
+  Multi-turn GSM8K on this patch (upstream 567d592; 165 chains of 8 turns,
+  each turn appends the previous answer and the next question, 48
+  concurrent chains, greedy; `PICOKV_RADIX=host` vs flashinfer with the
+  radix cache, two runs each): Llama-3.1-8B-Instruct 86.88 / 86.35 vs
+  86.73 / 87.04 in 94.0 / 99.8 s vs 104.4 / 98.2 s; Qwen3-8B 93.25 / 93.25
+  vs 93.63 / 93.63 in 121.4 / 121.7 s vs 123.3 / 122.8 s. Both backends
+  serve 93.0% (Llama) / 93.7% (Qwen) of the prompt tokens from the cache.
 - **Chunked prefill goes through a host stage.** The compressed cache keeps
   no raw prefix K/V, so a continuation chunk could not attend its prefix (at
   SGLang's default 8192 that dropped 32k-NIAH to about 15.5). The chunk stage
@@ -733,6 +781,183 @@ about 2.5%; an earlier measurement with older kernels gave <= 1%, and every
 in-place slot change would then re-capture);
 FA3 with a forced split count for the dense window at 1-4 rows (8.16 -> 7.85
 us per layer at 1 row, about 0.15% per step, not bitwise: rejected).
+
+## GLM-4.7-Flash (`picokv_mla`)
+
+`attention_backend="picokv_mla"` keeps the MLA latent cache of
+GLM-4.7-Flash (47 layers, 512-dim latent + 64-dim rope per token, no sparse
+attention) compressed with PiCoKV b1280 codes. It is a separate backend from
+`picokv` (the GQA one above) and shares none of its knobs; it lives in
+`picokv_mla/` and the `picokv_mla` hooks of the patch, all keyed on the
+backend name.
+
+### Setup and running
+
+Same checkout and `apply.sh` as above. Requirements: sm_90, `tp_size=1` (the
+decode kernels are built for GLM-4.7-Flash's 20 query heads), bf16,
+`page_size=4`, and SGLang's GLM-4.7-Flash path needs `deep_gemm` in the venv
+(tested: `sgl-deep-gemm` 0.2.0). The path B decode kernels
+(`picokv_mla_sm90/decode_i8.cuh`) are JIT-compiled on first use.
+
+```bash
+export PYTHONPATH=<WS>/sglang/python
+export SGLANG_PICOKV_MLA_PROJ=<WS>/PiCoKV/offline_projection/projections/GLM-4.7-Flash_b1280
+```
+
+```python
+import sglang as sgl
+
+eng = sgl.Engine(
+    model_path="<path>/GLM-4.7-Flash",
+    attention_backend="picokv_mla", page_size=4,
+    dtype="bfloat16", tp_size=1, trust_remote_code=True,
+    mem_fraction_static=0.85,
+)                                     # radix cache on by default (R-exact, below)
+```
+
+At init the pool logs (info level) its slot count and the projection dir with
+a hash of the files, e.g. `picokv_mla: 750584 slots (187647 rows), proj ...
+sha0 ... all ...`.
+
+### Method
+
+- **Codes.** Each token's 512-dim latent (per layer) becomes 1280 sign bits
+  (40 int32 words): a residual sign chain over 40 groups of 32 directions of
+  the layer's offline encoder (`enc`, sign of `r @ enc_g`, then
+  `r -= c @ dec_g`), decoded as `codes @ dec`. The 64-dim rope stays exact
+  bf16. A compressed token takes a 288-byte slot per layer instead of the
+  1152-byte bf16 row (4x). The encoder is bitwise the reference
+  `quantize_block32_online` (0 code mismatches).
+- **What is compressed.** The sink (`[0, 64)`) and the local window (the
+  last 256 positions) stay exact. After the extend that reaches a request's
+  fire point F (its prompt length; a teacher-forced request's logprob start),
+  positions `[64, F - 256)` of every layer are compressed. During decode,
+  rows that leave the local window are compressed in whole 64-row chunks
+  before the next decode step, so generated tokens are compressed too. A
+  sequence shorter than that stays exact until it gets there.
+  A prefill chunk that would cross F ends at F
+  (`SGLANG_PICOKV_MLA_FIRE_CAP`), so every token at or after F reads the
+  compressed rows, as in the reference.
+- **Prefill (path A).** The batch's latent rows (dense rows copied,
+  compressed ones decoded) are filled into a bf16 scratch and stock fa3 runs
+  on it.
+- **Decode (path B, `decode_i8.py`).** Stock fa3 over the dense rows (sink +
+  tail) with lse, attention over the codes of the compressed rows in int8
+  code space (q projected through `dec`, int8 hi/lo terms), merged per head.
+  All of it is captured in the decode CUDA graph; the host part (slide,
+  checks) runs before the replay.
+- **Radix (R-exact, `picokv_mla/radix.py`, on by default).** Tree slots are
+  always compressed, and a pinned host mirror keeps their exact latent (every
+  compress writes it). A hit of prefix length m by a request with fire point
+  F gets private dense rows for `[0, 64)` and `[c, m)` (c = the page floor of
+  `max(64, F - 256)`), copied exactly from the mirror. Until the request
+  fires, `[64, c)` is read exact from the mirror; at the fire only the
+  request's own rows are compressed, and after it `[64, c)` reads the tree's
+  codes. A hit therefore reads exactly what the same request reads without
+  the cache, and no compressed row is compressed twice. Finished requests
+  insert prompt + answer; a request that has fired inserts its prompt; a
+  waiting request that shares a prefill chunk or more with an in-flight
+  prefill's coming insert is held back until it lands
+  (`SGLANG_PICOKV_MLA_HOLD`).
+
+### Knobs (`picokv_mla`)
+
+| Variable | Default | Effect |
+|---|---|---|
+| `SGLANG_PICOKV_MLA_PROJ` | required | Directory of the per-layer projections `proj_L{layer}_b1280.pt` (`enc` / `dec`, bf16 1280 x 512). The repo's set is `offline_projection/projections/GLM-4.7-Flash_b1280` |
+| `SGLANG_PICOKV_MLA_SINK` | `64` | Exact leading positions |
+| `SGLANG_PICOKV_MLA_LOCAL` | `256` | Exact local window (the last positions of a sequence) |
+| `SGLANG_PICOKV_MLA_CHUNK` | `64` | Decode slide: rows that left the local window are compressed in chunks of this many rows. Must be > 0 with path B (it bounds a row's dense rows at sink + local + chunk = 384) |
+| `SGLANG_PICOKV_MLA_PATH_B` | `1` | Decode over the codes inside the decode CUDA graph. `0` = path A for decode too (bf16 scratch + fa3, no CUDA graphs; reference / debug) |
+| `SGLANG_PICOKV_MLA_MAX_RUNNING` | `256` | Rows of the path B decode workspace; `max_running_requests` is capped at it (logged) |
+| `SGLANG_PICOKV_MLA_RADIX` | `1` | Radix cache through the R-exact tree. `0` = the backend refuses to start unless `disable_radix_cache=True` (a stock hit would skip the fire and read compressed rows as a prefix computed exact) |
+| `SGLANG_PICOKV_MLA_FIRE_CAP` | `1` | A prefill chunk that would cross the fire point F ends at F. `0` = a chunk may cross F; its tokens past F then read `[64, F - 256)` exact (counted and logged as a warning) |
+| `SGLANG_PICOKV_MLA_HOLD` | `-1` | Radix: a waiting request whose prompt shares at least this many more tokens with an in-flight prefill's coming insert than with the tree is held back until the insert lands. `-1` = the chunked prefill size |
+| `SGLANG_PICOKV_MLA_HOLD_MAX_S` | `60` | Radix: the longest one hold lasts, in seconds |
+| `SGLANG_PICOKV_MLA_CHECK` | `1` | Pool invariant checks: every written slot owns a dense row, every compressed slot had one, every tree slot a hit reads exact from the mirror is compressed. Under the overlap scheduler they are counted on the device and raise a few forwards late, so the forward path does not sync the host. (The decode checks, every row fired and keeps at most 384 dense rows, always run) |
+
+Memory. An allocator page (1152 B per layer) holds one dense row or 4
+compressed slots, so a token takes a quarter page once compressed and a
+quarter page plus a row while it is exact. With `mem_fraction_static=0.85`
+on an 80 GB H800 the pool has 187,647 pages (750,584 slots). The scheduler
+sees 149,912 tokens, the count that fits if every token were exact (fa3:
+206,612 bf16 tokens). Each fire and slide hands rows back, so running
+requests past their fire point and tree tokens cost a quarter page each: up
+to 750k compressed tokens, 3.6x fa3. Fixed buffers (decode workspace,
+encoder / decoder tables, scratch) come out of the KV budget before the pool
+is sized. With the radix cache on, the host mirror pins 47 layers x 750,588
+slots x 1 KB = 33.6 GiB of host memory at init (about 17 s).
+
+### Results (`picokv_mla`, GLM-4.7-Flash, one H800)
+
+This patch on upstream sglang 567d592, bf16, `page_size=4`, radix cache and
+overlap scheduler on unless noted, greedy decoding. fa3 is stock
+`attention_backend="fa3"` with the same settings. The gates used a projection
+set whose `enc` / `dec` tensors equal the repo's (`torch.equal`).
+
+| Test | picokv_mla | fa3 |
+|---|---|---|
+| Teacher-forced NLL / top-1 over the last 8192 tokens of 32k (18 docs: PG-19, PG essays, proof-pile, code) | 1.4141 / 0.6980 | 1.4177 / 0.6984 |
+| Same, 64k | 1.3583 / 0.7165 | 1.3691 / 0.7162 |
+| Same, radix cache off, 32k / 64k | 1.4138 / 0.6982, 1.3588 / 0.7161 | |
+| Needles: 24 docs x 8 numbers at 16k / 32k / 64k (192 questions) | 99.48 | 99.48 |
+| GSM8K, 1319 questions, 48 concurrent | 94.62 | 95.00 |
+| Multi-turn GSM8K: 165 chains of 8 turns (each turn appends the previous answer and the next question), 48 concurrent chains | 91.05, 89.99 (two runs); overlap scheduler off 90.30 | 91.05 |
+| Multi-turn: prompt tokens served from the radix cache | 94.07% | 94.09% |
+
+The GSM8K standard error is about 0.6 points, the multi-turn one about 0.8.
+Peak allocated device memory in the GSM8K run: 72,659 MiB vs 72,682 MiB.
+
+Decode speed, same batch on both backends (ms per decode step, median over
+4 engines x 2 repeats, 256 generated tokens with `ignore_eos`, distinct
+prompts):
+
+| Batch x prompt | picokv_mla | fa3 | Difference |
+|---|---|---|---|
+| 1 x 4k | 9.20 | 7.43 | +24% |
+| 1 x 32k | 10.17 | 7.96 | +28% |
+| 1 x 128k | 11.47 | 9.85 | +17% |
+| 8 x 16k | 17.60 | 15.80 | +11% |
+| 32 x 4k (512 tokens) | 26.02 | 23.14 | +12% |
+
+Batches that do not fit fa3's pool (all requests submitted at once; output
+tokens per second over the whole run, wall time, median time to first token;
+no radix hits):
+
+| Load | picokv_mla | fa3 |
+|---|---|---|
+| 32 x 16k, 256 tokens | 281-284 tok/s, 28.8-29.1 s, 10.7-11.1 s | 243-247 tok/s, 33.2-33.7 s, 15.0-15.3 s |
+| 32 x 16k, 2048 tokens | 575-577 tok/s, 113.6-114.0 s, 11.0 s | 484-486 tok/s, 135.0-135.4 s, 49.5 s |
+| 16 x 32k, 1024 tokens | 261-264 tok/s, 62.0-62.9 s, 10.7-10.8 s | 222 tok/s, 73.9 s, 31.5 s |
+
+Same batch, picokv_mla's decode is slower: path B runs fa3 over the dense
+rows plus the code-space attention and a merge, more kernels and more work
+than fa3 over bf16 rows. It is faster when the cache bounds the batch:
+fa3 holds about 12 of these 16k requests at a time, picokv_mla all 32.
+
+### Limitations (`picokv_mla`)
+
+- sm_90, `tp_size=1` (the decode kernels assert 20 query heads per rank),
+  bf16 latent, `page_size=4`. fp8 KV, speculative decoding, prefill / decode
+  disaggregation and HiCache are untested and not guarded.
+- Path B rejects `SGLANG_ENABLE_METADATA_GLUE_GRAPH` (that graph would
+  freeze the host part that runs before each replay). Path A has no CUDA
+  graphs.
+- Same-batch decode is 11-28% slower than fa3 (table above).
+- Radix: the host mirror pins about 33.6 GiB at init. Every compress also
+  writes the rows' exact latent to it (1 KB per token per layer through
+  PCIe). At 32 x 16k misses the run takes 28.8-29.0 s vs 28.3-28.5 s with
+  the radix cache off; at 32 x 4k the decode step is +0.2%.
+- Overlap scheduler: picokv_mla's decode reports its shared reads as ending
+  after the graph replay (`shared_read_ends`), so the scheduler stream's
+  pool writes for the next batch (codes and row maps at a finish or fire,
+  a hit's private rows, row maps at alloc / free) wait for the whole replay.
+  Ending them after the in-graph plan, SGLang's default for decode, let
+  those writes race the decode kernels: 233 of the 1319 multi-turn answers,
+  all in turns that hit the cache, were garbage up to the length limit
+  (accuracy 75.6; 0 with the fence). The fence costs
+  +0.7% per decode step at 1 x 4k, +0.4% at 1 x 32k, +0.2% at 8 x 16k and
+  nothing measurable at 32 x 4k.
 
 ## Scripts
 

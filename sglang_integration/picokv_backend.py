@@ -142,10 +142,14 @@ try:
 
     # PICOKV_ROWS: the same merges into per-row storage (_RowStore): row b's
     # keys [H, KB, cap] / values [H, cap/64, CV] at the addresses kp[b] /
-    # vp[b], cap = ct[b] (vacant rows: cap 0 -> every access masked off)
+    # vp[b], cap = ct[b] (vacant rows: cap 0 -> every access masked off).
+    # S0 (PICOKV_BLK_TABLES): a row's storage starts at block s0[b] (its
+    # pointers biased by -s0 blocks, cap its stride; blocks below are shared
+    # pages the merges never reach: gl >= 512 s0), bounded by cap + 512 s0
     @triton.jit
-    def _slide_vmerge_rows_kernel(tok_ptr, vp_ptr, ct_ptr, gl_ptr, n_ptr, H, BS,
-                                  CV: tl.constexpr, VB: tl.constexpr, S: tl.constexpr):
+    def _slide_vmerge_rows_kernel(tok_ptr, vp_ptr, ct_ptr, s0_ptr, gl_ptr, n_ptr, H, BS,
+                                  CV: tl.constexpr, VB: tl.constexpr, S: tl.constexpr,
+                                  S0: tl.constexpr):
         pid = tl.program_id(0)
         j = tl.program_id(1)
         b = pid // H
@@ -153,6 +157,9 @@ try:
         gl = tl.load(gl_ptr + b)
         n = tl.load(n_ptr + b)
         G = tl.load(ct_ptr + b) // 64
+        Gb = G
+        if S0:
+            Gb += tl.load(s0_ptr + b) * 8
         row = tl.load(vp_ptr + b).to(tl.pointer_type(tl.int64))
         i = tl.arange(0, S)
         s = tl.arange(0, 64)
@@ -163,26 +170,29 @@ try:
         rem = (gl % 64).to(tl.int64)
         g0 = gl // 64
         lo_ptr = row + (h.to(tl.int64) * G + g0) * CV + j * 64 + s
-        old = tl.load(lo_ptr, mask=g0 < G, other=0)
-        tl.store(lo_ptr, old | (word << rem), mask=g0 < G)
+        old = tl.load(lo_ptr, mask=g0 < Gb, other=0)
+        tl.store(lo_ptr, old | (word << rem), mask=g0 < Gb)
         hi = ((word >> 1) >> (63 - rem)) & ((tl.full([64], 1, tl.int64) << rem) - 1)
-        tl.store(lo_ptr + CV, hi, mask=(rem + n > 64) & (g0 + 1 < G))
+        tl.store(lo_ptr + CV, hi, mask=(rem + n > 64) & (g0 + 1 < Gb))
 
     @triton.jit
-    def _slide_kmerge_rows_kernel(pkn_ptr, kp_ptr, ct_ptr, gl_ptr, n_ptr, H, BS,
-                                  KB: tl.constexpr, S: tl.constexpr):
+    def _slide_kmerge_rows_kernel(pkn_ptr, kp_ptr, ct_ptr, s0_ptr, gl_ptr, n_ptr, H, BS,
+                                  KB: tl.constexpr, S: tl.constexpr, S0: tl.constexpr):
         pid = tl.program_id(0)
         b = pid // H
         h = pid % H
         gl = tl.load(gl_ptr + b)
         n = tl.load(n_ptr + b)
         L = tl.load(ct_ptr + b)
+        Lb = L
+        if S0:
+            Lb += tl.load(s0_ptr + b) * 512
         row = tl.load(kp_ptr + b).to(tl.pointer_type(tl.int64))
         i = tl.arange(0, S)
         for k in tl.static_range(KB):
             v = tl.load(pkn_ptr + (h.to(tl.int64) * KB + k) * BS + b * S + i)
             dst = row + (h.to(tl.int64) * KB + k) * L + gl + i
-            tl.store(dst, v, mask=(i < n) & (gl + i < L))
+            tl.store(dst, v, mask=(i < n) & (gl + i < Lb))
 
     @triton.jit
     def _slide_shift_kernel(buf_ptr, n_ptr, cap, ROWW: tl.constexpr, SINK: tl.constexpr,
@@ -250,14 +260,25 @@ try:
     # grouped as _prep_vgroup_kernel (pv: head stride VS >= G*CV), programs
     # G..G+NWQ copy the dense window of g ([T,2,H,D], strides gs0..2) to dw
     # [2,H,SINK+LOCAL,D], the rest zero both past the content (PICOKV_PREALLOC
-    # full-capacity buffers).
-    @triton.jit
+    # full-capacity buffers). PG (PICOKV_RADIX_PAGES): groups q < Q0 (blocks
+    # e < Q0 / 8, read from the mirrors) go to the code pages at pt[2e] /
+    # pt[2e+1] (keys [L,H,KW,512], values [L,H,8,CV]; layer l), the rest to
+    # the own storage from token 64 Q0 on (pka / pv hold token / group j -
+    # 64 Q0 / q - Q0); programs start at group QS (pages already filled).
+    # The per-row / per-layer ints unspecialized: rows 1, 2, 3.. of a hit
+    # burst differ in their divisibility by 16 (3 compiled variants: +125 ms
+    # on the first hits), and every new (==1, % 16) combination of the sizes
+    # and offsets was another compile + device load in serving (Llama /
+    # Qwen multi-turn: 66 / 78 variants, ~2 ms each, ~20 ms when another
+    # process holds the driver lock).
+    @triton.jit(do_not_specialize=["NP", "m", "c", "glen", "l", "KS", "VS", "s", "n", "G",
+                                   "Q0", "QS"])
     def _code_asm_kernel(tab_ptr, NP, tk_ptr, tv_ptr, m, c, glen, l, pka_ptr, pv_ptr, KS, VS,
-                         g_ptr, gs0, gs1, gs2, s, n, dw_ptr, BLK, G,
+                         g_ptr, gs0, gs1, gs2, s, n, dw_ptr, BLK, G, pt_ptr, Q0, QS,
                          H: tl.constexpr, KW: tl.constexpr, VW: tl.constexpr, D: tl.constexpr,
                          SINK: tl.constexpr, LOCAL: tl.constexpr, BT: tl.constexpr,
-                         NWQ: tl.constexpr):
-        q = tl.program_id(0)
+                         NWQ: tl.constexpr, PG: tl.constexpr):
+        q = tl.program_id(0) + QS
         r = tl.program_id(1)
         h = tl.program_id(2).to(tl.int64)
         i = tl.arange(0, 64)
@@ -278,7 +299,15 @@ try:
                 x = tl.load(mp + mo, mask=mir, other=0)
                 y = tl.load(tk_ptr + (h * KW + r) * m + t, mask=tail, other=0)
                 x = tl.where(mir, x, y)
-                tl.store(pka_ptr + (h * KW + r) * KS + j, x, mask=ok)
+                if PG:
+                    if q < Q0:
+                        bp = tl.load(pt_ptr + 2 * (q // 8)).to(tl.pointer_type(tl.int64))
+                        tl.store(bp + ((l * H + h) * KW + r) * 512 + (j - (q // 8) * 512), x,
+                                 mask=ok)
+                    else:
+                        tl.store(pka_ptr + (h * KW + r) * KS + (j - Q0 * 64), x, mask=ok)
+                else:
+                    tl.store(pka_ptr + (h * KW + r) * KS + j, x, mask=ok)
                 tl.store(mp + mo, x, mask=put)
             elif r < KW + VW:
                 w = r - KW
@@ -290,7 +319,14 @@ try:
                 tl.store(mp + mo, x, mask=put)
                 bits = (x[:, None] >> i[None, :].to(tl.int64)) & 1           # [token, s]
                 word = tl.sum(bits << i[:, None].to(tl.int64), axis=0)        # [s]
-                tl.store(pv_ptr + h * VS + q * (VW * 64) + w * 64 + i, word)
+                if PG:
+                    if q < Q0:
+                        bp = tl.load(pt_ptr + 2 * (q // 8) + 1).to(tl.pointer_type(tl.int64))
+                        tl.store(bp + ((l * H + h) * 8 + q % 8) * (VW * 64) + w * 64 + i, word)
+                    else:
+                        tl.store(pv_ptr + h * VS + (q - Q0) * (VW * 64) + w * 64 + i, word)
+                else:
+                    tl.store(pv_ptr + h * VS + q * (VW * 64) + w * 64 + i, word)
         elif q < G + NWQ:
             if r < 2:  # dense window rows (q - G) * BT.. of K (r 0) / V (r 1), head h
                 tt = (q - G) * BT + tl.arange(0, BT)
@@ -305,10 +341,10 @@ try:
             z = (q - G - NWQ).to(tl.int64)
             zero = tl.zeros([64], dtype=tl.int64)
             if r < KW:
-                j = glen + z * 64 + i
+                j = glen + z * 64 + i - Q0 * 64  # Q0 = 0 unless PG
                 tl.store(pka_ptr + (h * KW + r) * KS + j, zero, mask=j < KS)
             elif r < KW + VW:
-                o = (G + z) * (VW * 64)
+                o = (G + z - Q0) * (VW * 64)
                 tl.store(pv_ptr + h * VS + o + (r - KW) * 64 + i, zero, mask=o < VS)
 
     # The writes alone (a fresh prompt's plan): global tokens j >= c of pka
@@ -379,14 +415,102 @@ except Exception:  # pragma: no cover - falls back to index_put
     _prep_vgroup_kernel = _prep_kcopy_kernel = _fill_rows_kernel = None
     _code_asm_kernel = _code_put_kernel = None
 
+# PICOKV_TLAUNCH (default 1): the coded prepare's per-layer assembly launch
+# through _TLaunch; ..._CHECK=1: the regular launch each time, asserting the
+# cached kernel is the one Triton picks.
+_TLAUNCH = os.environ.get("PICOKV_TLAUNCH", "1") == "1"
+_TLAUNCH_CHECK = os.environ.get("PICOKV_TLAUNCH_CHECK", "0") == "1"
+
+
+class _TLaunch:
+    """fn[grid](*args, **kw) of a @triton.jit kernel launched per layer on a
+    host-bound path, without JITFunction.run's per-launch binder, cache-key
+    string and launch metadata (~45 -> ~20 us): the CompiledKernel the
+    regular launch returned, per (device, tensor dtypes / 16-byte alignment,
+    int classes, kw). The int classes (== 1, % 16 == 0, i32 / i64 / u64
+    range) are at least as fine as Triton's specialization, so a key holds
+    the kernel Triton would launch (PICOKV_TLAUNCH_CHECK asserts it). Launch
+    or pre-run hooks set (profilers): the regular launch. args: every
+    non-constexpr parameter, positional; kw: the rest by name + options.
+    An int parameter in the kernel's do_not_specialize keys by its range
+    class alone (one kernel for every value)."""
+
+    def __init__(self, fn):
+        self.fn, self.ks, self.tails = fn, {}, {}
+        self.dns = tuple(p.do_not_specialize for p in fn.params)
+
+    def __call__(self, grid, args, kw):
+        dev = torch._C._cuda_getDevice()
+        k = [dev]
+        for a, d in zip(args, self.dns):
+            c = a.__class__
+            if c is torch.Tensor:
+                k.append((a.dtype, a.data_ptr() % 16 == 0))
+            elif c is int:
+                if -0x80000000 <= a <= 0x7FFFFFFF:  # (the range bits 0)
+                    k.append(0 if d else 16 if a == 1 else (a % 16 == 0) | 0)
+                elif d:
+                    k.append((a > 0x7FFFFFFF) << 1 | (a < -0x80000000) << 2
+                             | (a > 0x7FFFFFFFFFFFFFFF) << 3)
+                else:
+                    k.append(16 if a == 1 else (a % 16 == 0) | (a > 0x7FFFFFFF) << 1
+                             | (a < -0x80000000) << 2 | (a > 0x7FFFFFFFFFFFFFFF) << 3)
+            elif isinstance(a, torch.Tensor):
+                k.append((a.dtype, a.data_ptr() % 16 == 0))
+            else:
+                k.append((a.__class__, a))
+        kk = tuple(kw.items())
+        k.append(kk)
+        k = tuple(k)
+        e = self.ks.get(k)
+        rt = triton.knobs.runtime
+        if (e is None or _TLAUNCH_CHECK or rt.launch_enter_hook.calls
+                or rt.launch_exit_hook.calls or self.fn.pre_run_hooks):
+            kern = self.fn[grid](*args, **kw)
+            if e is None:
+                self.ks[k] = kern
+            elif kern is not e:
+                raise AssertionError(f"_TLaunch {self.fn}: key {k} -> another kernel")
+            return
+        t = self.tails.get((len(args), kk))
+        if t is None:
+            t = self.tails[(len(args), kk)] = tuple(
+                kw[nm] for nm in self.fn.arg_names[len(args):])
+        e.run(grid[0], grid[1], grid[2], torch._C._cuda_getCurrentRawStream(dev), e.function,
+              e.packed_metadata, None, None, None, *args, *t)
+
+
+_code_asm_launch = (_TLaunch(_code_asm_kernel)
+                    if _TLAUNCH and _code_asm_kernel is not None else None)
+
 _SLIDE_S = 64  # staging slots per row = tokens compressed per row per epoch (max)
 # _RowStore: rows up to this capacity (tokens) share allocations (0: never)
 _ROWS_SHARE_CAP = int(os.environ.get("PICOKV_ROWS_SHARE_CAP", "2048"))
+# PICOKV_RADIX_FULL (default 16): a radix extend's prefix copies go in groups
+# of layers, at most this many per group (_ChunkStage._fplan); 0: layer by
+# layer, two layers ahead
+_RADIX_FULL = int(os.environ.get("PICOKV_RADIX_FULL", "16"))
+# radix mode, full layer slots: layers per D2H batch from G (_ChunkStage._tplan; 0: per layer)
+_RADIX_D2H_GROUP = int(os.environ.get("PICOKV_RADIX_D2H_GROUP", "8"))
 # PICOKV_RADIX_STATS=1: one stdout line per radix extend (tokens by copy path)
 _RADIX_STATS = os.environ.get("PICOKV_RADIX_STATS") == "1"
 # PICOKV_RADIX_CODES_CHECK=1: every code-reusing prepare is compared with the
 # full recompress (torch.equal of the cache fields; a mismatch is logged)
 _RADIX_CODES_CHECK = os.environ.get("PICOKV_RADIX_CODES_CHECK") == "1"
+# PICOKV_RADIX_PAGES=1 (needs PICOKV_BLK_TABLES=1): radix hits read their
+# leading 512-token blocks of codes from code pages shared by every row with
+# the same prefix (_CodePage) instead of each holding its own copy
+_RADIX_PAGES = os.environ.get("PICOKV_RADIX_PAGES", "0") == "1"
+_PG_DEBUG = os.environ.get("PICOKV_PG_DEBUG", "0") == "1"  # one log line per paged row
+# PICOKV_RADIX_PAGES_KEEP: a paged row's pages outlive its pin up to the next
+# extend, which keeps those its prefixes hold (a repeat hit reads them)
+_PG_KEEP = os.environ.get("PICOKV_RADIX_PAGES_KEEP", "1") != "0"
+# PICOKV_RADIX_APPEND_CODES: an incremental (append-mode) chunk's new global
+# tokens' codes go to the mirrors too, as a first chunk's do
+_APPEND_CODES = os.environ.get("PICOKV_RADIX_APPEND_CODES", "1") != "0"
+# PICOKV_RADIX_ANSWER_DUMP=<dir> (debug): layer 0's captured decode-written
+# K/V per request span, and each finished request's token ids, saved there
+_ANS_DUMP = os.environ.get("PICOKV_RADIX_ANSWER_DUMP")
 
 
 def _round_up(x: int, m: int) -> int:
@@ -416,6 +540,42 @@ def _kvp_freed(acc, gen, n):
         acc[1] += n  # into a dropped pool
 
 
+def _kvp_empty2(pool, sa, sb, dtype, dev):
+    """_kvp_empty of two buffers (the same allocations, in order): one pool
+    context and one track when both are large-pool blocks."""
+    na = nb = dtype.itemsize
+    for s in sa:
+        na *= s
+    for s in sb:
+        nb *= s
+    if pool is None or _round_up(min(na, nb), 512) <= (1 << 20):
+        return _kvp_empty(pool, sa, dtype, dev), _kvp_empty(pool, sb, dtype, dev)
+    with pool.use():
+        a = torch.empty(sa, dtype=dtype, device=dev)
+        b = torch.empty(sb, dtype=dtype, device=dev)
+    pool.track(a, b)
+    return a, b
+
+
+def _kvp_empty(pool, shape, dtype, dev, alloc=torch.empty):
+    """A full-capacity packed buffer: in ``pool`` (tracked) when it is a
+    large-pool block (> 1 MiB), else from the default small pool. Small
+    blocks share 2 MiB segments that any small allocation reuses and
+    empty_cache releases; in the pool they piled up as free segments that
+    forced replacements, and every replacement regrew them (a Llama
+    multi-turn run: ~1000 cudaMalloc per replacement, 18% of the coded
+    prepare's host time)."""
+    n = dtype.itemsize
+    for s in shape:
+        n *= s
+    if pool is None or _round_up(n, 512) <= (1 << 20):
+        return alloc(shape, dtype=dtype, device=dev)
+    with pool.use():
+        t = alloc(shape, dtype=dtype, device=dev)
+    pool.track(t)
+    return t
+
+
 class _KVPool:
     """PICOKV_KV_POOL: the caching-allocator pool of the full-capacity packed
     buffers (and the radix hot tier). A live MemPool never returns its free
@@ -440,7 +600,10 @@ class _KVPool:
     Only when the exact segments would leave 2% of the pair unused: with the
     arena 24 prompts of 122,880 tokens (0.5% unused) peaked 76 MiB higher
     (its cached tail), 24 of 120,000 (2.6%) 1.35 GiB lower, 96 of 32,768
-    8.6 GiB lower."""
+    8.6 GiB lower. Full-capacity buffers of 1 MiB or less stay out of the
+    pool (_kvp_empty); any other block that small would come from the small
+    pool's 2 MiB segments, never from an arena: no arena for them, and
+    their segments leave the modeled tail as it is."""
 
     def __init__(self, slack: int, arena: int = 0):
         self.pool = torch.cuda.MemPool(use_on_oom=True)
@@ -460,10 +623,11 @@ class _KVPool:
         self.size = {s["address"]: s["total_size"] for s in snap}
         self.res = sum(self.size.values())
 
-    def grow(self, nk: int, nv: int, dev):
-        """Before allocating an nk-byte and an nv-byte buffer (not while capturing)."""
+    def grow(self, nk: int, nv: int, dev, inctx=False):
+        """Before allocating an nk-byte and an nv-byte buffer (not while
+        capturing). ``inctx``: called inside use()."""
         n = _round_up(nk, 512) + _round_up(nv, 512)
-        if not self.model or not self.arena or 2 * n > self.arena:
+        if not self.model or not self.arena or 2 * n > self.arena or min(nk, nv) <= (1 << 20):
             return
         if _kvp_waste(nk) + _kvp_waste(nv) < 0.02 * n:
             return
@@ -474,7 +638,7 @@ class _KVPool:
             return
         sz = _round_up(self.arena // n * n, 2 << 20)
         try:
-            with self.use():
+            with self.use() if not inctx else contextlib.nullcontext():
                 a = torch.empty(sz, dtype=torch.uint8, device=dev)
         except torch.OutOfMemoryError:  # near full: exact segments for a while
             self.cool = 64
@@ -507,7 +671,7 @@ class _KVPool:
                     bisect.insort(b, p)
                     self.size[p] = s = _kvp_seg(n)
                     self.res += s
-                    if n <= f1 - f0:  # the modeled tail would have fit: stale
+                    if (1 << 20) < n <= f1 - f0:  # the modeled tail would have fit: stale
                         self.front = (0, 0)
             elif self.model is None:
                 snap = self.pool.snapshot()
@@ -732,9 +896,11 @@ _CUDART = None
 
 
 def _cudart():
-    """(cudaMemcpy2DAsync, cudaGetLastError) of the CUDA runtime torch loaded
-    (/proc/self/maps; ctypes), or False: one strided D2H per run with no
-    device-side gather (PICOKV_RADIX_2D=0: torch copies)."""
+    """(cudaMemcpy2DAsync, cudaGetLastError, 3D, batch) of the CUDA runtime
+    torch loaded (/proc/self/maps; ctypes), or False: one strided D2H per run
+    with no device-side gather (PICOKV_RADIX_2D=0: torch copies). 3D: a
+    cudaMemcpy3DAsync issuing function (_cudart_3d), or None; batch: a
+    cudaMemcpy3DBatchAsync one (_cudart_batch), or None."""
     global _CUDART
     if _CUDART is None:
         _CUDART = False
@@ -758,11 +924,162 @@ def _cudart():
                 fn.argtypes = [vp, sz, vp, sz, sz, sz, ctypes.c_int, vp]
                 fn.restype = ctypes.c_int
                 lib.cudaGetLastError.restype = ctypes.c_int
-                _CUDART = (fn, lib.cudaGetLastError)
+                _CUDART = (fn, lib.cudaGetLastError, _cudart_3d(lib), _cudart_batch(lib))
             except Exception as e:
                 logger.warning(f"[PicoKVAttnBackend] radix host K/V: no cudaMemcpy2DAsync "
                                f"({e!r}): torch copies")
     return _CUDART
+
+
+def _cudart_3d(lib):
+    """f(dst, dpitch, dh, src, spitch, sh, y0, width, height, depth, stream):
+    cudaMemcpy3DAsync D2H of ``depth`` slices of ``height`` rows of ``width``
+    bytes, row y0 on of slices ``spitch * sh`` bytes apart at ``src`` to
+    slices ``dpitch * dh`` apart at ``dst`` (rows ``dpitch`` apart): one call
+    copies the K (or V) of a block of window rows into host slots. None when
+    the runtime has none (PICOKV_RADIX_3D=0: off)."""
+    if os.environ.get("PICOKV_RADIX_3D", "1") == "0":
+        return None
+    try:
+        import ctypes
+
+        sz, vp = ctypes.c_size_t, ctypes.c_void_p
+
+        class _PP(ctypes.Structure):  # cudaPitchedPtr
+            _fields_ = [("ptr", vp), ("pitch", sz), ("xsize", sz), ("ysize", sz)]
+
+        class _Pos(ctypes.Structure):  # cudaPos
+            _fields_ = [("x", sz), ("y", sz), ("z", sz)]
+
+        class _Ext(ctypes.Structure):  # cudaExtent
+            _fields_ = [("width", sz), ("height", sz), ("depth", sz)]
+
+        class _P3(ctypes.Structure):  # cudaMemcpy3DParms
+            _fields_ = [("srcArray", vp), ("srcPos", _Pos), ("srcPtr", _PP), ("dstArray", vp),
+                        ("dstPos", _Pos), ("dstPtr", _PP), ("extent", _Ext), ("kind", ctypes.c_int)]
+
+        f3 = lib.cudaMemcpy3DAsync
+        f3.argtypes = [ctypes.POINTER(_P3), vp]
+        f3.restype = ctypes.c_int
+        p, ref = _P3(), ctypes.byref
+
+        def f(dst, dpitch, dh, src, spitch, sh, y0, width, height, depth, stream):
+            p.srcPtr = _PP(src, spitch, width, sh)
+            p.srcPos = _Pos(0, y0, 0)
+            p.dstPtr = _PP(dst, dpitch, width, dh)
+            p.extent = _Ext(width, height, depth)
+            p.kind = 2  # cudaMemcpyDeviceToHost
+            return f3(ref(p), stream)
+
+        return f
+    except Exception:
+        return None
+
+
+def _cudart_batch(lib):
+    """f(dst, src, dpitch, spitch, width, height, stream): one
+    cudaMemcpy3DBatchAsync of len(dst) D2H 2D copies, copy i ``height[i]``
+    rows of ``width`` bytes from ``src[i]`` (rows ``spitch`` apart) to
+    ``dst[i]`` (rows ``dpitch`` apart); dst / src / height: uint64 arrays.
+    One API call instead of one per copy (each ~4-6 us of host time). The
+    ops are 112-byte cudaMemcpy3DBatchOp rows written as 14 uint64 words
+    (layout checked against the header's structs here). None when the
+    runtime has none (CUDA < 12.8) or PICOKV_RADIX_BATCH=0."""
+    if os.environ.get("PICOKV_RADIX_BATCH", "1") == "0":
+        return None
+    try:
+        import ctypes
+
+        import numpy as np
+
+        sz, vp, ci = ctypes.c_size_t, ctypes.c_void_p, ctypes.c_int
+
+        class _Loc(ctypes.Structure):  # cudaMemLocation
+            _fields_ = [("type", ci), ("id", ci)]
+
+        class _Ptr(ctypes.Structure):
+            _fields_ = [("ptr", vp), ("rowLength", sz), ("layerHeight", sz), ("locHint", _Loc)]
+
+        class _Arr(ctypes.Structure):
+            _fields_ = [("array", vp), ("x", sz), ("y", sz), ("z", sz)]
+
+        class _U(ctypes.Union):
+            _fields_ = [("ptr", _Ptr), ("array", _Arr)]
+
+        class _Opd(ctypes.Structure):  # cudaMemcpy3DOperand
+            _fields_ = [("type", ci), ("op", _U)]
+
+        class _Ext(ctypes.Structure):  # cudaExtent
+            _fields_ = [("width", sz), ("height", sz), ("depth", sz)]
+
+        class _Op(ctypes.Structure):  # cudaMemcpy3DBatchOp
+            _fields_ = [("src", _Opd), ("dst", _Opd), ("extent", _Ext), ("srcAccessOrder", ci),
+                        ("flags", ctypes.c_uint)]
+
+        if (ctypes.sizeof(_Op) != 112 or _Opd.op.offset != 8 or _Op.dst.offset != 40
+                or _Op.extent.offset != 80 or _Op.srcAccessOrder.offset != 104 or _Op.flags.offset != 108
+                or _Ptr.locHint.offset != 24):
+            return None
+        fb = lib.cudaMemcpy3DBatchAsync
+        ver = ci(0)
+        if lib.cudaRuntimeGetVersion(ctypes.byref(ver)) != 0:
+            return None
+        v13 = ver.value >= 13000  # 12.8 - 12.9 take a failIdx pointer third
+        fb.argtypes = [sz, vp, ctypes.c_ulonglong, vp] if v13 else [sz, vp, vp, ctypes.c_ulonglong, vp]
+        fb.restype = ci
+        fidx = sz(0)
+        buf = [np.zeros((128, 14), np.uint64)]
+
+        def f(dst, src, dpitch, spitch, width, height, stream):
+            n = len(dst)
+            if buf[0].shape[0] < n:
+                buf[0] = np.zeros((2 * n, 14), np.uint64)
+            w = buf[0][:n]
+            w[:, 0] = 1  # src: cudaMemcpyOperandTypePointer
+            w[:, 1] = src
+            w[:, 2] = spitch  # rowLength (bytes: pointer copies have 1-byte elements)
+            w[:, 5] = 1
+            w[:, 6] = dst
+            w[:, 7] = dpitch
+            w[:, 10] = width
+            w[:, 11] = height
+            w[:, 12] = 1  # depth
+            w[:, 13] = 1  # cudaMemcpySrcAccessOrderStream, flags 0
+            # words 3/4, 8/9 (layerHeight, locHint) stay 0: tightly packed, no hint
+            p = w.ctypes.data
+            return fb(n, p, 0, stream) if v13 else fb(n, p, ctypes.byref(fidx), 0, stream)
+
+        def run3(p, n, stream):
+            """One cudaMemcpy3DBatchAsync of n op rows prebuilt at address p
+            (14 uint64 words each, as f writes them)."""
+            return fb(n, p, 0, stream) if v13 else fb(n, p, ctypes.byref(fidx), 0, stream)
+
+        f.run3 = run3
+
+        class _Attr(ctypes.Structure):  # cudaMemcpyAttributes
+            _fields_ = [("srcAccessOrder", ci), ("srcLoc", _Loc), ("dstLoc", _Loc), ("flags", ctypes.c_uint)]
+
+        f.run1 = None
+        if ctypes.sizeof(_Attr) == 24 and hasattr(lib, "cudaMemcpyBatchAsync"):
+            f1 = lib.cudaMemcpyBatchAsync
+            f1.argtypes = [vp] * 3 + [sz, vp, vp, sz] + [vp] * (1 if v13 else 2)
+            f1.restype = ci
+            at, ai = _Attr(1), sz(0)  # stream order, no location hints: every copy's
+
+            def run1(dp, sp, zp, n, stream):
+                """One cudaMemcpyBatchAsync of n contiguous copies, copy i
+                zp[i] bytes from sp[i] to dp[i] (dp / sp / zp: addresses of
+                uint64 arrays), any direction (the pointers say which): one
+                API call for the copies at ~0.7 us each of host time alone
+                (~1.6 in a Llama multi-turn run; a cudaMemcpy3DBatchAsync
+                row ~2 us, a torch copy ~4)."""
+                a = (dp, sp, zp, n, ctypes.byref(at), ctypes.byref(ai), 1)
+                return f1(*a, stream) if v13 else f1(*a, ctypes.byref(fidx), stream)
+
+            f.run1 = run1
+        return f
+    except Exception:
+        return None
 
 
 def picokv_stage_reserve_bytes(context_len: int, chunk: Optional[int], kv_heads: int,
@@ -851,6 +1168,122 @@ def _slice_layer(stack: Optional[torch.Tensor], layer_idx: int, heads: int):
     return layer
 
 
+class _CodePage:
+    """PICOKV_RADIX_PAGES: one 512-token block's packed global codes for
+    every layer in the tail kernel's page layout (keys [L, H, KW, 512],
+    values [L, H, 8, CV] int64), read by every decode row whose block e
+    holds the same 512 global tokens (host slots ``slots``). The stage
+    pools it under the slot of its last token while it lives; only pins
+    hold it. ``ext`` / ``ready``: the extend that writes it / written."""
+    __slots__ = ("k", "v", "slots", "ext", "ready", "__weakref__")
+
+    def __init__(self, k, v, slots, ext):
+        self.k, self.v, self.slots, self.ext, self.ready = k, v, slots, ext, False
+
+
+class _PagePin:
+    """The code pages of one prepared row (its blocks 0..s0-1), held by its
+    request cache's layers and its decode rows: a page lives while a row
+    reading it does, and stands in for that row's own storage of the block
+    (no budget). kb / vb: the pages' layer-0 key / value addresses."""
+    __slots__ = ("pages", "kb", "vb")
+
+    def __init__(self, pages):
+        self.pages = pages
+        self.kb = np.array([p.k.data_ptr() for p in pages], dtype=np.int64)
+        self.vb = np.array([p.v.data_ptr() for p in pages], dtype=np.int64)
+
+
+_PG_MAT = [0]  # paged layers copied whole (PICOKV_RADIX_PAGES)
+
+
+class _PagedKVCache(PreparedKVCache):
+    """PICOKV_RADIX_PAGES: a prepared layer (a radix hit's) whose global
+    blocks e < s0 are code pages and the rest its own full-capacity buffers:
+    ``_pg`` = (own k [1, H, KW, oc], own v [1, H, oc/64, CV], s0, pin, gl,
+    layer), zero past the content. The decode adopt takes it as it is
+    (_adoptable: a shared row); packed_key / packed_value give the plain
+    layer (pages ++ own: a copy, kept) to any other reader, and None
+    assigned to them (the dedup) drops the pages."""
+
+    def __init__(self, pg, **kw):
+        self._pg = None
+        super().__init__(packed_key=None, packed_value=None, **kw)
+        self._pg = pg
+
+    def full(self):
+        """(k [1, H, KW, cap], v [1, H, cap/64, CV]): pages ++ own, a copy."""
+        ok, ov, s0, pin, _, l = self._pg
+        ps = pin.pages[:s0]
+        return (torch.cat([p.k[l:l + 1] for p in ps] + [ok], dim=-1),
+                torch.cat([p.v[l:l + 1] for p in ps] + [ov], dim=2))
+
+    def _mat(self):
+        k, v = self.full()
+        g = self._pg[4]
+        self._pg = None
+        k._pk_full = v._pk_full = True
+        self.__dict__["_pk"], self.__dict__["_pv"] = k[..., :g], v[:, :, :(g + 63) // 64]
+        _PG_MAT[0] += 1
+        if _PG_MAT[0] == 1:
+            logger.warning("[PicoKVAttnBackend] PICOKV_RADIX_PAGES: a paged layer was read "
+                           "as one buffer (copied whole; its row holds no pages)")
+
+    def _put(self, a, b, t):
+        if self._pg is not None:
+            if t is None:  # the dedup: its decode row holds the pages + own storage
+                self._pg = None
+                self.__dict__[b] = None
+            else:
+                self._mat()
+        self.__dict__[a] = t
+
+    @property
+    def packed_key(self):
+        if self._pg is not None:
+            self._mat()
+        return self.__dict__.get("_pk")
+
+    @packed_key.setter
+    def packed_key(self, t):
+        self._put("_pk", "_pv", t)
+
+    @property
+    def packed_value(self):
+        if self._pg is not None:
+            self._mat()
+        return self.__dict__.get("_pv")
+
+    @packed_value.setter
+    def packed_value(self, t):
+        self._put("_pv", "_pk", t)
+
+
+def _c_pg(c):
+    """A _PagedKVCache's pages (its ``_pg``), else None."""
+    return c.__dict__.get("_pg") if c is not None else None
+
+
+def _c_none(c):
+    """c.packed_key is None (a paged layer as it is: not None)."""
+    return _c_pg(c) is None and c.packed_key is None
+
+
+def _c_gl(c):
+    """c's global token count (0: none), a paged layer as it is."""
+    p = _c_pg(c)
+    if p is not None:
+        return p[4]
+    return 0 if c is None or c.packed_key is None else int(c.packed_key.shape[-1])
+
+
+def _c_pk(c):
+    """(k, v) with c.packed_key / packed_value's head dims and dtype (a
+    paged layer: its own buffers)."""
+    p = _c_pg(c)
+    return (p[0], p[1]) if p is not None else (c.packed_key, c.packed_value)
+
+
 class _RowStore:
     """PICOKV_ROWS: one decode-batch layer's packed global codes stored per
     row instead of as one [B, H, KW, L] rectangle padded to the longest row
@@ -864,28 +1297,133 @@ class _RowStore:
     stay valid. Rows change only through set / permute / alloc, which keep
     host mirrors of the three tables (sync: one H2D of them, no per-row
     tensor calls; kp, vp and ct are rows of one device buffer, ct its int32
-    view)."""
+    view).
 
-    def __init__(self, B, H, KW, CV, dtype, device, tabs=None):
+    PICOKV_BLK_TABLES=1 (``nb`` > 0 blocks per row): the tables also carry
+    per-512-token-block page entries (bkp / bvp int64 [B * nb], the
+    extension's block-table overloads) and a first own block s0 per row
+    (int32 [B], the other half of the caps row: synced with it): row b
+    reads its blocks e < s0[b] from the pages at bkp / bvp[b * nb + e]
+    and the rest from its row tables, which then hold its own storage from
+    block s0 on (pointers biased by -s0 blocks, cap its stride). s0 = 0
+    (every row for now): the plain row, no entry is read or written (an
+    entry per block, t206, cost ~37 us of host time per sync_all and ~1%
+    of tail kernel time). Same fixed addresses as the row tables.
+
+    PICOKV_RADIX_PAGES: a shared row (share / adopt) reads its blocks e <
+    s0 from code pages (_CodePage) it holds through ``pg[i]`` = (pin,
+    layer), k[i] / v[i] its own storage from block s0 (caps() / rcap():
+    the logical capacity, own + 512 s0). Its entries are written by the
+    next sync when it is set or moved (``_pend``); a plain row's are never
+    read (s0 0)."""
+
+    def __init__(self, B, H, KW, CV, dtype, device, tabs=None, nb=0):
         self.k, self.v = [None] * B, [None] * B
         self.H, self.KW, self.CV, self.dtype, self.device = H, KW, CV, dtype, device
-        self._B = B
-        gi = tabs.take(B) if tabs is not None else None
+        self._B, self._nb = B, nb
+        gi = tabs.take(B, nb) if tabs is not None else None
         self._grp, self._gi = (tabs, gi) if gi is not None else (None, None)
         if gi is None:
             self._h = np.zeros((3, B), dtype=np.int64)  # host mirror: k ptr, v ptr, caps (int32)
             self._tab = torch.zeros(3, B, dtype=torch.int64, device=device)
+            if nb:
+                self._bk = torch.zeros(2, B, nb, dtype=torch.int64, device=device)
         else:  # rows of the batch's shared mirrors / tables (_RowTabs)
             self._h, self._tab = tabs.h[gi], tabs.t[gi]
+            if nb:
+                self._bk = tabs.bk[gi]
         self._hc = self._h[2].view(np.int32)[:B]
         self.ct = self._tab[2].view(torch.int32)[:B]
+        self.s0 = self._tab[2].view(torch.int32)[B:]  # first own block (0)
+        self._hs = self._h[2].view(np.int32)[B:]  # its host mirror
         self.tables = (self._tab[0], self._tab[1], self.ct)
+        if nb:
+            self.tables += (self._bk[0].view(-1), self._bk[1].view(-1), self.s0, nb)
+        self.pg, self._pend, self._nsh = [None] * B, set(), 0  # shared rows (RADIX_PAGES)
 
     def caps(self):
-        return self._hc.tolist()
+        return (self._hc + 512 * self._hs).tolist() if self._nsh else self._hc.tolist()
+
+    def rcap(self, i):
+        """Row i's logical capacity (tokens)."""
+        return int(self._hc[i]) + 512 * int(self._hs[i])
+
+    def _unshare(self, i):
+        self._hs[i] = 0
+        self.pg[i] = None
+        self._pend.discard(i)
+        self._nsh -= 1
+
+    def share(self, i, k, v, s0, pg):
+        """Row i = the pages of ``pg`` = (pin, layer) for blocks e < s0 ++ own
+        storage (k, v) [1, H, KW, oc] / [1, H, oc/64, CV] from block s0 on."""
+        assert 0 < s0 <= self._nb and len(pg[0].pages) >= s0
+        if self.pg[i] is None:
+            self._nsh += 1
+        self.k[i], self.v[i] = k, v
+        self._h[0, i] = k.data_ptr() - s0 * 512 * 8
+        self._h[1, i] = v.data_ptr() - s0 * 8 * self.CV * 8
+        self._hc[i] = k.shape[-1]
+        self._hs[i] = s0
+        self.pg[i] = pg
+        self._pend.add(i)
+
+    def adopt(self, i, a):
+        """Row i = _adoptable's result: (k, v) or a shared row (k, v, s0, pg)."""
+        if len(a) == 2:
+            self.set(i, *a)
+        else:
+            self.share(i, *a)
+
+    def carry(self, i, o, j):
+        """Row i = row j of store ``o`` (the same storage, shared or not)."""
+        if o.pg[j] is None:
+            self.set(i, o.k[j], o.v[j])
+        else:
+            self.share(i, o.k[j], o.v[j], int(o._hs[j]), o.pg[j])
+
+    def row_full(self, j):
+        """Shared row j as one plain [1, H, KW, cap] / [1, H, cap/64, CV]
+        pair (pages ++ own storage: a copy)."""
+        pin, l = self.pg[j]
+        ps = pin.pages[:int(self._hs[j])]
+        return (torch.cat([p.k[l:l + 1] for p in ps] + [self.k[j]], dim=-1),
+                torch.cat([p.v[l:l + 1] for p in ps] + [self.v[j]], dim=2))
+
+    def grow(self, rows, caps):
+        """alloc(rows, caps) of a regrow: a shared row keeps its pages and
+        gets zeroed own storage for the logical cap (the caller copies the
+        old own storage: same s0)."""
+        plain = [(i, c) for i, c in zip(rows, caps) if self.pg[i] is None]
+        if plain:
+            self.alloc([i for i, _ in plain], [c for _, c in plain])
+        new = []
+        for i, c in zip(rows, caps):
+            if self.pg[i] is not None:
+                s0 = int(self._hs[i])
+                oc = c - 512 * s0
+                self.k[i] = torch.empty(1, self.H, self.KW, oc, dtype=self.dtype, device=self.device)
+                self.v[i] = torch.empty(1, self.H, oc // 64, self.CV, dtype=self.dtype,
+                                        device=self.device)
+                self._h[0, i] = self.k[i].data_ptr() - s0 * 512 * 8
+                self._h[1, i] = self.v[i].data_ptr() - s0 * 8 * self.CV * 8
+                self._hc[i] = oc
+                new += [self.k[i], self.v[i]]
+        if new:
+            torch._foreach_zero_(new)
+
+    def _repg(self, g):
+        # permute's page state: row i <- old row g[i] (-1: vacant); a shared
+        # row that moved (or was pending) rewrites its entries
+        pg, pend = self.pg + [None], self._pend
+        self.pg = [pg[j] for j in g]
+        self._pend = {i for i, j in enumerate(g) if pg[j] is not None and (j != i or j in pend)}
+        self._nsh = len(self.pg) - self.pg.count(None)
 
     def set(self, i, k, v):
         """Row i's storage = (k, v) (None, None: vacant)."""
+        if self.pg[i] is not None:
+            self._unshare(i)
         self.k[i], self.v[i] = k, v
         h = self._h
         if k is None:
@@ -911,9 +1449,13 @@ class _RowStore:
         k, v = self.k + [None], self.v + [None]  # index -1: vacant
         self.k, self.v = [k[j] for j in g], [v[j] for j in g]
         h2, hc = self._h[:2, frm], self._hc[frm]  # gathered copies
+        hs = self._hs[frm] if self._nsh else None
         self._h[:] = 0
         self._h[:2, keep] = h2
         self._hc[keep] = hc
+        if hs is not None:
+            self._hs[keep] = hs
+            self._repg(g)
 
     def alloc(self, rows, caps):
         """Zeroed storage for ``rows`` at ``caps`` (multiples of 512; 0 =
@@ -931,6 +1473,8 @@ class _RowStore:
         for i, c in zip(rows, caps):
             if c is None:
                 continue
+            if self.pg[i] is not None:
+                self._unshare(i)
             if not c:
                 self.set(i, None, None)
             elif c <= _ROWS_SHARE_CAP:
@@ -988,9 +1532,17 @@ class _RowStore:
         h = tabs.h[a:a + m]
         hc = h[:, 2].view(np.int32)[:, :h.shape[2]]
         h2, c2 = h[:, :2, frm], hc[:, frm]  # gathered copies
+        shd = [s for s in stores if s._nsh]
+        if shd:
+            hs = h[:, 2].view(np.int32)[:, h.shape[2]:]
+            s2 = hs[:, frm]
         h[:] = 0
         h[:, :2, keep] = h2
         hc[:, keep] = c2
+        if shd:
+            hs[:, keep] = s2
+            for s in shd:
+                s._repg(g)
 
     @staticmethod
     def alloc_all(stores, rows, caps):
@@ -1015,6 +1567,8 @@ class _RowStore:
                 c = cs[r]
                 if c is None:
                     continue  # adopted storage (set by the caller)
+                if s.pg[i] is not None:
+                    s._unshare(i)
                 if not c:
                     s.set(i, None, None)
                 elif c <= _ROWS_SHARE_CAP:
@@ -1049,11 +1603,15 @@ class _RowStore:
     def sync(self):
         """Rewrite the device tables from the host mirrors (in place, async)."""
         self._tab.copy_(torch.from_numpy(self._h).pin_memory(), non_blocking=True)
+        if self._pend:
+            _RowStore._flush([self])
 
     @staticmethod
     def sync_all(stores):
         """sync() of several stores from ONE pinned staging block (one copy
         when they are a _RowTabs span)."""
+        if any(s._pend for s in stores):
+            _RowStore._flush([s for s in stores if s._pend])
         sp = _RowStore._span(stores) if len(stores) > 1 else None
         if sp is not None:
             tabs, a, m = sp
@@ -1062,11 +1620,51 @@ class _RowStore:
             return
         if len(stores) == 1 or len({s._h.shape for s in stores}) != 1:
             for s in stores:
-                s.sync()
+                s._tab.copy_(torch.from_numpy(s._h).pin_memory(), non_blocking=True)
             return
         hp = torch.from_numpy(np.stack([s._h for s in stores])).pin_memory()
         for s, h in zip(stores, hp.unbind(0)):
             s._tab.copy_(h, non_blocking=True)
+
+    @staticmethod
+    def _flush(stores):
+        """The page entries (blocks e < s0) of the shared rows set or moved
+        since the last sync: one pinned H2D of (flat index, address) pairs and
+        one index_copy_ per entry buffer (one for a _RowTabs span). Entry e of
+        layer l's page p: p's layer-0 base + l layers, biased by -e blocks."""
+        dst, grp = {}, {}  # rows of one page pin / s0 / geometry: one numpy pass
+        for s in stores:
+            B, nb, H, KW, CV = s._B, s._nb, s.H, s.KW, s.CV
+            if s._grp is not None:  # key: the entry buffer (a span's stores share one)
+                key, off = id(s._grp), s._gi * 2 * B * nb
+                t = dst.get(key)
+                t = s._grp.bk.view(-1) if t is None else t
+            else:
+                key, off, t = id(s), 0, s._bk.view(-1)
+            for i in s._pend:
+                (pin, l), s0 = s.pg[i], int(s._hs[i])
+                if s0:
+                    g = grp.setdefault((key, id(pin), s0, B, nb, H, KW, CV), (pin, []))
+                    g[1].append((off + i * nb, off + (B + i) * nb, l))
+            dst[key] = t
+            s._pend = set()
+        if not grp:
+            return
+        parts = {}
+        for (key, _, s0, B, nb, H, KW, CV), (pin, m) in grp.items():
+            a, e = np.array(m, dtype=np.int64), np.arange(s0, dtype=np.int64)
+            lk = a[:, 2:3]
+            parts.setdefault(key, []).append(np.stack((
+                np.concatenate(((a[:, :1] + e).ravel(), (a[:, 1:2] + e).ravel())),
+                np.concatenate(((pin.kb[:s0] + (lk * (H * KW * 512) - e * 512) * 8).ravel(),
+                                (pin.vb[:s0] + (lk * (H * 8) - e * 8) * (CV * 8)).ravel())))))
+        xs = [np.concatenate(v, axis=1) for v in parts.values()]
+        d = torch.from_numpy(np.concatenate(xs, axis=1)).pin_memory().to(
+            next(iter(dst.values())).device, non_blocking=True)
+        o = 0  # entries unique: the same tables as one copy per (store, row)
+        for key, x in zip(parts, xs):
+            dst[key].index_copy_(0, d[0, o:o + x.shape[1]], d[1, o:o + x.shape[1]])
+            o += x.shape[1]
 
     def nbytes(self, held=None):
         """Bytes held (whole buffers: a row view pins its allocation).
@@ -1078,6 +1676,11 @@ class _RowStore:
             if t is not None:
                 s = t.untyped_storage()
                 held[s.data_ptr()] = s.nbytes()
+        for p in (self.pg if self._nsh else ()):  # code pages: once
+            if p is not None:
+                for t in (x for pg in p[0].pages for x in (pg.k, pg.v)):
+                    s = t.untyped_storage()
+                    held[s.data_ptr()] = s.nbytes()
         return sum(held.values()) if own else None
 
 
@@ -1087,15 +1690,19 @@ class _RowTabs:
     in store-creation order (layer order): a membership change permutes
     every layer's mirrors in one numpy pass and syncs them in one H2D copy
     (_RowStore.permute_all / sync_all) instead of one per layer. Addresses
-    fixed for the batch's life, as a store's own tables."""
+    fixed for the batch's life, as a store's own tables. ``nb`` > 0: the
+    stores' page entries too (bk [n, 2, B, nb]; read below a row's s0)."""
 
-    def __init__(self, n, B, device):
+    def __init__(self, n, B, device, nb=0):
         self.h = np.zeros((n, 3, B), dtype=np.int64)
         self.t = torch.zeros(n, 3, B, dtype=torch.int64, device=device)
+        self.nb = nb
+        if nb:
+            self.bk = torch.zeros(n, 2, B, nb, dtype=torch.int64, device=device)
         self.used = 0
 
-    def take(self, B):
-        if self.used >= self.h.shape[0] or B != self.h.shape[2]:
+    def take(self, B, nb=0):
+        if self.used >= self.h.shape[0] or B != self.h.shape[2] or nb != self.nb:
             return None  # more stores than layers / another row count: own tables
         self.used += 1
         return self.used - 1
@@ -1138,7 +1745,9 @@ class _ChunkStage:
         self.ev_u = [torch.cuda.Event() for _ in range(layers)]  # compute side: layer l done
         self.ev_d = [torch.cuda.Event() for _ in range(layers)]  # radix D2H of layer l done
         self._dprev = None  # (ev_d, K/V buffers) of the previous layer's D2H (_d2h_done)
-        self.tree = self.rplan = None  # radix mode (attach)
+        self.tree = self.rplan = self.rbat = None  # radix mode (attach)
+        self.fpl = None  # radix mode, an extend's layer-group copies (_fplan)
+        self.tpl = None  # radix mode, full layer slots: the D2H from G (_tplan)
         self.hot = None  # radix mode: the GPU hot tier's mirrors (attach)
         # radix mode, per extend (rbegin): the forward's stream, _d2h's layout
         # verdict (every layer's K/V views share it)
@@ -1228,6 +1837,13 @@ class _ChunkStage:
         self.tb = 2 * self.H * self.D * torch.finfo(self.dtype).bits // 8  # bytes / token
         self.hot, self.code = None, None
         self.cplan, self.cmarks, self.cwr, self.rsl = {}, [], {}, {}
+        # PICOKV_RADIX_PAGES: live code pages by the slot of their last
+        # token (weak: pins hold them), the keys per host page, the extend
+        # counter and this extend's new pages (ready at its last layer);
+        # kept pages (strong, PICOKV_RADIX_PAGES_KEEP) and how many the last
+        # extend's begin let go
+        self.cpg, self.cpg_hp, self.ext, self.cnew = {}, {}, 0, []
+        self.ckeep, self.kdrop = {}, 0
         if cell > 0 and os.environ.get("PICOKV_RADIX_HOT", "1") != "0":
             page = self.L * self.BLK * self.tb
             if codes is not None:
@@ -1266,7 +1882,68 @@ class _ChunkStage:
                                 f"pages): {n} tokens held by running requests")
             if self._grow_all(len(self.pool) + -(-(n - sl.nfree) // self.BLK)):
                 x = sl.alloc(n)
+        if x is not None and self.cpg:
+            self._cpg_drop(x)
         return x
+
+    # -- radix mode: code pages (PICOKV_RADIX_PAGES) -------------------------
+    # A hit row's blocks of 512 global tokens whose codes the mirrors hold
+    # become code pages (_CodePage) that every later row with the same 512
+    # slots reads instead of its own copy. Pooled weakly: a page lives while
+    # a pin holds it (rows reading it), and while ckeep does: from its row's
+    # prepare to the begin of the first later extend whose prefixes do not
+    # hold its last slot (before that extend's first allocation, as row mode
+    # frees a finished row's own storage at the extend's layer 0: no pool
+    # allocation runs between extends), so it never adds memory over row
+    # mode; a slot taken again (_r_alloc: its token changes) drops the keys
+    # of the pages holding it (the pinned pages stay valid for their rows).
+
+    def cpg_get(self, sl):
+        """The live page holding exactly the 512 slots ``sl`` (written by an
+        earlier extend, or by an earlier row of this one: every layer
+        prepares the rows in order), else None."""
+        r = self.cpg.get(int(sl[-1]))
+        pg = r() if r is not None else None
+        if pg is None or not (pg.ready or pg.ext == self.ext) or not np.array_equal(pg.slots, sl):
+            return None
+        return pg
+
+    def cpg_put(self, pg, hps=None):
+        """``hps``: _pages([pg.slots], BLK) when the caller has it."""
+        key, B = int(pg.slots[-1]), self.BLK
+        hps = self._pages([pg.slots], B) if hps is None else hps
+        cpg, chp = self.cpg, self.cpg_hp
+
+        def gone(r, key=key, hps=hps):  # the page died: its key, if still its
+            if cpg.get(key) is r:
+                del cpg[key]
+                for p in hps:
+                    ks = chp.get(p)
+                    if ks is not None:
+                        ks.discard(key)
+                        if not ks:
+                            del chp[p]
+        cpg[key] = weakref.ref(pg, gone)
+        for p in hps:
+            chp.setdefault(p, set()).add(key)
+        self.cnew.append(pg)
+
+    def _cpg_drop(self, x):
+        B = self.BLK
+        for p in self._pages([x], B):
+            ks = self.cpg_hp.get(p)
+            for key in (list(ks) if ks else ()):
+                r = self.cpg.get(key)
+                pg = r() if r is not None else None
+                if pg is None or np.isin(pg.slots, x).any():
+                    self.cpg.pop(key, None)
+                    self.ckeep.pop(key, None)
+                    for q in (self._pages([pg.slots], B) if pg is not None else (p,)):
+                        s_ = self.cpg_hp.get(q)
+                        if s_ is not None:
+                            s_.discard(key)
+                            if not s_:
+                                del self.cpg_hp[q]
 
     def _hot_take(self, pages):
         """rbegin: mirrors for the pages this extend reads (prefix slots) or
@@ -1344,9 +2021,11 @@ class _ChunkStage:
         return k * self.hn
 
     def hot_reset(self):
-        """The tree's reset (flush_cache): every mirror goes."""
+        """The tree's reset (flush_cache): every mirror goes (and the code
+        page pool: pinned pages stay with their rows)."""
         if self.hot:
             self._hot_drop(list(self.hot))
+        self.cpg, self.cpg_hp, self.ckeep = {}, {}, {}
 
     def _hot_drop(self, pages):
         """Free the mirrors of ``pages``. The copy streams are drained first:
@@ -1381,6 +2060,190 @@ class _ChunkStage:
         st = np.r_[0, np.flatnonzero(cut) + 1]
         return list(zip(a[st].tolist(), b[st].tolist(), (np.r_[st[1:], len(a)] - st).tolist()))
 
+    # -- radix mode: decode-written tokens (PICOKV_RADIX_ANSWER) ---------------
+    # A request's generated tokens get host slots like a prompt's: the ones
+    # in its dense window at an epoch boundary, copied over the epoch
+    # (PicoKVAttnBackend._ans_early, ans_win), the ones about to leave it
+    # that no early copy took (_ans_plan / _ans_layer) and, at finish, the
+    # ones still in it (_ans_finish); the tree's cache_finished_req inserts
+    # them with the prompt. Their K/V is the one decode wrote (the attention
+    # over the compressed cache produced it), as a stock radix cache keeps
+    # its decode-written K/V.
+
+    def ans_alloc(self, n):
+        """n host slots for decode-written tokens (one attention-TP verdict)
+        whose hot-tier mirror copies, K/V and codes, are no longer valid
+        (these copies write the host pages only). None: none taken."""
+        x = self._r_alloc(n)
+        ok = x is not None
+        if self.sync is not None:
+            ok = self.sync(ok)
+        if not ok:
+            if x is not None:
+                self.tree.slots.free(x)
+            return None
+        if self.hot:
+            pg = x // self.BLK
+            for p in self._pages([x], self.BLK):
+                h = self.hot.get(p)
+                if h is not None:
+                    a = x[pg == p] % self.BLK
+                    h[2][a] = False
+                    h[6][a] = False
+        return x
+
+    def ans_runs(self, x):
+        """(page, offset in page, source token, n) runs of slots ``x`` taking
+        source tokens 0 .. len(x) - 1 in order."""
+        B = self.BLK
+        return [(s // B, s % B, o, n)
+                for s, o, n in self._runs(x, np.arange(len(x), dtype=np.int64), B)]
+
+    def ans_copy(self, t, runs, l=None):
+        """Decode-written K/V ``t`` to host slot ``runs`` (ans_runs) on ds once
+        the current stream's queued work (t's gather) is done: layer l's
+        [n, 2, KVH, D], or l None: every layer's [L, n, 2, KVH, D] (one 2D copy
+        per run). ``t`` goes back to the allocator after the copies."""
+        global _CUDART
+        ds, tb, B = self.ds, self.tb, self.BLK
+        ds.wait_stream(torch.cuda.current_stream(self.dev))
+        cr, s0 = _cudart(), t.data_ptr()
+        m = t.shape[-4] if l is None else 0
+        done = bool(cr)
+        if done:
+            fn, h = cr[0], ds.cuda_stream
+            for p, a, o, n in runs:
+                d = self.pool[p].data_ptr() + a * tb
+                if (fn(d, B * tb, s0 + o * tb, m * tb, n * tb, self.L, 2, h) if l is None
+                        else fn(d + l * B * tb, n * tb, s0 + o * tb, n * tb, n * tb, 1, 2, h)):
+                    err = cr[1]()
+                    logger.warning(f"[PicoKVAttnBackend] radix host K/V: cudaMemcpy2DAsync "
+                                   f"failed ({err}): torch copies")
+                    _CUDART = False
+                    done = False
+                    break
+        if not done:
+            with torch.cuda.stream(ds):
+                for p, a, o, n in runs:
+                    if l is None:
+                        self.pool[p][:, a:a + n].copy_(t[:, o:o + n], non_blocking=True)
+                    else:
+                        self.pool[p][l, a:a + n].copy_(t[o:o + n], non_blocking=True)
+        t.record_stream(ds)
+
+    def ans_win_ops(self, blocks):
+        """ans_win's batch rows of ``blocks``, K then V: (layer 0's host
+        addresses, window rows, source offsets in a row, heights); row r of
+        block (g0, G, s0, m, p, a) is window row g0 + r from token s0 to
+        slots a + r * m of page p (host pages stay while slots are out)."""
+        bl = np.array(blocks, dtype=np.int64).reshape(-1, 6)
+        G = bl[:, 1]
+        i = np.repeat(np.arange(len(bl)), G)
+        r = np.arange(len(i)) - np.repeat(np.cumsum(G) - G, G)
+        m = bl[i, 3]
+        pp = np.array([self.pool[p].data_ptr() for p in bl[:, 4].tolist()], dtype=np.int64)
+        dst = pp[i] + (bl[i, 5] + r * m) * self.tb
+        rows, s0 = bl[i, 0] + r, bl[i, 2] * (self.tb // 2)
+        return (np.concatenate((dst, dst + self.tb // 2)), np.concatenate((rows, rows)),
+                np.concatenate((s0, s0)), np.concatenate((m, m)))
+
+    def ans_win(self, kbuf, vbuf, blocks, l, wait=True, ops=None):
+        """Layer l's K/V of dense window ``blocks`` [row, rows, first slot, m,
+        page, offset in page] of kbuf / vbuf [B, cap, KVH, D] straight to host
+        slots on ds, no device copy, a block's rows' m tokens at consecutive
+        slots: all blocks in one cudaMemcpy3DBatchAsync (a 2D copy per row
+        and side) when the runtime has it, else K and V of a block are one
+        cudaMemcpy3DAsync each (~5 us of host time per call: ~0.7 ms a layer
+        for 64 rows). ``wait``: after the current stream's queued work (else
+        the caller's earlier wait covers the sources). The sources must
+        outlive the copies (record_stream); a later writer of them waits on
+        an event on ds. ``ops``: ans_win_ops(blocks) (once per plan). False:
+        no 3D copy (nothing issued)."""
+        global _CUDART
+        cr = _cudart()
+        f = cr[2] if cr else None
+        if f is None:
+            return False
+        ds, tb, B = self.ds, self.tb, self.BLK
+        if wait:
+            ds.wait_stream(torch.cuda.current_stream(self.dev))
+        hb, cap, h = tb // 2, kbuf.shape[1], ds.cuda_stream
+        kp, vp = kbuf.data_ptr(), vbuf.data_ptr()
+        if cr[3] is not None and blocks:  # the bytes of the 3D copies below
+            if ops is None:
+                ops = self.ans_win_ops(blocks)
+            src, n = ops[1] * (cap * hb) + ops[2], len(ops[1]) // 2
+            src[:n] += kp
+            src[n:] += vp
+            if not cr[3](ops[0] + l * B * tb, src, tb, hb, hb, ops[3], h):
+                return True
+            err = cr[1]()
+            logger.warning(f"[PicoKVAttnBackend] radix answer K/V: cudaMemcpy3DBatchAsync failed "
+                           f"({err}): one 3D copy each")
+            _CUDART = cr = cr[:3] + (None,)
+        for j, (g0, G, s0, m, p, a) in enumerate(blocks):
+            d, o = self.pool[p].data_ptr() + (l * B + a) * tb, g0 * cap * hb
+            if f(d, tb, m, kp + o, hb, cap, s0, hb, m, G, h) or f(d + hb, tb, m, vp + o, hb, cap, s0,
+                                                                  hb, m, G, h):
+                err = cr[1]()
+                logger.warning(f"[PicoKVAttnBackend] radix answer K/V: cudaMemcpy3DAsync failed "
+                               f"({err}): torch copies")
+                _CUDART = (cr[0], cr[1], None) + tuple(cr[3:])
+                for g0, G, s0, m, p, a in blocks[j:]:
+                    t = torch.stack((kbuf[g0:g0 + G, s0:s0 + m], vbuf[g0:g0 + G, s0:s0 + m]), 2)
+                    self.ans_copy(t.reshape(G * m, 2, self.H, self.D), [(p, a, 0, G * m)], l)
+                break
+        return True
+
+    def ans_rows(self, src, m, runs):
+        """Every layer's K/V ``src`` [(K, V [T, KVH, D] contiguous, first
+        slot)] of m tokens straight to host slot ``runs`` (ans_runs) on ds once
+        the current stream's queued work is done: a 2D copy per layer, side
+        and run, no device copy. The sources must outlive the copies
+        (record_stream). All of them in one cudaMemcpy3DBatchAsync when the
+        runtime has it (2 * L * runs 2D copies: 64 - 72 API calls a finish,
+        ~0.4 ms of host time). Without 2D copies: a gather, then ans_copy."""
+        global _CUDART
+        cr = _cudart()
+        if cr:
+            ds, tb, B = self.ds, self.tb, self.BLK
+            ds.wait_stream(torch.cuda.current_stream(self.dev))
+            fn, hb, h = cr[0], tb // 2, ds.cuda_stream
+            if cr[3] is not None:
+                # dst / src [L, 2 (K, V), runs] -> one batch, same bytes as below
+                pg = np.array([(self.pool[p].data_ptr() + a * tb, o * hb, n) for p, a, o, n in runs],
+                              dtype=np.int64)
+                ls = np.arange(len(src), dtype=np.int64)[:, None, None] * (B * tb)
+                dst = ls + np.array([0, hb], dtype=np.int64)[None, :, None] + pg[None, None, :, 0]
+                sp = np.array([(k.data_ptr() + s0 * hb, v.data_ptr() + s0 * hb) for k, v, s0 in src],
+                              dtype=np.int64)
+                srcp = sp[:, :, None] + pg[None, None, :, 1]
+                ht = np.broadcast_to(pg[None, None, :, 2], dst.shape)
+                if not cr[3](dst.ravel(), srcp.ravel(), tb, hb, hb, ht.ravel(), h):
+                    return
+                err = cr[1]()
+                logger.warning(f"[PicoKVAttnBackend] radix host K/V: cudaMemcpy3DBatchAsync "
+                               f"failed ({err}): one 2D copy each")
+                _CUDART = cr = cr[:3] + (None,)
+            for l, (k, v, s0) in enumerate(src):
+                kp, vp = k.data_ptr() + s0 * hb, v.data_ptr() + s0 * hb
+                for p, a, o, n in runs:
+                    d = self.pool[p].data_ptr() + (l * B + a) * tb
+                    if (fn(d, tb, kp + o * hb, hb, hb, n, 2, h)
+                            or fn(d + hb, tb, vp + o * hb, hb, hb, n, 2, h)):
+                        err = cr[1]()
+                        logger.warning(f"[PicoKVAttnBackend] radix host K/V: cudaMemcpy2DAsync "
+                                       f"failed ({err}): torch copies")
+                        _CUDART = cr = False
+                        break
+                if not cr:
+                    break
+            if cr:
+                return
+        t = torch.stack((torch.stack([k[s0:s0 + m] for k, _, s0 in src]),
+                         torch.stack([v[s0:s0 + m] for _, v, s0 in src])), 2)
+        self.ans_copy(t, runs)
+
     def rbegin(self, rows_in, eseq, plens, rstr):
         """Radix mode, layer 0 of an extend (rows_in: req rows, rstr: request
         ids): every row stages its tokens; a row with a prefix streams the
@@ -1388,7 +2251,9 @@ class _ChunkStage:
         whose prefix is not held (they attend only their tokens)."""
         tree, lost, cont, first = self.tree, [], [], []
         self.cur, self._dok = torch.cuda.current_stream(self.dev), None
+        self.fpl = self.tpl = None
         self.cplan, self.cmarks, self.cwr, self.rsl = {}, [], {}, {}
+        self.ext, self.cnew = self.ext + 1, []
         pre = {}
         for i, (row, ln, plen) in enumerate(zip(rows_in, eseq, plens)):
             if plen > 0:
@@ -1398,6 +2263,14 @@ class _ChunkStage:
                     continue
                 pre[i] = p
             (cont if plen > 0 else first).append([i, 0, ln, plen, 0, False, row])
+        self.kdrop = 0
+        if self.ckeep:  # kept code pages no prefix of this extend holds die now
+            ks = np.fromiter(self.ckeep, dtype=np.int64, count=len(self.ckeep))
+            held = (np.isin(ks, np.concatenate(list(pre.values()))) if pre
+                    else np.zeros(len(ks), dtype=bool))
+            for key in ks[~held].tolist():
+                del self.ckeep[key]
+            self.kdrop = int((~held).sum())
         rows = cont + first
         if not rows:
             return lost
@@ -1468,7 +2341,8 @@ class _ChunkStage:
         hot = self.hot
         if hot is not None:
             self._hot_take(self._pages([new, *pre.values()], B))
-        for r in sorted(rows, key=operator.itemgetter(0)):
+        srt = sorted(rows, key=operator.itemgetter(0))
+        for r in srt:
             s = new[k:k + r[2]]
             k += r[2]
             tree.pk_note(rstr[r[0]], r[3], s)
@@ -1534,17 +2408,33 @@ class _ChunkStage:
                   f"mirrors {0 if hot is None else len(hot)}", flush=True)
         self.rows = [r for r in rows if r[3] > 0]
         self.wplan = self._wplan(self.rows)
+        self.fpl = self._fplan(h2d, m2d, fill, d2d, dd) if self.rows else None
+        self.tpl = (self._tplan(srt, S, T) if self.fpl is not None and self.fpl["K"] == self.L
+                    and _RADIX_D2H_GROUP > 0 else None)
+        if self.tpl is not None:  # (_d2h: the rows without a prefix, per layer)
+            tp = self.tpl
+            self.rplan = (self.rplan[:2] + (tp["d2h"], dd, tp["pool"]) + self.rplan[5:7]
+                          + (tp["wm"], self.rplan[8]))
+        self.rbat = self._rbatch(h2d, m2d, fill) if self.rows and self.fpl is None else None
+        if _RADIX_STATS and self.rows:
+            fp = self.fpl
+            print(f"[picokv radix] layer slots {0 if fp is None else fp['K']} "
+                  f"groups {0 if fp is None else len(fp['grp'])} "
+                  f"d2h from G {0 if self.tpl is None else len(self.tpl['runs'])}", flush=True)
         if self.rows:
             # G: the previous forward is done with it; the prefix slots: their
             # D2H (an earlier extend's, on ds) is done
             self.cs.wait_stream(self.cur)
             self.cs.wait_stream(self.ds)
             with torch.cuda.stream(self.cs):
+                if self.fpl is not None:
+                    self._fnext(-1)
+                    return
                 for l in range(min(2, self.L)):
                     self._h2d(l)
                     self.ev_r[l].record(self.cs)
 
-    def code_plan(self, i, n, staged):
+    def code_plan(self, i, n, staged, lo=0):
         """PICOKV_RADIX_CODES, at layer 0 once row i takes a compressed
         prepare over n prompt tokens (``staged``: over its staged prefix +
         new tokens, else its new tokens alone), in batch order: its plan, or
@@ -1553,7 +2443,9 @@ class _ChunkStage:
         layer prepares the rows in this order) is read; the rest is computed
         and goes to the mirrors of their pages (valid once the last layer
         queued it: cmarks). Decided where the prepare path is, so a plan's
-        writes run on every layer."""
+        writes run on every layer. ``lo``: None unless the leading run
+        covers at least lo tokens (an append chunk's writes start there).
+        The plan's cmarks: its entries [cm) (code_drop)."""
         x = self.rsl.get(i)
         sink, local, _, _, cmin = self.code
         if x is None or (x[0] is not None) != staged or n < cmin or n <= sink + local:
@@ -1581,11 +2473,14 @@ class _ChunkStage:
             w = self.cwr.get(p)
             ok[sel] = v if w is None else v | w[o[sel]]
         c = len(ok) if ok.all() else int(np.argmin(ok))
+        if c < lo:
+            return None
         j = np.arange(len(gsl), dtype=np.int64)
         has[:c] = False
         wr = self._runs(gsl[has], j[has], B)
         if c == 0 and not wr:
             return None
+        m0 = len(self.cmarks)
         for a0, _, k in wr:
             p, a = a0 // B, a0 % B
             w = self.cwr.get(p)
@@ -1596,12 +2491,233 @@ class _ChunkStage:
         tens = lambda a0: hot[a0 // B][4:6]
         # keep: the mirror entries the table's addresses point into (their
         # code tensors stay alive while the plan is)
-        plan = dict(c=c, g=len(gsl), blk=B, np=len(keep), keep=[x[4:6] for x in keep],
+        plan = dict(c=c, g=len(gsl), blk=B, np=len(keep), keep=[x[4:6] for x in keep], gsl=gsl,
+                    cm=(m0, len(self.cmarks)),
                     tab=self._idx(np.concatenate((np.array(ptrs, dtype=np.int64), e))),
                     reads=[(*tens(a0), a0 % B, k, jj) for a0, jj, k in self._runs(gsl[:c], j[:c], B)],
                     writes=[(*tens(a0), a0 % B, k, jj) for a0, jj, k in wr])
         self.cplan[i] = plan
         return plan
+
+    def code_drop(self, i):
+        """Row i's plan wrote no codes on some layer: no later layer writes,
+        and its tokens are not marked held (their mirror code slots stay
+        invalid); nor counted on by the plans of later rows at layer 0 (the
+        layer it drops at: can_append keeps every layer of a row mergeable)."""
+        plan = self.cplan.pop(i, None)
+        if plan is not None:
+            for q in range(*plan["cm"]):
+                p, _, a, k = self.cmarks[q]
+                w = self.cwr.get(p)
+                if w is not None:
+                    w[a:a + k] = False
+                self.cmarks[q] = (-1, False, 0, 0)  # (hot.get(-1) is never False)
+
+    def _rbatch(self, h2d, m2d, fill):
+        """_h2d's copies of every layer as cudaMemcpyBatchAsync tables
+        (dst [L, runs], src [L, runs], bytes [runs] uint64 arrays),
+        addresses built once per extend (a layer's are layer 0's plus l
+        pages' / mirrors' layer strides; its G buffer alternates): the loads
+        into G (mirrors, host pages), then the mirror fills, which read what
+        the loads wrote (the second batch runs after the first in stream
+        order). One API call per table and layer instead of a torch copy per
+        run (~4 us of host time each, ~11 with the queue busy: 36.7 runs a
+        layer at the t211 multi-turn hits). None: no batch API
+        (PICOKV_RADIX_BATCH=0)."""
+        cr = _cudart()
+        if not cr or cr[3] is None or cr[3].run1 is None:
+            return None
+        tb, G, L = self.tb, self.G, self.L
+        lay = np.arange(L, dtype=np.int64)[:, None]
+        ls = lay * (self.BLK * tb)  # a host page's / a mirror's layer stride
+        gl = G.data_ptr() + (lay % 2) * (G.stride(0) * G.element_size())  # layer l's G
+        tabs = []
+        ld = ([(m.data_ptr(), a, n, d) for m, a, n, d in m2d]
+              + [(self.pool[p].data_ptr(), a, n, d) for p, a, n, d in h2d])
+        for runs, load in ((ld, True), ([(m.data_ptr(), a, n, d) for m, a, n, d in fill], False)):
+            if not runs:
+                tabs.append(None)
+                continue
+            x = np.array(runs, dtype=np.int64)
+            far, near = x[:, 0] + x[:, 1] * tb + ls, gl + x[:, 3] * tb  # [L, runs]
+            dst, src = (near, far) if load else (far, near)
+            t = [np.ascontiguousarray(t, dtype=np.uint64) for t in (dst, src, x[:, 2] * tb)]
+            tabs.append((t, t[0].ctypes.data, t[1].ctypes.data, t[2].ctypes.data, len(runs)))
+        return tabs if any(t is not None for t in tabs) else None
+
+    def _fplan(self, h2d, m2d, fill, d2d, dd):
+        """_h2d's copies of every layer in groups of layers, a run's copies of
+        a group as ONE cudaMemcpy3DBatchAsync 2D op (one row per layer, a
+        host page's / mirror's layer stride apart): per group a batch of
+        loads, then one of the mirror fills and the duplicates (which read
+        what the loads wrote), then its event (ev_r of its first layer). The
+        layers stage into K slots of G's storage, S staged tokens each (K: every
+        layer when they fit, else a ring of the slots that do). Groups grow
+        1, 1, 2, 4, ... layers, at most PICOKV_RADIX_FULL (a ring: K / 2,
+        never across its end), so layer 0 waits for one layer's copies and
+        the rest run ahead of the layers; a ring's group goes once the
+        layers on its slots are done (after()). One API call per group and
+        batch instead of one per layer and table (each ~0.7-1.6 us of host
+        time per copy: ~2.5 ms an extend at the t219 Llama multi-turn hits).
+        None (the layer-by-layer path): no batch API, a ring under 4 slots,
+        or gather duplicates (dd)."""
+        cr = _cudart()
+        if (_RADIX_FULL <= 0 or dd is not None or not cr or cr[3] is None
+                or getattr(cr[3], "run3", None) is None):
+            return None
+        L, B, tb, G = self.L, self.BLK, self.tb, self.G
+        S = max(r[4] + r[3] + r[2] for r in self.rows)
+        K = min(L, 2 * G.shape[1] // S)
+        if K < 4:
+            return None
+        cap = _RADIX_FULL if K == L else max(1, min(_RADIX_FULL, K // 2))
+        grp, l0 = [], 0
+        while l0 < L:
+            h = min(cap, max(1, l0), L - l0, K - l0 % K)
+            grp.append((l0, h))
+            l0 += h
+        gF = G.view(-1)[:K * S * G[0, 0].numel()].view(K, S, *G.shape[2:])
+        x = np.array(grp, dtype=np.int64)
+        g0, hh = x[:, :1], x[:, 1:]
+        sl = gF.data_ptr() + (g0 % K) * (S * tb)  # [groups, 1]: a group's first slot
+
+        def ops(runs, kind):  # [groups, runs, 14]; kind 0: loads, 1: fills, 2: G to G
+            if not runs:
+                return None
+            r = np.array(runs, dtype=np.int64)
+            w = np.zeros((len(grp), len(r), 14), np.uint64)
+            if kind == 2:  # (d, s, n)
+                src, dst, sp, dp = sl + r[:, 1] * tb, sl + r[:, 0] * tb, S * tb, S * tb
+            else:  # (far base, a, n, d)
+                far, near = r[:, 0] + (g0 * B + r[:, 1]) * tb, sl + r[:, 3] * tb
+                src, dst, sp, dp = (far, near, B * tb, S * tb) if kind == 0 else (near, far, S * tb, B * tb)
+            w[..., 0] = w[..., 5] = 1  # pointer operands
+            w[..., 1], w[..., 2], w[..., 6], w[..., 7] = src, sp, dst, dp
+            w[..., 10], w[..., 11], w[..., 12], w[..., 13] = r[:, 2] * tb, hh, 1, 1
+            return w
+
+        A = ops([(m.data_ptr(), a, n, d) for m, a, n, d in m2d]
+                + [(self.pool[p].data_ptr(), a, n, d) for p, a, n, d in h2d], 0)
+        F, D = ops([(m.data_ptr(), a, n, d) for m, a, n, d in fill], 1), ops(d2d, 2)
+        Bt = F if D is None else D if F is None else np.concatenate((F, D), 1)
+        of = [l0 for l0, h in grp for _ in range(h)]
+        return {"K": K, "g": gF, "grp": grp, "need": [l0 + h - 1 - K for l0, h in grp],
+                "of": of, "A": A, "B": Bt, "j": 0, "ok": True}
+
+    def _fissue(self, j):
+        """_fplan's group j on cs (the caller's stream context), then its
+        event."""
+        global _CUDART
+        fp = self.fpl
+        l0, h = fp["grp"][j]
+        cr = _cudart()
+        if fp["ok"] and not (cr and cr[3] is not None):
+            fp["ok"] = False
+        if fp["ok"]:
+            st = self.cs.cuda_stream
+            for W in (fp["A"], fp["B"]):
+                if W is not None and cr[3].run3(W.ctypes.data + j * W.strides[0], W.shape[1], st):
+                    err = cr[1]()
+                    logger.warning(f"[PicoKVAttnBackend] radix prefix K/V: "
+                                   f"cudaMemcpy3DBatchAsync failed ({err}): torch copies")
+                    _CUDART = cr[:3] + (None,)
+                    fp["ok"] = False
+                    break
+        if not fp["ok"]:  # (this group's copies again, one by one: the same bytes)
+            for l in range(l0, l0 + h):
+                self._h2d(l, fp["g"][l % fp["K"]])
+        self.ev_r[l0].record(self.cs)
+
+    def _fnext(self, l):
+        """_fplan's groups whose slots are free once layer l is done (-1: at
+        the extend's start), in order."""
+        fp = self.fpl
+        while fp["j"] < len(fp["grp"]) and fp["need"][fp["j"]] <= l:
+            self._fissue(fp["j"])
+            fp["j"] += 1
+
+    def _tplan(self, srt, S, T):
+        """_rplan with full layer slots (_fplan K == L): the prefix rows' new
+        tokens are in G's slot of every layer once it ran (layer()), so their
+        host slots and mirrors are written from there, in groups of layers
+        (PICOKV_RADIX_D2H_GROUP, the last ones halving: the extend's last
+        layer leaves one layer's copies), a run's copies of a group as ONE
+        cudaMemcpy3DBatchAsync 2D op (a row per layer, G's slot and a host
+        page's / mirror's layer strides apart) at the group's last layer
+        (_tnext), not a batch per layer from the qkv rows. ``srt``: the rows
+        in _rplan's order, S / T: their slots and extend token indices. The
+        plan, with the runs of the rows without a prefix (_d2h's, per layer);
+        None: no prefix row has new tokens."""
+        fp, B, tb, L, hot = self.fpl, self.BLK, self.tb, self.L, self.hot
+        lens = np.fromiter((r[2] for r in srt), dtype=np.int64, count=len(srt))
+        c = np.repeat(np.fromiter((r[3] > 0 for r in srt), dtype=bool, count=len(srt)), lens)
+        if not c.any():
+            return None
+        # a prefix row's token t is at G position r[4] + r[3] + t - r[1]
+        GS = T + np.repeat(np.fromiter((r[4] + r[3] - r[1] for r in srt), dtype=np.int64,
+                                       count=len(srt)), lens)
+        runs = []  # (destination tensor, first slot in its page, tokens, G position)
+        for s, gp, n in self._runs(S[c], GS[c], B):
+            runs.append((self.pool[s // B], s % B, n, gp))
+            h = hot.get(s // B) if hot else None
+            if h is not None:
+                runs.append((h[0], s % B, n, gp))
+        first = [(s // B, s % B, n, t) for s, t, n in self._runs(S[~c], T[~c], B)]
+        wm = []
+        if hot:
+            for p, a, n, t in first:
+                h = hot.get(p)
+                if h is not None:
+                    wm.append((h[0].data_ptr() + a * tb, t, n, h[0], a))
+        grp, l0, g = [], 0, max(1, _RADIX_D2H_GROUP)
+        while l0 < L:
+            h = g if L - l0 > g else max(1, (L - l0) // 2)
+            grp.append((l0, h))
+            l0 += h
+        gF = fp["g"]
+        Sg = gF.shape[1]
+        x = np.array([(m.data_ptr(), a, n, gp) for m, a, n, gp in runs], dtype=np.int64)
+        y = np.array(grp, dtype=np.int64)
+        g0, hh = y[:, :1], y[:, 1:]
+        W = np.zeros((len(grp), len(x), 14), np.uint64)
+        W[..., 0] = W[..., 5] = 1  # pointer operands
+        W[..., 1], W[..., 2] = gF.data_ptr() + (g0 * Sg + x[:, 3]) * tb, Sg * tb
+        W[..., 6], W[..., 7] = x[:, 0] + (g0 * B + x[:, 1]) * tb, B * tb
+        W[..., 10], W[..., 11], W[..., 12], W[..., 13] = x[:, 2] * tb, hh, 1, 1
+        return {"runs": runs, "W": W, "grp": grp, "end": {a + h - 1: j for j, (a, h) in enumerate(grp)},
+                "ok": True, "d2h": first, "pool": [(self.pool[p].data_ptr() + a * tb, t, n)
+                                                   for p, a, n, t in first], "wm": wm}
+
+    def _tnext(self, l):
+        """after(l), _tplan's group ending at layer l: its copies on ds once
+        the layers ran (the last group's: G goes back to the allocator after
+        them)."""
+        global _CUDART
+        tp = self.tpl
+        j = tp["end"].get(l)
+        if j is None:
+            return
+        ds = self.ds
+        self.ev_u[l].record(self.cur)
+        ds.wait_event(self.ev_u[l])
+        cr, W = _cudart(), tp["W"]
+        if tp["ok"] and not (cr and cr[3] is not None):
+            tp["ok"] = False
+        if tp["ok"] and cr[3].run3(W.ctypes.data + j * W.strides[0], W.shape[1], ds.cuda_stream):
+            err = cr[1]()
+            logger.warning(f"[PicoKVAttnBackend] radix host K/V from G: "
+                           f"cudaMemcpy3DBatchAsync failed ({err}): torch copies")
+            _CUDART = cr[:3] + (None,)
+            tp["ok"] = False
+        if not tp["ok"]:  # (this group's copies, layer by layer: the same bytes)
+            l0, h = tp["grp"][j]
+            gF = self.fpl["g"]
+            with torch.cuda.stream(ds):
+                for m, a, n, gp in tp["runs"]:
+                    for k in range(l0, l0 + h):
+                        m[k, a:a + n].copy_(gF[k, gp:gp + n], non_blocking=True)
+        if j == len(tp["grp"]) - 1:
+            self.G.record_stream(ds)
 
     def _idx(self, a):
         """int64 host array -> device index tensor (pinned, async on the
@@ -1685,10 +2801,26 @@ class _ChunkStage:
                 self.ev_r[l].record(self.cs)
         return lost
 
-    def _h2d(self, l):
-        g, B = self.G[l % 2], self.BLK
+    def _h2d(self, l, g=None):
+        global _CUDART
+        g, B = self.G[l % 2] if g is None else g, self.BLK
         if self.tree is not None:
             h2d, d2d, _, dd, _, m2d, fill = self.rplan[:7]
+            rb = self.rbat
+            if rb is not None:
+                cr, h = _cudart(), self.cs.cuda_stream
+                if cr and cr[3] is not None and not any(
+                        t is not None and cr[3].run1(t[1] + 8 * t[4] * l, t[2] + 8 * t[4] * l,
+                                                     t[3], t[4], h)
+                        for t in rb):
+                    m2d = h2d = fill = ()
+                else:
+                    if cr:
+                        err = cr[1]()
+                        logger.warning(f"[PicoKVAttnBackend] radix prefix K/V: "
+                                       f"cudaMemcpyBatchAsync failed ({err}): torch copies")
+                        _CUDART = cr[:3] + (None,)
+                    self.rbat = None  # (this layer's copies again, one by one: the same bytes)
             for m, a, n, d in m2d:
                 g[d:d + n].copy_(m[l, a:a + n], non_blocking=True)
             for p, a, n, d in h2d:
@@ -1716,8 +2848,11 @@ class _ChunkStage:
             self._d2h(l, k_, v_, kv)
             if not self.rows:
                 return None
-        torch.cuda.current_stream(self.dev).wait_event(self.ev_r[l])
-        g = self.G[l % 2]
+        fp = self.fpl
+        # (radix mode: the forward's stream, rbegin's; current_stream() costs ~25 us a call here)
+        cur = self.cur if self.tree is not None else torch.cuda.current_stream(self.dev)
+        cur.wait_event(self.ev_r[l if fp is None else fp["of"][l]])
+        g = self.G[l % 2] if fp is None else fp["g"][l % fp["K"]]
         wp = self.wplan
         if wp is not None and kv is not None:
             dst, src, n = wp
@@ -1741,9 +2876,6 @@ class _ChunkStage:
         (_d2h_done)."""
         global _CUDART
         cur = self.cur
-        self.ev_u[l].record(cur)
-        ds = self.ds
-        ds.wait_event(self.ev_u[l])
         HD = self.H * self.D
         if kv is not None:
             src, row = ((kv, 0, self.tb),), (HD, self.D, 1)
@@ -1755,6 +2887,11 @@ class _ChunkStage:
                 x.dtype != self.dtype or x.stride()[1:] != row
                 or (x.shape[0] > 1 and x.stride(0) * x.element_size() < w)
                 for x, _, w in src))
+        if self.tpl is not None and not self.rplan[2]:
+            return  # (every new token is in G: _tnext copies them from there)
+        self.ev_u[l].record(cur)
+        ds = self.ds
+        ds.wait_event(self.ev_u[l])
         if not ok[1]:
             return self._d2h_torch(l, k_, v_, kv)
         fn, h, tb, lo = cr[0], ds.cuda_stream, self.tb, l * self.BLK * self.tb
@@ -1810,7 +2947,16 @@ class _ChunkStage:
         l + 2's prefixes into the same buffer; the last layer closes the
         forward (entry lengths; a request's last chunk frees its entry)."""
         if self.tree is not None:  # radix mode: the D2H ran at layer()
-            if self.rows and l + 2 < self.L:
+            fp = self.fpl
+            if fp is not None:
+                if fp["j"] < len(fp["grp"]) and fp["need"][fp["j"]] <= l:
+                    self.ev_u[l].record(self.cur)  # (the layers on the slots are done)
+                    self.cs.wait_event(self.ev_u[l])
+                    with torch.cuda.stream(self.cs):
+                        self._fnext(l)
+                if self.tpl is not None:
+                    self._tnext(l)
+            elif self.rows and l + 2 < self.L:
                 self.ev_u[l].record(self.cur)
                 self.cs.wait_event(self.ev_u[l])
                 with torch.cuda.stream(self.cs):
@@ -1826,13 +2972,17 @@ class _ChunkStage:
                     for p, h, a, n in self.cmarks:  # (and the codes written)
                         if self.hot.get(p) is h:
                             h[6][a:a + n] = True
+                    for pg in self.cnew:  # code pages: every layer written
+                        pg.ready = True
                     if _RADIX_STATS and self.cplan:
                         c = sum(x["c"] for x in self.cplan.values())
                         w = sum(x["g"] - x["c"] for x in self.cplan.values())
                         print(f"[picokv radix] codes rows {len(self.cplan)} read {c} "
                               f"computed {w}", flush=True)
-                self.rows, self.rplan, self.wplan = [], None, None
+                self.rows, self.rplan, self.wplan, self.rbat = [], None, None, None
+                self.fpl = self.tpl = None
                 self.cplan, self.cmarks, self.cwr, self.rsl = {}, [], {}, {}
+                self.cnew = []
                 if self.G is not None and self.G.shape[1] > self.rtok:
                     self._set_g(None)
             return
@@ -1917,7 +3067,7 @@ class PicoKVRequestCache:
         """
         if prefix_len <= 0 or int(self.seq_lengths.get(0, -1)) != prefix_len:
             return False
-        if any(c.dense_key is None or c.packed_key is None for c in self.layers.values()) \
+        if any(c.dense_key is None or _c_none(c) for c in self.layers.values()) \
                 or any(x is None for x in self._dense.values()):
             return False  # held by a live decode batch (lazy sync): not mergeable
         if 0 in self._dense:
@@ -1933,7 +3083,8 @@ class PicoKVRequestCache:
         window = int(self.config.sink_size) + int(self.config.local_size)
         return all(c.dense_key.shape[-2] == window for c in self.layers.values())
 
-    def append(self, layer_idx: int, key_bhsd: torch.Tensor, value_bhsd: torch.Tensor) -> bool:
+    def append(self, layer_idx: int, key_bhsd: torch.Tensor, value_bhsd: torch.Tensor,
+               codes=None) -> bool:
         """Merge one continuation chunk into this layer's cache.
 
         Exact equivalent of re-preparing over prefix+chunk: the outgoing window
@@ -1944,7 +3095,9 @@ class PicoKVRequestCache:
         groups (rebuild the boundary group with carry extraction). Dense-fallback
         layers keep raw K/V and promote to compressed via a full prepare once
         the sequence outgrows sink+local. Returns False when this layer's state
-        does not allow a merge (caller falls back to prepare)."""
+        does not allow a merge (caller falls back to prepare). ``codes``: called
+        with the C new global tokens' packed key [1,H,KW,C] / per-token value
+        words [1,H,C,VW] when the merge quantizes them."""
         layer_idx = int(layer_idx)
         key_bhsd = key_bhsd.contiguous()
         value_bhsd = value_bhsd.contiguous()
@@ -2005,6 +3158,8 @@ class PicoKVRequestCache:
             out_v, enc_v, dec_v, 0, C,
             zerorope=0, apply_zerorope=False, pack_key_layout=False,
         )
+        if codes is not None:
+            codes(packed_key_new, packed_value_tok)
 
         # PICOKV_PREALLOC: a full-capacity buffer (the request's whole prompt
         # + decode headroom, _prealloc_layer) takes the chunk in place: no
@@ -2583,6 +3738,12 @@ class PicoKVAttnBackend(AttentionBackend):
             _require_op(self._rows, "picokv_decode_tail_global_rows_fn", "PICOKV_ROWS=0")
         self._row_stub = {}
         logger.info(f"[PicoKVAttnBackend] per-row packed storage: {'on' if self._rows else 'off'}")
+        # PICOKV_ROWS_B1=0: a bucket-1 slot batch keeps the one-row rectangle.
+        # Per-row storage there too (default): a fresh row of any length is
+        # adopted in place (the rectangle rebuilt + re-captured whenever a
+        # request outgrew its width), and a finished row's codes go at the
+        # next prefill while the batch stays (_release_dead)
+        self._rows_b1 = self._rows and os.environ.get("PICOKV_ROWS_B1", "1") == "1"
         # PICOKV_DET=1: deterministic decode tail. The global tail kernel's
         # float atomics sum the 512-token blocks in a run-dependent order, so
         # greedy outputs can flip between identical runs; with DET each block
@@ -2665,6 +3826,26 @@ class PicoKVAttnBackend(AttentionBackend):
         self._stg = None
         self._stg_chunk = self._chunk_size()
         ctx = int(getattr(cfg, "context_len", 0) or 0)
+        # PICOKV_BLK_TABLES=1 (per-row storage; needs an extension built with
+        # the block-table overloads, PICOKV_BLK_TABLES == 3: per-row s0): the
+        # rows' tail reads can take their leading 512-token blocks from shared
+        # pages (_RowStore), one page entry per block up to the context
+        # length plus regrow headroom
+        self._blk_nb = 0
+        if self._rows and os.environ.get("PICOKV_BLK_TABLES", "0") == "1":
+            from picokv.picokv_cuda_extension.picokv_cuda import load_picokv_extension
+            _require_op(getattr(load_picokv_extension(), "PICOKV_BLK_TABLES", 0) == 3,
+                        "PICOKV_BLK_TABLES", "PICOKV_BLK_TABLES=0")
+            if ctx <= 0:
+                raise ValueError("PICOKV_BLK_TABLES=1 needs the model's context length")
+            self._blk_nb = -(-(ctx + 2 * self._slide_head) // 512) + 1
+        logger.info(f"[PicoKVAttnBackend] block tables: {self._blk_nb or 'off'}")
+        self._rpages = _RADIX_PAGES and self._blk_nb > 0
+        if _RADIX_PAGES and not self._rpages:
+            logger.warning("[PicoKVAttnBackend] PICOKV_RADIX_PAGES=1 needs PICOKV_BLK_TABLES=1 "
+                           "(per-row storage): off")
+        elif self._rpages:
+            logger.info("[PicoKVAttnBackend] radix code pages: on")
         # PICOKV_RADIX=host: the stage is also the radix tree's host K/V
         # store (attached at the first extend: the tree is built after the
         # backend), whatever the chunk size.
@@ -2676,6 +3857,12 @@ class PicoKVAttnBackend(AttentionBackend):
                 logger.warning(f"[PicoKVAttnBackend] picokv radix cache unavailable ({e!r})")
                 self._radix = False
         self._own = {}  # radix mode: req row -> request id of its cache
+        # PICOKV_RADIX_ANSWER (radix mode + slide; default on, "0" off): a
+        # request's decode-written tokens go into the tree with its prompt
+        # (_ans_early / _ans_plan / _ans_finish). _ans_cur: the decode stream
+        self._ans, self._ans_cur = False, None
+        self._ane, self._ane_ev = None, None  # early capture plan, an event after its copies
+        self._fin_ev = None  # an event after the last finish's window copies (_ans_finish)
         if (_stage_mode() == "host" and self._prefill == "fi"
                 and (self._radix or (self._stg_chunk > 0
                                      and (ctx == 0 or self._stg_chunk < ctx)))):
@@ -2712,10 +3899,24 @@ class PicoKVAttnBackend(AttentionBackend):
         # (forward_batch.req_pool_indices_cpu) when present: no device->host
         # sync, so the overlap scheduler keeps the GPU queue full across
         # steps. Spot-checked against the device copy on every batch change
-        # and every 256 reads; a mismatch disables the mirror for good.
-        # PICOKV_RIDS_CPU=0 always reads the device copy.
+        # and every 256 reads (extend: the first and every 64th) WITHOUT a
+        # sync: a non-blocking copy into pinned memory + an event, compared
+        # at a later read once it completed (_rids_check). sglang relies on
+        # the mirror the same way (overlap seq_lens_cpu, hisparse), so a
+        # mismatch is a scheduler bug: found that way, a forward already ran
+        # on the mirror's ids, and it raises. PICOKV_RIDS_CHECK=sync: the
+        # blocking check (verify before use: a D2H sync per batch change; a
+        # mismatch reads the device copy from then on). PICOKV_RIDS_CPU=0
+        # always reads the device copy.
         self._rids_cpu = os.environ.get("PICOKV_RIDS_CPU", "1") == "1"
+        self._rids_sync = os.environ.get("PICOKV_RIDS_CHECK", "async") == "sync"
+        self._rids_pend = []  # async checks in flight: [(event, pinned ids, mirror ids, where)]
         self._rids_n = 0
+        # PICOKV_SYNC_VIEWS=1: a slot change syncs its leaving rows back with
+        # a few stacked window copies per row (all layers) and hands a
+        # _RowStore row's codes over as views of its own storage
+        # (_sync_rows_all); 0: per-layer compact copies (_sync_rows)
+        self._sync_views = os.environ.get("PICOKV_SYNC_VIEWS", "1") == "1"
         # PICOKV_EXT_FAST=1: forward_extend reads the batch's req ids / extend
         # lens once per forward (layer 0) from the scheduler's CPU mirrors
         # instead of two device->host syncs per layer, and an all-short extend
@@ -3288,6 +4489,9 @@ class PicoKVAttnBackend(AttentionBackend):
                         f"{stg.BLK}-token pages, up to {stg.rcap}; GPU hot tier "
                         f"{'on' if stg.hot is not None else 'off'}"
                         f"{', codes' if stg.code is not None else ''})")
+            self._ans = self._slide and os.environ.get("PICOKV_RADIX_ANSWER", "1") != "0"
+            if self._ans:
+                tree._pk_answer = self._ans_finish
         for row, rid in zip(rids, rstr):
             if self._own.get(row) != rid:
                 self._own[row] = rid
@@ -3298,6 +4502,7 @@ class PicoKVAttnBackend(AttentionBackend):
             logger.warning(f"[PicoKVAttnBackend] radix host K/V stage failed ({e!r}): this extend's "
                            f"prefixes are not attended")
             stg.rows, stg.rplan, stg.wplan = [], None, None
+            stg.fpl = stg.tpl = None  # (a plan _rplan made before it failed)
             stg.cplan, stg.cmarks, stg.cwr, stg.rsl = {}, [], {}, {}
             lost = [r for r, p in zip(rids, plens) if p > 0]
         if lost and not self._stg_warned:
@@ -3323,13 +4528,10 @@ class PicoKVAttnBackend(AttentionBackend):
         else:
             rids = self._ints(mir[:n])
             self._ext_n += 1
+            if self._rids_pend:
+                self._rids_poll()
             if self._ext_n % 64 == 1:
-                d = self._ints(fb.req_pool_indices[:n])
-                if d != rids:
-                    logger.warning(f"[PicoKVAttnBackend] extend req_pool_indices_cpu mirror {rids} != "
-                                   f"device {d}; reading the device copy from now on")
-                    self._rids_cpu = False
-                    rids = d
+                rids = self._rids_check(fb.req_pool_indices[:n], rids, "extend")
         pc = getattr(fb, "extend_prefix_lens_cpu", None)
         pe = getattr(fb, "extend_prefix_lens", None)
         plens = (self._ints(pc) if pc is not None
@@ -3348,15 +4550,47 @@ class PicoKVAttnBackend(AttentionBackend):
         if self._rids_n == 1:
             logger.info("[PicoKVAttnBackend] decode req ids from the CPU mirror "
                         "(no D2H sync)")
+        if self._rids_pend:
+            self._rids_poll()
         if (self._batch is None or self._batch.get("rids") != r
                 or self._rids_n % 256 == 0):
-            d = self._ints(fb.req_pool_indices[:n])
+            return self._rids_check(fb.req_pool_indices[:n], r, "decode")
+        return r
+
+    def _rids_check(self, dev, r, where):
+        """Spot check of the mirror's req ids ``r`` against the device copy
+        ``dev``; returns the ids to use. PICOKV_RIDS_CHECK=sync: compared now
+        (D2H sync; a mismatch -> the device ids, mirror off). Else queued: a
+        non-blocking copy into pinned memory + an event (at most 8 in
+        flight; more are skipped), compared by _rids_poll once done."""
+        if self._rids_sync:
+            d = self._ints(dev)
             if d != r:
-                logger.warning(f"[PicoKVAttnBackend] req_pool_indices_cpu mirror {r} != "
+                logger.warning(f"[PicoKVAttnBackend] {where} req_pool_indices_cpu mirror {r} != "
                                f"device {d}; reading the device copy from now on")
                 self._rids_cpu = False
                 return d
+            return r
+        if len(self._rids_pend) < 8 and not torch.cuda.is_current_stream_capturing():
+            h = torch.empty(dev.shape, dtype=dev.dtype, pin_memory=True)
+            h.copy_(dev, non_blocking=True)
+            ev = torch.cuda.Event()
+            ev.record()
+            self._rids_pend.append((ev, h, r, where))
         return r
+
+    def _rids_poll(self):
+        """Compare the completed async spot checks (oldest first; no sync)."""
+        p = self._rids_pend
+        while p and p[0][0].query():
+            _, h, r, where = p.pop(0)
+            d = h.tolist()
+            if d != r:
+                raise RuntimeError(
+                    f"[PicoKVAttnBackend] {where} req_pool_indices_cpu mirror {r} != device "
+                    f"req_pool_indices {d}: a forward already ran on the mirror's req ids, so "
+                    f"the decode / cache state is not reliable. Set PICOKV_RIDS_CHECK=sync "
+                    f"(verify before use) or PICOKV_RIDS_CPU=0 (device ids only).")
 
     def _log_l0(self, path, msg):
         # step-first line: once per path change within a batch, then every
@@ -3385,6 +4619,14 @@ class PicoKVAttnBackend(AttentionBackend):
                 cat = "capture"
             elif "eager" in f:
                 cat = "warm" if "warm" in f else "eager"
+            elif "ans" in f:
+                cat = "ans"
+            elif "bnd" in f:
+                cat = "bnd"
+            elif "post" in f:
+                cat = "post"
+            elif "cp" in f:
+                cat = "cp"
             else:
                 cat = "replay"
             a = sp["acc"].setdefault(cat, [0, 0.0])
@@ -3418,7 +4660,8 @@ class PicoKVAttnBackend(AttentionBackend):
         H, D = self.num_kv_heads, self.head_dim
         if (k_.stride() == v_.stride() and k_.stride()[1:] == (D, 1)
                 and v_.data_ptr() - k_.data_ptr() == H * D * k_.element_size()
-                and k_.untyped_storage().data_ptr() == v_.untyped_storage().data_ptr()):
+                and ((k_._base is not None and k_._base is v_._base)  # (views of one tensor)
+                     or k_.untyped_storage().data_ptr() == v_.untyped_storage().data_ptr())):
             if self._kv_adj is None:
                 self._kv_adj = True
                 logger.info("[PicoKVAttnBackend] fast prepare: one K+V copy (qkv views)")
@@ -3452,17 +4695,24 @@ class PicoKVAttnBackend(AttentionBackend):
             pka, _ = blockk(kb, ek, dk, start, glen, zr, True, True)
             return pka, pva
         if fp["side"] is None:
-            fp["side"] = fp["side_of"](dev)
+            side = fp["side"] = fp["side_of"](dev)
             fp["ev"] = (torch.cuda.Event(), torch.cuda.Event())
+            fp["sid"], fp["curs"] = (side.stream_id, side.device_index, side.device_type), {}
         side, (e0, e1) = fp["side"], fp["ev"]
-        cur = torch.cuda.current_stream(dev)
+        # the current stream by its (id, device, type) without
+        # torch.cuda.current_stream / set_stream's per-call wrappers
+        cid = torch._C._cuda_getCurrentStream(dev.index)
+        cur = fp["curs"].get(cid)
+        if cur is None:
+            cur = fp["curs"][cid] = torch.cuda.Stream(
+                stream_id=cid[0], device_index=cid[1], device_type=cid[2])
         e0.record(cur)
         side.wait_event(e0)
-        torch.cuda.set_stream(side)
+        torch._C._cuda_setStream(*fp["sid"])
         try:
             pva, _ = blockk(vb, ev, dv, start, glen, 0, False, False)
         finally:
-            torch.cuda.set_stream(cur)
+            torch._C._cuda_setStream(*cid)
         pka, _ = blockk(kb, ek, dk, start, glen, zr, True, True)
         e1.record(side)
         cur.wait_event(e1)
@@ -3559,67 +4809,119 @@ class PicoKVAttnBackend(AttentionBackend):
         (PICOKV_PREALLOC, the request's prompt length): straight into the
         full-capacity buffers _prealloc_layer would copy them to. Codes are
         per token: the same cache bit for bit (PICOKV_RADIX_CODES_CHECK=1
-        compares)."""
-        sc = self._scfg
-        H, D = self.num_kv_heads, self.head_dim
-        sink, local = int(sc.sink_size), int(sc.local_size)
-        KW, VW, CV = int(sc.key_bits) // 64, int(sc.value_bits) // 64, int(sc.value_bits)
-        glen, c = n - sink - local, plan["c"]
-        m = glen - c
+        compares). PICOKV_RADIX_PAGES: blocks of read codes become code
+        pages (_page_plan), the layer a _PagedKVCache."""
+        geo = plan.get("geo")
+        if geo is None or geo[0] != (s, n, fin, plan["c"]):  # the row's first layer
+            geo = plan["geo"] = self._coded_geo(plan, s, n, fin, g.device)
+        _, H, D, sink, local, KW, CV, glen, c, m, G, cap, full, pgp, KS, VS, grid, ckw, eb = geo
         dev, dt = g.device, g.dtype
         kp, vp, kpt = self._gl0_projections(layer_id, H, D, dev, dt)
-        G = (glen + 63) // 64
-        cap = self._pre_cap(glen, fin) if fin is not None else None
-        full = cap is not None
-        if not full:
-            cap = 64 * G
+        QS = Q0 = 0
+        if pgp is not None:
+            pin, fe, E, oc, pt, ok, ov = pgp
+            QS, Q0 = 8 * fe, 8 * E
+            if ok is not None:
+                pka, pv = ok[layer_id], ov[layer_id]
+            else:
+                pool = self._kvpool if not torch.cuda.is_current_stream_capturing() else None
+                if pool is not None:
+                    pool.grow(8 * H * KW * oc, 8 * H * (oc // 64) * CV, dev)
+                pka, pv = _kvp_empty2(pool, (1, H, KW, oc), (1, H, oc // 64, CV), torch.int64, dev)
+                pka._pk_full = pv._pk_full = True
+        elif not full:
             pka = torch.empty((1, H, KW, glen), dtype=torch.int64, device=dev)
             pv = torch.empty((1, H, G, CV), dtype=torch.int64, device=dev)
-            KS, zq = glen, 0
         else:
             pool = self._kvpool if not torch.cuda.is_current_stream_capturing() else None
             if pool is not None:
                 pool.grow(8 * H * KW * cap, 8 * H * (cap // 64) * CV, dev)
-            with pool.use() if pool is not None else contextlib.nullcontext():
-                pka = torch.empty((1, H, KW, cap), dtype=torch.int64, device=dev)
-                pv = torch.empty((1, H, cap // 64, CV), dtype=torch.int64, device=dev)
-            if pool is not None:
-                pool.track(pka, pv)
+            pka, pv = _kvp_empty2(pool, (1, H, KW, cap), (1, H, cap // 64, CV), torch.int64, dev)
             pka._pk_full = pv._pk_full = True
-            KS, zq = cap, triton.cdiv(cap - glen, 64)
         dw = torch.empty((2, H, sink + local, D), dtype=dt, device=dev)
         if m:
             x = g[s + sink + c:s + n - local].permute(1, 2, 0, 3).contiguous()  # [2,H,m,D]
             tk, tv = self._blockk_pair(x[0:1], x[1:2], layer_id, 0, m, m)
         else:
             tk = tv = pka
-        nwq = triton.cdiv(sink + local, 64)
-        _code_asm_kernel[(G + nwq + zq, max(KW + VW, 2), H)](
-            plan["tab"], plan["np"], tk, tv, m, c, glen, layer_id, pka, pv, KS, (cap // 64) * CV,
-            g, g.stride(0), g.stride(1), g.stride(2), s, n, dw, plan["blk"], G,
-            H=H, KW=KW, VW=VW, D=D, SINK=sink, LOCAL=local, BT=64, NWQ=nwq,
-            num_warps=2)  # 4: 17x slower
+        args = (plan["tab"], plan["np"], tk, tv, m, c, glen, layer_id, pka, pv, KS, VS,
+                g, g.stride(0), g.stride(1), g.stride(2), s, n, dw, plan["blk"], G,
+                pka if pgp is None else pt, Q0, QS)
+        if _code_asm_launch is not None:
+            _code_asm_launch(grid, args, ckw)
+        else:
+            _code_asm_kernel[grid](*args, **ckw)
+        if pgp is not None:
+            cache.layers[layer_id] = _PagedKVCache(
+                (pka, pv, E, pin, glen, layer_id), dense_key=dw[0:1], dense_value=dw[1:2],
+                key_projection=kp, value_projection=vp, key_projection_t=kpt,
+                exp_bits=eb)
+            cache.seq_lengths[layer_id] = n
+            if _RADIX_CODES_CHECK:
+                self._codes_check(cache, layer_id, g, s, n, c)
+            return
         if full:  # prefix views (_pk_full): _prealloc_layer skips the row
             pka, pv = pka[..., :glen], pv[:, :, :G]
         cache.layers[layer_id] = PreparedKVCache(
             dense_key=dw[0:1], dense_value=dw[1:2], key_projection=kp, value_projection=vp,
-            key_projection_t=kpt, packed_key=pka, packed_value=pv, exp_bits=int(sc.exp_bits))
+            key_projection_t=kpt, packed_key=pka, packed_value=pv, exp_bits=eb)
         cache.seq_lengths[layer_id] = n
         if _RADIX_CODES_CHECK:
             self._codes_check(cache, layer_id, g, s, n, c)
 
+    def _coded_geo(self, plan, s, n, fin, dev):
+        """_prepare_coded's layer-invariant part for a row (``plan`` over
+        g[s:s+n], full-capacity for a fin-token request): the sizes, the
+        own-buffer choice (the first layer builds the page plan), the
+        assembly launch's grid and constexprs."""
+        sc = self._scfg
+        H, D = self.num_kv_heads, self.head_dim
+        sink, local = int(sc.sink_size), int(sc.local_size)
+        KW, VW, CV = int(sc.key_bits) // 64, int(sc.value_bits) // 64, int(sc.value_bits)
+        glen, c = n - sink - local, plan["c"]
+        G = (glen + 63) // 64
+        cap = self._pre_cap(glen, fin) if fin is not None else None
+        full = cap is not None
+        pgp = None
+        if full and self._rpages:
+            if "pg" not in plan:
+                plan["pg"] = self._page_plan(plan, glen, c, cap, H, KW, CV, dev)
+            pgp = plan["pg"]
+        QS = 0
+        if pgp is not None:
+            _, fe, E, oc = pgp[:4]
+            QS, KS, zq = 8 * fe, oc, triton.cdiv(oc + 64 * 8 * E - glen, 64)
+            cap = oc  # VS: the own buffer's
+        elif not full:
+            cap, KS, zq = 64 * G, glen, 0
+        else:
+            KS, zq = cap, triton.cdiv(cap - glen, 64)
+        nwq = triton.cdiv(sink + local, 64)
+        ckw = dict(H=H, KW=KW, VW=VW, D=D, SINK=sink, LOCAL=local, BT=64, NWQ=nwq,
+                   PG=pgp is not None, num_warps=2)  # 4: 17x slower
+        return ((s, n, fin, c), H, D, sink, local, KW, CV, glen, c, glen - c, G, cap, full, pgp,
+                KS, (cap // 64) * CV, (G - QS + nwq + zq, max(KW + VW, 2), H), ckw,
+                int(sc.exp_bits))
+
     def _codes_check(self, cache, layer_id, g, s, n, c):
         """PICOKV_RADIX_CODES_CHECK: _prepare_coded's layer vs _prepare_fast
-        over the same staged tokens."""
+        over the same staged tokens (a paged layer: pages ++ own, kept paged)."""
         ref = PicoKVRequestCache(self._scfg, self._offline)
         self._prepare_fast(ref, layer_id, *self._bhsd_kv(g[:, 0], g[:, 1], s, n))
         a, b = ref.layers[layer_id], cache.layers[layer_id]
+        if _c_pg(b) is not None:
+            kf, vf = b.full()
+            gl = _c_gl(b)
+            bk, bv = kf[..., :gl], vf[:, :, :(gl + 63) // 64]
+        else:
+            bk, bv = b.packed_key, b.packed_value
+            kf, vf = _pk_full(bk), _pk_full(bv)
+        bt = dict(dense_key=b.dense_key, dense_value=b.dense_value, packed_key=bk, packed_value=bv)
         bad = [f for f in ("dense_key", "dense_value", "packed_key", "packed_value")
-               if not torch.equal(getattr(a, f), getattr(b, f))]
-        kf, vf = _pk_full(b.packed_key), _pk_full(b.packed_value)
-        if kf is not None and bool(kf[..., b.packed_key.shape[-1]:].any()):
+               if not torch.equal(getattr(a, f), bt[f])]
+        if kf is not None and bool(kf[..., bk.shape[-1]:].any()):
             bad.append("packed_key tail")  # full-capacity buffers: zero past the content
-        if vf is not None and bool(vf[:, :, b.packed_value.shape[2]:].any()):
+        if vf is not None and bool(vf[:, :, bv.shape[2]:].any()):
             bad.append("packed_value tail")
         st = self.__dict__.setdefault("_ccheck", [0, 0])
         st[0] += 1
@@ -3761,6 +5063,79 @@ class PicoKVAttnBackend(AttentionBackend):
                     packed_key=pk[a:a + H * KW * g].view(1, H, KW, g),
                     packed_value=pv[b:b + H * G * CV].view(1, H, G, CV), exp_bits=eb)
                 cache.seq_lengths[layer_id] = ln
+
+    def _page_plan(self, plan, glen, c, cap, H, KW, CV, dev):
+        """PICOKV_RADIX_PAGES, at layer 0 of a hit row's _prepare_coded into
+        full-capacity buffers (cap tokens): its blocks e < E = min(c, gl) /
+        512 (codes read from the mirrors) are code pages: the live pages of
+        earlier rows with the same 512 global slots up to the first block fe
+        without one, new pages from fe on (written by this row's asm, every
+        layer; the stage pools them); own storage from block E (oc = cap -
+        512 E tokens): per layer as a full-capacity row's, but one key and one
+        value slab for every layer when a layer's would be 1 MiB or less (the
+        small pool's 2 MiB segments: 270 cudaMallocs per 16-row round at oc
+        1536). (pin, fe, E, oc, device page table [2E] layer-0 key / value
+        addresses, own k [L, 1, H, KW, oc] / v [L, 1, H, oc/64, CV] slabs or
+        None, None), or None: no block or own storage under one block."""
+        E = min(c, glen) // 512
+        oc = cap - 512 * E
+        stg, gsl = self._stg, plan.get("gsl")
+        if E == 0 or oc < 512 or stg is None or gsl is None or len(gsl) < 512 * E:
+            return None
+        L = self._n_layers
+        pool = self._kvpool if not torch.cuda.is_current_stream_capturing() else None
+        pages, fe = [], E
+        for e in range(E):
+            pg = stg.cpg_get(gsl[512 * e:512 * (e + 1)])
+            if pg is None:
+                fe = e
+                break
+            pages.append(pg)
+        if fe < E:  # new pages, in block order: one pool context, one slot copy
+            sls = np.array(gsl[512 * fe:512 * E], dtype=np.int64).reshape(-1, 512)
+            nk, nv, kv = 8 * L * H * KW * 512, 8 * L * H * 8 * CV, []
+            with pool.use() if pool is not None else contextlib.nullcontext():
+                for _ in range(E - fe):
+                    if pool is not None:
+                        pool.grow(nk, nv, dev, inctx=True)
+                    k = torch.empty((L, H, KW, 512), dtype=torch.int64, device=dev)
+                    v = torch.empty((L, H, 8, CV), dtype=torch.int64, device=dev)
+                    if pool is not None:
+                        pool.track(k, v)
+                    kv.append((k, v))
+            q = np.sort(sls // stg.BLK, axis=1)  # each page's _pages([slots], BLK)
+            dq = np.c_[np.ones((len(q), 1), dtype=bool), q[:, 1:] != q[:, :-1]]
+            for (k, v), sl, hq, hm in zip(kv, sls, q, dq):
+                pg = _CodePage(k, v, sl, stg.ext)
+                stg.cpg_put(pg, hq[hm].tolist())
+                pages.append(pg)
+        pin = _PagePin(pages)
+        if _PG_KEEP:
+            for pg in pages:
+                stg.ckeep[int(pg.slots[-1])] = pg
+        pt = stg._idx(np.stack((pin.kb, pin.vb), 1).reshape(-1))
+        nk, nv = 8 * H * KW * oc, 8 * H * (oc // 64) * CV
+        ok = ov = None
+        if min(nk, nv) <= (1 << 20):
+            if pool is not None:
+                pool.grow(L * nk, L * nv, dev)
+            with pool.use() if pool is not None else contextlib.nullcontext():
+                ok = torch.empty((L, 1, H, KW, oc), dtype=torch.int64, device=dev)
+                ov = torch.empty((L, 1, H, oc // 64, CV), dtype=torch.int64, device=dev)
+            if pool is not None:
+                pool.track(ok, ov)
+        st = self.__dict__.setdefault("_pg_stats", [0, 0, 0])  # rows, pages read, made
+        st[0] += 1
+        st[1] += fe
+        st[2] += E - fe
+        if _PG_DEBUG:
+            logger.info(f"[PicoKVAttnBackend] radix pages row: c {c} gl {glen} cap {cap} E {E} "
+                        f"read {fe}")
+        if st[0] & (st[0] - 1) == 0:  # rows 1, 2, 4, ...
+            logger.info(f"[PicoKVAttnBackend] radix pages: rows {st[0]} pages read {st[1]} "
+                        f"made {st[2]} live {len(stg.cpg)} copied whole {_PG_MAT[0]}")
+        return pin, fe, E, oc, pt, ok, ov
+
     def _pre_cap(self, g, fin):
         """PICOKV_PREALLOC: the full-capacity buffer width (tokens) of a
         compressed prompt with g global tokens of a fin-token request, or
@@ -3783,8 +5158,8 @@ class PicoKVAttnBackend(AttentionBackend):
         pool = self._kvpool if not torch.cuda.is_current_stream_capturing() else None
         for rc, fin in pre:
             c = rc.layers.get(layer_id)
-            if c is None or c.packed_key is None:
-                continue
+            if c is None or _c_pg(c) is not None or c.packed_key is None:
+                continue  # (a paged layer: in its buffers)
             pk, pv = c.packed_key, c.packed_value
             g = int(pk.shape[-1])
             cap = self._pre_cap(g, fin)
@@ -3795,13 +5170,8 @@ class PicoKVAttnBackend(AttentionBackend):
             if pool is not None:
                 pool.grow(pk.element_size() * H * KW * cap,
                           pv.element_size() * H * (cap // 64) * int(pv.shape[-1]), pk.device)
-                with pool.use():
-                    kf = alloc(1, H, KW, cap, dtype=pk.dtype, device=pk.device)
-                    vf = alloc(1, H, cap // 64, int(pv.shape[-1]), dtype=pv.dtype, device=pv.device)
-                pool.track(kf, vf)
-            else:
-                kf = alloc(1, H, KW, cap, dtype=pk.dtype, device=pk.device)
-                vf = alloc(1, H, cap // 64, int(pv.shape[-1]), dtype=pv.dtype, device=pv.device)
+            kf = _kvp_empty(pool, (1, H, KW, cap), pk.dtype, pk.device, alloc)
+            vf = _kvp_empty(pool, (1, H, cap // 64, int(pv.shape[-1])), pv.dtype, pv.device, alloc)
             kf._pk_full = vf._pk_full = True
             pairs.append(((pk, pv), (kf, vf)))
             c.packed_key, c.packed_value = kf[..., :g], vf[:, :, :int(pv.shape[2])]
@@ -3862,6 +5232,8 @@ class PicoKVAttnBackend(AttentionBackend):
                 sl = set(rids).intersection(b["rids"])
                 if sl:
                     b.setdefault("stale", set()).update(sl)
+                    if self._ane is not None:
+                        self._ans_early_drop(rows=sl)
             self._prune_finished(rids)
             self._release_dead(rids)
             if self._kvpool is not None and not torch.cuda.is_current_stream_capturing():
@@ -3881,6 +5253,9 @@ class PicoKVAttnBackend(AttentionBackend):
             self._fin = {}
         if stg is not None and layer.layer_id == 0:
             self._stage_begin(forward_batch, rids, eseq, plens)
+            if (getattr(stg, "kdrop", 0) and self._kvpool is not None
+                    and not torch.cuda.is_current_stream_capturing()):
+                self._kvpool.check()  # (the kept code pages let go are free blocks now)
         # chunk stage: this layer's buffer (staged prefixes + this extend's
         # staged chunks) and the continuation rows by batch index
         # (radix mode: every staged extend, rplan; g only with prefix rows)
@@ -3997,10 +5372,32 @@ class PicoKVAttnBackend(AttentionBackend):
                 continue
             kb = self._bhsd(k_[off:off + ln], self.num_kv_heads)
             vb = self._bhsd(v_[off:off + ln], self.num_kv_heads)
-            if cache._append_mode and cache.append(layer.layer_id, kb, vb):
+            ap = None
+            if cod and _APPEND_CODES and cache._append_mode and i in srow:
+                # the chunk's new global tokens [gl, gl + ln) take mirror
+                # codes when the prefix's are held (a full window: gl = plen
+                # - sink - local)
+                if l0:
+                    c0, sc = cache.layers.get(0), self._scfg
+                    gl = (int(c0.packed_key.shape[-1]) if c0 is not None and 0 not in cache._dense
+                          else -1)
+                    if gl > 0 and plen - int(sc.sink_size) - int(sc.local_size) == gl:
+                        ap = stg.code_plan(i, plen + ln, True, lo=gl)
+                else:
+                    ap = stg.cplan.get(i)
+            put = None
+            if ap is not None:
+                wrote = [False]
+
+                def put(pk, pv, ap=ap, lid=layer.layer_id, wrote=wrote):
+                    self._code_write(lid, pk, pv.contiguous(), ap, ln - ap["g"])
+                    wrote[0] = True
+            if cache._append_mode and cache.append(layer.layer_id, kb, vb, codes=put):
                 pass  # merged incrementally (exact for the cache state)
             else:
                 cache.prepare(layer.layer_id, kb, vb)
+            if ap is not None and not wrote[0]:
+                stg.code_drop(i)
             if self._pools is not None:
                 # this request re-prefilled: its stashed pool data is stale
                 self._pools["idx"].pop(rid, None)
@@ -4185,9 +5582,21 @@ class PicoKVAttnBackend(AttentionBackend):
         b = self._batch
         if b is not None:
             stale = b.get("stale") or ()
-            if not any(r in self._reqs and r not in stale for r in b["rids"]) and (
-                    self._packed_nbytes(b) > self._slot_waste):
-                self._batch = None
+            if not any(r in self._reqs and r not in stale for r in b["rids"]):
+                sts = [fx.get("store") if fx is not None else None
+                       for fx in (b.get("fixed") or {}).values()]
+                if sts and all(st is not None for st in sts):
+                    # per-row storage: the next slot change adopts or allocates
+                    # every fresh row, so the dead rows' codes serve nothing —
+                    # vacated now (tables in place); the batch, its windows and
+                    # graphs stay
+                    for st in sts:
+                        for i, k in enumerate(st.k):
+                            if k is not None:
+                                st.set(i, None, None)
+                    _RowStore.sync_all(sts)
+                elif self._packed_nbytes(b) > self._slot_waste:
+                    self._batch = None
         st = self._pools
         if st is not None:
             cur = set(rids)
@@ -4304,6 +5713,8 @@ class PicoKVAttnBackend(AttentionBackend):
             return False
         H, D = self.num_kv_heads, self.head_dim
         ft = getattr(self, "_fill_tab", None)
+        if ft is not None and any(_c_pg(j[5]) is not None for j in jobs):
+            ft = None  # (paged layers: below)
         if ft is not None:  # PICOKV_FILL_TAB
             tt = ft(jobs, H, D)
             if tt is not None:
@@ -4345,7 +5756,12 @@ class PicoKVAttnBackend(AttentionBackend):
             pkp, pvp, L, w, rk, rv, G, CV, multi = lg[2:]
             pi = i if multi else 0  # one-row pk / pv: the row's storage
             n, Lr, wr_ = g, L, w  # packed key: source / destination widths
-            if c is not None:
+            pgc = _c_pg(c)
+            if pgc is not None:  # PICOKV_RADIX_PAGES: adopted (its own storage) or copied
+                if pgc[0].data_ptr() != pkp + pi * rk or pgc[1].data_ptr() != pvp + pi * rv:
+                    return False
+                ps = vs = nv = n = Lr = wr_ = 0
+            elif c is not None:
                 cpk, cpv = c.packed_key, c.packed_value
                 _, h1, h2, ck = cpk.shape
                 _, _, cg, cc = cpv.shape
@@ -4383,13 +5799,24 @@ class PicoKVAttnBackend(AttentionBackend):
         _fill_rows_kernel[(len(jobs), HKW + 3 * H)](tt, HKW=HKW, H=H, D=D, BLOCK=1024, BT=16)
         return True
 
-    def _adoptable(self, c, need, dtype, H, KW, CV):
+    def _adoptable(self, c, need, dtype, H, KW, CV, share=False):
         """PICOKV_PREALLOC (dedup): the full-capacity buffers (k, v) of a
         fresh row's request cache ``c`` if they can be the row's decode
         storage as they are (capacity >= ``need``, the batch's layout), else
-        None. The dedup that follows drops the cache's views of them."""
+        None. The dedup that follows drops the cache's views of them.
+        ``share`` (a _RowStore row: _RowStore.adopt): a paged layer
+        (PICOKV_RADIX_PAGES) as a shared row (own k, own v, s0, (pin,
+        layer)); without it a paged layer is not adoptable."""
         if not self._prealloc or c is None:
             return None
+        p = _c_pg(c)
+        if p is not None:
+            ok, ov, s0, pin, _, l = p
+            if (not share or 512 * s0 + ok.shape[-1] < need or ok.dtype != dtype
+                    or ov.dtype != dtype or tuple(ok.shape[1:3]) != (H, KW)
+                    or tuple(ov.shape[1::2]) != (H, CV) or ov.shape[2] * 64 != ok.shape[-1]):
+                return None
+            return ok, ov, s0, (pin, l)
         kf, vf = _pk_full(c.packed_key), _pk_full(c.packed_value)
         if (kf is None or vf is None or kf.shape[-1] < need
                 or kf.data_ptr() != c.packed_key.data_ptr()
@@ -4406,7 +5833,7 @@ class PicoKVAttnBackend(AttentionBackend):
         w/64, CV] (w: its storage width; None: a vacant _RowStore row)."""
         st = fx.get("store")
         if st is not None:
-            return st.k[j], st.v[j]
+            return (st.k[j], st.v[j]) if st.pg[j] is None else st.row_full(j)
         b = fx["batched"]
         return b.packed_key[j:j + 1], b.packed_value[j:j + 1]
 
@@ -4456,25 +5883,67 @@ class PicoKVAttnBackend(AttentionBackend):
             rc = self._reqs.get(rid)
             if rc is None:
                 continue  # finished (pruned)
-            g, ln = fx["gl_py"][j], int(lens[j])
+            ln = int(lens[j])
             k = fx["kbuf"][j, :ln].transpose(0, 1).unsqueeze(0).contiguous()  # [1,KVH,ln,D]
             v = fx["vbuf"][j, :ln].transpose(0, 1).unsqueeze(0).contiguous()
-            c = rc.layers.get(layer_id)
-            if c is None:
-                if g == 0:
-                    rc._dense[layer_id] = (k, v)
-                    continue
-                rc._dense.pop(layer_id, None)
-                kp, vp, kpt = self._gl0_projections(
-                    layer_id, int(k.shape[1]), int(k.shape[-1]), k.device, k.dtype)
-                c = PreparedKVCache(dense_key=k, dense_value=v, key_projection=kp,
-                                    value_projection=vp, key_projection_t=kpt,
-                                    packed_key=None, packed_value=None, exp_bits=fx["exp_bits"])
-                rc.layers[layer_id] = c
-            c.dense_key, c.dense_value = k, v
-            pk, pv = self._row_src(fx, j)
-            c.packed_key = pk[..., :g].contiguous()
-            c.packed_value = pv[:, :, :(g + 63) // 64].contiguous()
+            self._sync_row(rc, fx, layer_id, j, k, v)
+
+    def _sync_row(self, rc, fx, layer_id, j, k, v, view=False):
+        """Row j of batch layer ``fx`` into its request cache ``rc``: dense
+        window (k, v) [1, KVH, ln, D] (compact) + global segment. ``view``:
+        a plain _RowStore row's codes as prefix views of the row's own
+        storage (the store drops the row and nothing writes that storage
+        again; zero past gl as the copies), else compact copies."""
+        g = fx["gl_py"][j]
+        c = rc.layers.get(layer_id)
+        if c is None:
+            if g == 0:
+                rc._dense[layer_id] = (k, v)
+                return
+            rc._dense.pop(layer_id, None)
+            kp, vp, kpt = self._gl0_projections(
+                layer_id, int(k.shape[1]), int(k.shape[-1]), k.device, k.dtype)
+            c = PreparedKVCache(dense_key=k, dense_value=v, key_projection=kp,
+                                value_projection=vp, key_projection_t=kpt,
+                                packed_key=None, packed_value=None, exp_bits=fx["exp_bits"])
+            rc.layers[layer_id] = c
+        c.dense_key, c.dense_value = k, v
+        st = fx.get("store") if view else None
+        if st is not None and st.pg[j] is None and st.k[j] is not None:
+            c.packed_key, c.packed_value = st.k[j][..., :g], st.v[j][:, :, :(g + 63) // 64]
+            return
+        pk, pv = self._row_src(fx, j)
+        c.packed_key = pk[..., :g].contiguous()
+        c.packed_value = pv[:, :, :(g + 63) // 64].contiguous()
+
+    def _sync_rows_all(self, b, lids, rows, lens):
+        """_sync_rows of slot batch ``b``'s layers ``lids`` before the slot
+        change moves / drops ``rows`` (PICOKV_SYNC_VIEWS): a row's windows of
+        every layer come out of one buffer filled by stacked copies of <= 16
+        layer sides each (the staging copy: a quarter of the windows) instead
+        of 2 compact copies per layer (32 layers: ~1.5 -> ~0.4 ms of host
+        time per row), its store codes as views (_sync_row). The same values."""
+        fxs = [b["fixed"][lid] for lid in lids]
+        k0 = fxs[0]["kbuf"]
+        if not self._sync_views or any(
+                x.shape[2:] != k0.shape[2:] or x.dtype != k0.dtype
+                for fx in fxs for x in (fx["kbuf"], fx["vbuf"])):
+            for lid, fx in zip(lids, fxs):
+                self._sync_rows(fx, lid, rows, lens)
+            return
+        n, H, D = len(fxs), k0.shape[2], k0.shape[3]
+        for rid, j in rows:
+            rc = self._reqs.get(rid)
+            if rc is None:
+                continue  # finished (pruned)
+            ln = int(lens[j])
+            src = [fx[x][j, :ln] for x in ("kbuf", "vbuf") for fx in fxs]  # [ln, KVH, D]
+            w = torch.empty(2 * n, H, ln, D, dtype=k0.dtype, device=k0.device)
+            for a in range(0, 2 * n, 16):
+                w[a:a + 16] = torch.stack(src[a:a + 16]).transpose(1, 2)
+            ws = w.split(1)  # [1, KVH, ln, D] each: keys of lids, then values
+            for t, (lid, fx) in enumerate(zip(lids, fxs)):
+                self._sync_row(rc, fx, lid, j, ws[t], ws[n + t], view=True)
 
     def _fixed_layer_fast(self, rids, layer_id):
         """Incremental _fixed_layer (slide): the same per-layer batch state,
@@ -4520,10 +5989,10 @@ class PicoKVAttnBackend(AttentionBackend):
                 src = rc._dense[layer_id]
             else:
                 raise KeyError(f"request {rid} has no PiCoKV cache for layer {layer_id}")
-            if src is None or src[0] is None or (c is not None and c.packed_key is None):
+            if src is None or src[0] is None or (c is not None and _c_none(c)):
                 raise RuntimeError(f"PiCoKV request {rid} layer {layer_id}: cache held by a "
                                    "decode batch that was never synced back")
-            gls.append(int(c.packed_key.shape[-1]) if c is not None else 0)
+            gls.append(_c_gl(c))
             dlens.append(int(src[0].shape[-2]))
             fresh.append((i, c, src))
         nvac = B - len(rids)
@@ -4537,16 +6006,16 @@ class PicoKVAttnBackend(AttentionBackend):
         else:
             dev, dt = fresh[0][2][0].device, fresh[0][2][0].dtype
             if comp:
-                c0 = comp[0]
-                KW, CV = int(c0.packed_key.shape[2]), int(c0.packed_value.shape[-1])
-                pdt, exp_bits = c0.packed_key.dtype, c0.exp_bits
+                c0, (k0, v0) = comp[0], _c_pk(comp[0])
+                KW, CV = int(k0.shape[2]), int(v0.shape[-1])
+                pdt, exp_bits = k0.dtype, c0.exp_bits
             else:
                 KW, CV = int(self._scfg.key_bits) // 64, int(self._scfg.value_bits)
                 pdt, exp_bits = _t.int64, int(self._scfg.exp_bits)
         # geometry exactly as _fixed_layer (headroom for the next merge)
         need = [g + max(0, d - W) for g, d in zip(gls, dlens)]
         L = _round_up(max(need) + self._slide_head, 512) or 512
-        rows = self._rows and (S or len(rids)) > 1
+        rows = self._rows and ((S or len(rids)) > 1 or (S == 1 and self._rows_b1))
         if S and nvac and not rows and not self._batch["fixed"] and (
                 nvac * L * self._n_layers * self._tok_bytes(heads, KW, CV, pdt) > self._slot_waste):
             # vacant rows too costly at this width (long context): unslotted
@@ -4565,22 +6034,22 @@ class PicoKVAttnBackend(AttentionBackend):
         if rows:
             tabs = self._batch.get("rtab")
             if tabs is None:  # the batch's layers' tables: one block (_RowTabs)
-                tabs = self._batch["rtab"] = _RowTabs(self._n_layers, B, dev)
-            store = _RowStore(B, heads, KW, CV, pdt, dev, tabs=tabs)
+                tabs = self._batch["rtab"] = _RowTabs(self._n_layers, B, dev, nb=self._blk_nb)
+            store = _RowStore(B, heads, KW, CV, pdt, dev, tabs=tabs, nb=self._blk_nb)
             pk, pv = self._rows_stub(heads, KW, CV, pdt, dev)
             ost = ofx.get("store") if ofx is not None else None
             kept = set()
             if ost is not None:  # carried rows keep their storage: nothing copied
                 for i, j in zip(ci, cj):
-                    if ost.k[j] is not None and ost.k[j].shape[-1] >= need[i]:
-                        store.set(i, ost.k[j], ost.v[j])
-                        rowcap[i] = int(ost.k[j].shape[-1])
+                    if ost.k[j] is not None and ost.rcap(j) >= need[i]:
+                        store.carry(i, ost, j)
+                        rowcap[i] = ost.rcap(j)
                         kept.add(i)
             for i, c, _ in fresh:  # PICOKV_PREALLOC: the request's buffer is the row
-                a = self._adoptable(c, need[i], pdt, heads, KW, CV)
+                a = self._adoptable(c, need[i], pdt, heads, KW, CV, share=True)
                 if a is not None:
-                    store.set(i, *a)
-                    rowcap[i] = int(a[0].shape[-1])
+                    store.adopt(i, a)
+                    rowcap[i] = store.rcap(i)
                     kept.add(i)
             new = [i for i in range(len(rids)) if i not in kept]
             store.alloc(new, [rowcap[i] for i in new])
@@ -4631,7 +6100,7 @@ class PicoKVAttnBackend(AttentionBackend):
                                  + (kbuf, vbuf, i, c, src, gls[i], dlens[i])
                                  for i, c, src in fresh]):
             for i, c, src in fresh:
-                if c is not None:
+                if c is not None and not (rows and store.pg[i] is not None):  # (shared: adopted)
                     rk, rv = (store.k[i], store.v[i]) if rows else (pk[i:i + 1], pv[i:i + 1])
                     if rk.data_ptr() != c.packed_key.data_ptr():  # else adopted: in place
                         rk[..., :gls[i]] = c.packed_key
@@ -4776,10 +6245,10 @@ class PicoKVAttnBackend(AttentionBackend):
                     src = rc._dense[layer_id]
                 else:
                     raise KeyError(f"request {rid} has no PiCoKV cache for layer {layer_id}")
-                if src is None or src[0] is None or (c is not None and c.packed_key is None):
+                if src is None or src[0] is None or (c is not None and _c_none(c)):
                     raise RuntimeError(f"PiCoKV request {rid} layer {layer_id}: cache held by a "
                                        "decode batch that was never synced back")
-                gls[i] = int(c.packed_key.shape[-1]) if c is not None else 0
+                gls[i] = _c_gl(c)
                 dlens[i] = int(src[0].shape[-2])
                 fresh.append((i, c, src))
         nvac = B - len(rids)
@@ -4790,7 +6259,7 @@ class PicoKVAttnBackend(AttentionBackend):
         opk, opv = ofx["batched"].packed_key, ofx["batched"].packed_value
         dev, dt = ofx["kbuf"].device, ofx["kbuf"].dtype
         KW, CV, pdt, exp_bits = int(opk.shape[2]), int(opv.shape[-1]), opk.dtype, ofx["exp_bits"]
-        rows = self._rows and (S or len(rids)) > 1
+        rows = self._rows and ((S or len(rids)) > 1 or (S == 1 and self._rows_b1))
         geo = cp["geo"]
         if geo is not None and geo[0] == W and geo[1] == S and geo[2] == gls and geo[3] == dlens:
             need, need_np, L, rc0, rc0_np = geo[4:]
@@ -4815,8 +6284,8 @@ class PicoKVAttnBackend(AttentionBackend):
         if rows:
             tabs = self._batch.get("rtab")
             if tabs is None:  # the batch's layers' tables: one block (_RowTabs)
-                tabs = self._batch["rtab"] = _RowTabs(self._n_layers, B, dev)
-            store = _RowStore(B, heads, KW, CV, pdt, dev, tabs=tabs)
+                tabs = self._batch["rtab"] = _RowTabs(self._n_layers, B, dev, nb=self._blk_nb)
+            store = _RowStore(B, heads, KW, CV, pdt, dev, tabs=tabs, nb=self._blk_nb)
             pk, pv = self._rows_stub(heads, KW, CV, pdt, dev)
             ost = ofx.get("store")
             keep = np.zeros(B, dtype=bool)
@@ -4826,6 +6295,8 @@ class PicoKVAttnBackend(AttentionBackend):
                 # == store.set(i, ost.k[j], ost.v[j]) — the stash's mirrors
                 # hold the rows' addresses and caps
                 hc = ost._hc[cp["cj_np"]]
+                if ost._nsh:  # PICOKV_RADIX_PAGES: logical caps (pages + own)
+                    hc = hc + 512 * ost._hs[cp["cj_np"]]
                 ok = (hc > 0) & (hc >= need_np[cp["ci_np"]])
                 ki, kj = cp["ci_np"][ok], cp["cj_np"][ok]
                 if len(ki):
@@ -4833,14 +6304,18 @@ class PicoKVAttnBackend(AttentionBackend):
                     for i, j in zip(ki.tolist(), kj.tolist()):
                         sk[i], sv[i] = tk[j], tv[j]
                     store._h[:2, ki] = ost._h[:2, kj]
-                    store._hc[ki] = hc[ok]
+                    store._hc[ki] = ost._hc[kj]
                     rcn[ki] = hc[ok]
                     keep[ki] = True
+                    if ost._nsh:  # shared rows: their pages and s0 too
+                        for i, j in zip(ki.tolist(), kj.tolist()):
+                            if ost.pg[j] is not None:
+                                store.carry(i, ost, j)
             for i, c, _ in fresh:  # PICOKV_PREALLOC: the request's buffer is the row
-                a = self._adoptable(c, need[i], pdt, heads, KW, CV)
+                a = self._adoptable(c, need[i], pdt, heads, KW, CV, share=True)
                 if a is not None:
-                    store.set(i, *a)
-                    rcn[i] = int(a[0].shape[-1])
+                    store.adopt(i, a)
+                    rcn[i] = store.rcap(i)
                     keep[i] = True
             rowcap = rcn.tolist()
             new = np.flatnonzero(~keep[:nr]).tolist()
@@ -4906,7 +6381,7 @@ class PicoKVAttnBackend(AttentionBackend):
                                  + (kbuf, vbuf, i, c, src, gls[i], dlens[i])
                                  for i, c, src in fresh]):
             for i, c, src in fresh:
-                if c is not None:
+                if c is not None and not (rows and store.pg[i] is not None):  # (shared: adopted)
                     rk, rv = (store.k[i], store.v[i]) if rows else (pk[i:i + 1], pv[i:i + 1])
                     if rk.data_ptr() != c.packed_key.data_ptr():  # else adopted: in place
                         rk[..., :gls[i]] = c.packed_key
@@ -5109,9 +6584,9 @@ class PicoKVAttnBackend(AttentionBackend):
             for i, rc in zip(fresh, rcf):
                 c = rc.layers.get(lid)
                 s = (c.dense_key, c.dense_value) if c is not None else rc._dense.get(lid)
-                if s is None or s[0] is None or (c is not None and c.packed_key is None):
+                if s is None or s[0] is None or (c is not None and _c_none(c)):
                     return False  # the rebuild raises the precise error
-                g, d = (int(c.packed_key.shape[-1]) if c is not None else 0), int(s[0].shape[-2])
+                g, d = _c_gl(c), int(s[0].shape[-2])
                 if (fx.get("store") is None and g + max(0, d - W) > L) or d > cap:
                     return False
                 src[(i, lid)] = (c, s, g, d)
@@ -5145,7 +6620,8 @@ class PicoKVAttnBackend(AttentionBackend):
             st = fx.get("store")
             for i in (fresh if st is not None else ()):
                 c, _, g, d = src[(i, lid)]
-                a = self._adoptable(c, g + max(0, d - W), st.dtype, st.H, st.KW, st.CV)
+                a = self._adoptable(c, g + max(0, d - W), st.dtype, st.H, st.KW, st.CV,
+                                    share=True)
                 if a is not None:
                     ad[(i, lid)] = a
         self._prune_finished(rids)
@@ -5212,7 +6688,7 @@ class PicoKVAttnBackend(AttentionBackend):
                     for i in fresh:
                         a = ad.get((i, lid))
                         if a is not None:
-                            st.set(i, *a)
+                            st.adopt(i, a)
                 _RowStore.alloc_all(stl, fresh, [[None if (i, lid) in ad else max(
                     512, _round_up(src[(i, lid)][2] + max(0, src[(i, lid)][3] - W)
                                    + self._slide_head, 512)) for i in fresh]
@@ -5244,8 +6720,7 @@ class PicoKVAttnBackend(AttentionBackend):
         for grp in groups:
             filled = False
             if gone:
-                for lid in grp:
-                    self._sync_rows(b["fixed"][lid], lid, gone, dl_old)
+                self._sync_rows_all(b, grp, gone, dl_old)
             _move(grp)
             if pre:
                 jobs = []
@@ -5284,7 +6759,7 @@ class PicoKVAttnBackend(AttentionBackend):
                             kbuf[i, :d] = s[0][0].transpose(0, 1)  # [len,KVH,D]
                             vbuf[i, :d] = s[1][0].transpose(0, 1)
                         gls[i], dls[i] = g, d
-                        rowcap[i] = int(store.k[i].shape[-1]) if store is not None else min(
+                        rowcap[i] = store.rcap(i) if store is not None else min(
                             L, max(512, _round_up(g + max(0, d - W) + self._slide_head, 512)))
                         if d > W:
                             late.add(i)
@@ -5750,12 +7225,15 @@ class PicoKVAttnBackend(AttentionBackend):
         rows' per-row storage (_RowStore; pk / pv are then shape stubs)."""
         VW = vst.shape[-1]
         if store is not None:
-            kp, vp, ct = store.tables
+            kp, vp, ct = store.tables[:3]
             B, H = len(store.k), store.H
-            _slide_kmerge_rows_kernel[(B * H,)](kst, kp, ct, gl_t, n_t, H, bs or kst.shape[-1],
-                                                KB=store.KW, S=_SLIDE_S)
-            _slide_vmerge_rows_kernel[(B * H, VW)](vst, vp, ct, gl_t, n_t, H, bs or vst.shape[1],
-                                                   CV=store.CV, VB=VW, S=_SLIDE_S)
+            s0 = len(store.tables) > 3  # PICOKV_BLK_TABLES: bounds past s0
+            _slide_kmerge_rows_kernel[(B * H,)](kst, kp, ct, store.s0, gl_t, n_t, H,
+                                                bs or kst.shape[-1], KB=store.KW, S=_SLIDE_S,
+                                                S0=s0)
+            _slide_vmerge_rows_kernel[(B * H, VW)](vst, vp, ct, store.s0, gl_t, n_t, H,
+                                                   bs or vst.shape[1], CV=store.CV, VB=VW,
+                                                   S=_SLIDE_S, S0=s0)
             return
         B, H, KW, L = pk.shape
         _slide_kmerge_kernel[(B * H,)](kst, pk, gl_t, n_t, H, bs or kst.shape[-1], L,
@@ -5815,6 +7293,17 @@ class PicoKVAttnBackend(AttentionBackend):
         step = sh["step"]
         if sh.get("bnd_step") == step and fx["bnd_done"] != step:
             fx["bnd_done"] = step
+            ev = self._ane_ev
+            if ev is not None:  # the shifts move slots the early copies read (once: the
+                self._ane_ev = None  # step's first layer, before every layer's shift)
+                torch.cuda.current_stream(fx["kbuf"].device).wait_event(ev)
+            if "ans" in sh:  # this boundary's decode-written tokens to host first
+                if self._sp is not None:
+                    import time as _time
+                    _ts = _time.perf_counter()
+                self._ans_layer(fx, sh, layer_id)
+                if self._sp is not None:
+                    self._sp_host("ans_layer", _ts)
             n, n_t = sh["bnd_n"], sh["bnd_t"]
             gls = fx["gl_py"]
             if any(g + m > c for g, m, c in zip(gls, n, fx["rowcap"])):
@@ -5836,6 +7325,368 @@ class PicoKVAttnBackend(AttentionBackend):
             fx["kst"] = self._slide_quant(layer_id, fx["kbuf"], True)
         if ph == fx["slot_v"]:
             fx["vst"] = self._slide_quant(layer_id, fx["vbuf"], False)
+        an = self._ane
+        if (an is not None and layer_id not in an["cp"]
+                and step - an["S"] >= 1 + (layer_id - an["l0"]) % (_SLIDE_S - 1)):
+            if self._sp is not None:
+                import time as _time
+                _ts = _time.perf_counter()
+                self._sp["f"].add("cp")
+            self._ans_early_layer(fx, an, layer_id)
+            if self._sp is not None:
+                self._sp_host("ans_early_layer", _ts)
+
+    # -- radix mode: decode-written tokens into the tree (PICOKV_RADIX_ANSWER) --
+    # Window slot j < sink holds position j, slot j >= sink position gl + j, so
+    # an epoch boundary's outgoing slots [sink, sink + n) are positions
+    # [gl + sink, gl + sink + n). A request's tokens from the end of its noted
+    # K/V (the prompt, earlier epochs) on take host slots while in its window
+    # (_ans_early, below), or when about to leave it unnoted (_ans_plan, every
+    # layer copies them before its shift: _ans_layer), and at finish the ones
+    # still in the window (_ans_finish); cache_finished_req inserts the note
+    # with the prompt. The K/V is the one decode wrote, as in a stock radix
+    # cache. A gap (a capture that failed, a batch-build catch-up) ends the
+    # request's capture: the tree gets the tokens before it.
+
+    def _ans_next(self, rid, req=None):
+        """First position of request ``rid`` without host K/V in tree or note:
+        its note's end, else its protected prefix. None: unknown, or (no
+        ``req`` given) the request has finished."""
+        tree = self._stg.tree
+        n = tree._notes.get(rid)
+        if n is not None:
+            return int(n[0]) + len(n[1])
+        if req is None:
+            req = tree._reqs.get(rid)
+            if req is None or req.finished():
+                return None
+        p = getattr(getattr(req, "kv", None), "cache_protected_len", None)
+        return None if p is None else int(p)
+
+    def _ans_plan(self, fx, sh, n):
+        """Epoch boundary (_step_begin; ``fx``: the step's first layer, gl
+        before the shift): rows whose outgoing positions [a, a + n) hold
+        their request's next position take host slots for [next, a + n)."""
+        stg = self._stg
+        old = sh.pop("ans", None)
+        if old is not None:  # a step that did not reach every layer
+            stg.tree.slots.free(old["x"])
+        b, sink = self._batch, int(self._scfg.sink_size)
+        stale = b.get("stale") or ()
+        cap = []
+        for i, row in enumerate(b["rids"]):
+            if not n[i] or row in stale:
+                continue
+            rid = self._own.get(row)
+            nx = self._ans_next(rid) if rid is not None else None
+            a = fx["gl_py"][i] + sink
+            if nx is not None and a <= nx < a + n[i]:
+                cap.append((i, rid, nx, a + n[i] - nx))
+        if not cap or fx["kbuf"].dtype != stg.dtype:
+            return
+        x = stg.ans_alloc(sum(c[3] for c in cap))
+        if x is None:
+            return
+        r, s, notes, o = [], [], [], 0
+        for i, rid, lo, m in cap:
+            g = fx["gl_py"][i]
+            r += [i] * m
+            s += range(lo - g, lo - g + m)
+            notes.append((rid, lo, o, m, i, g))
+            o += m
+        dev = fx["kbuf"].device
+        sh["ans"] = {"step": sh["step"], "x": x, "notes": notes, "runs": stg.ans_runs(x),
+                     "r": self._h2d(r, dev, torch.int64), "s": self._h2d(s, dev, torch.int64),
+                     "done": 0, "seen": 0}
+
+    def _ans_layer(self, fx, sh, lid):
+        """Epoch boundary, layer ``lid`` before its shift: the planned rows'
+        outgoing tokens to their host slots (one gather, a D2H per run). The
+        last layer notes them, if every layer copied its own."""
+        an, stg = sh["ans"], self._stg
+        an["seen"] += 1
+        if (an["step"] == sh["step"] and fx["kbuf"].dtype == stg.dtype
+                and all(fx["gl_py"][i] == g for _, _, _, _, i, g in an["notes"])):
+            r, s = an["r"], an["s"]
+            t = torch.stack((fx["kbuf"][r, s], fx["vbuf"][r, s]), 1)
+            stg.ans_copy(t, an["runs"], lid)
+            an["done"] += 1
+        if an["seen"] < stg.L:
+            return
+        del sh["ans"]
+        x, tree = an["x"], stg.tree
+        if an["done"] < stg.L:  # (deterministic: the same on every attention-TP rank)
+            tree.slots.free(x)
+            return
+        for rid, lo, o, m, _, _ in an["notes"]:
+            tree.pk_note(rid, lo, x[o:o + m])
+        if _ANS_DUMP:
+            self._ans_dump([(rid, lo, self._ans_host_l0(x[o:o + m])) for rid, lo, o, m, _, _ in an["notes"]])
+
+    # Early capture: at an epoch boundary each live row's positions from its
+    # next one to its window end (written by the steps before: slots
+    # [next - gl, d) after the shift) take host slots at once; layer l copies
+    # them at the epoch's step 1 + l % 63, before the next boundary's shift
+    # moves them (it waits on that copy). K and V of a block of rows with the
+    # same slots are one cudaMemcpy3DAsync each, straight from the window
+    # (ans_win): no gather on a boundary step, no device memory. The notes
+    # extend once every layer has copied, so a boundary's outgoing tokens are
+    # noted already and _ans_plan only catches up rows whose early capture
+    # did not run (a batch change). A row that changes request, re-prefills
+    # or finishes in the epoch gives its slots back at the plan's end.
+
+    def _ans_early(self, fx, sh):
+        """Epoch boundary (_step_begin, after _ans_plan; ``fx``: the step's
+        first layer, gl before the shift): plan the epoch's early capture."""
+        stg, b = self._stg, self._batch
+        cr = _cudart()
+        if (not cr or cr[2] is None or fx["kbuf"].dtype != stg.dtype
+                or not (fx["kbuf"].is_contiguous() and fx["vbuf"].is_contiguous())):
+            return
+        sink = int(self._scfg.sink_size)
+        n = sh["bnd_n"] if sh.get("bnd_step") == sh["step"] else None
+        an = sh.get("ans")  # this boundary's catch-up: its rows go on after it
+        fb = ({i: lo + m for _, lo, _, m, i, _ in an["notes"]}
+              if an is not None and an["step"] == sh["step"] else {})
+        stale, gls, dl = b.get("stale") or (), fx["gl_py"], sh["dlens_py"]
+        cap = []
+        for i, row in enumerate(b["rids"]):
+            rid = self._own.get(row)
+            if rid is None or row in stale:
+                continue
+            lo = fb[i] if i in fb else self._ans_next(rid)
+            g = gls[i] + (n[i] if n is not None else 0)
+            if lo is not None and g + dl[i] > lo and (g == 0 or lo >= g + sink):
+                cap.append((i, row, rid, lo, lo - g, g + dl[i] - lo))
+        if not cap:
+            return
+        x = stg.ans_alloc(sum(c[5] for c in cap))
+        if x is None:
+            return
+        runs = stg.ans_runs(x)  # (page, offset, source token, n), in source order
+        blocks, notes, o, r = [], [], 0, 0
+        for i, row, rid, lo, s0, m in cap:
+            notes.append((i, row, rid, lo, o, m, s0))
+            while runs[r][2] + runs[r][3] <= o:
+                r += 1
+            p, a, t, k = runs[r]
+            if t + k >= o + m:  # one run: the next row of the last block?
+                a += o - t
+                bl = blocks[-1] if blocks else None
+                if (bl is not None and bl[0] + bl[1] == i and bl[2] == s0 and bl[3] == m
+                        and bl[4] == p and bl[5] + bl[1] * m == a):
+                    bl[1] += 1
+                else:
+                    blocks.append([i, 1, s0, m, p, a])
+            else:  # across runs: a block per piece
+                q = o
+                while q < o + m:
+                    p, a, t, k = runs[r]
+                    c = min(t + k, o + m) - q
+                    blocks.append([i, 1, s0 + q - o, c, p, a + q - t])
+                    q += c
+                    if q >= t + k:
+                        r += 1
+            o += m
+        # "b": the batch's token (the plan must not keep a replaced batch alive)
+        self._ane = {"b": b.setdefault("tok", object()), "S": sh["step"], "l0": b["min_layer"],
+                     "x": x, "notes": notes,
+                     "rids": {c[2] for c in cap}, "blocks": [tuple(bl) for bl in blocks],
+                     "ops": stg.ans_win_ops(blocks) if cr[3] is not None else None,
+                     "cp": set(), "w": False, "ev": False, "dead": set(), "bad": False}
+
+    def _ans_early_layer(self, fx, an, lid):
+        """Layer ``lid``'s copy of the early capture plan (_slide_layer, once
+        per plan, a step after the boundary: every layer's shift is queued);
+        the last one ends the plan. ds waits on the current stream once per
+        plan ("w"; again after a window regrow), at its first copy: the
+        copied slots keep their tokens until the next boundary's shifts."""
+        an["cp"].add(lid)
+        kb, vb = fx["kbuf"], fx["vbuf"]
+        ok = False
+        if (not an["bad"] and kb.dtype == self._stg.dtype
+                and kb.is_contiguous() and vb.is_contiguous()):
+            self._ds_hold(fx)
+            ok = self._stg.ans_win(kb, vb, an["blocks"], lid, not an["w"], an["ops"])
+        if not ok:
+            an["bad"] = True
+        else:
+            an["w"] = an["ev"] = True
+        if len(an["cp"]) >= self._stg.L:
+            self._ans_early_end()
+
+    def _ans_early_end(self):
+        """End the early capture plan: if every layer copied, each row still
+        holding its request at its next position extends that note; the
+        other slots go back (the copies into them are queued first on ds,
+        before any later writer). An event after the copies stays for the
+        next boundary's shifts."""
+        an, self._ane = self._ane, None
+        if an is None:
+            return
+        if an["ev"]:  # (a later event on ds covers an earlier one)
+            self._ane_ev = torch.cuda.Event()
+            self._ane_ev.record(self._stg.ds)
+        stg, b = self._stg, self._batch
+        ok = not an["bad"] and len(an["cp"]) >= stg.L and b is not None and b.get("tok") is an["b"]
+        stale = (b.get("stale") or ()) if ok else ()
+        x, back, dump = an["x"], [], []
+        for i, row, rid, lo, o, m, _ in an["notes"]:
+            if (ok and rid not in an["dead"] and i < len(b["rids"]) and b["rids"][i] == row
+                    and row not in stale and self._own.get(row) == rid
+                    and self._ans_next(rid) == lo):
+                stg.tree.pk_note(rid, lo, x[o:o + m])
+                if _ANS_DUMP:
+                    dump.append((rid, lo, self._ans_host_l0(x[o:o + m])))
+            else:
+                back.append(x[o:o + m])
+        if dump:
+            self._ans_dump(dump)
+        if back:
+            stg.tree.slots.free(np.concatenate(back))
+
+    def _ans_early_drop(self, rids=(), rows=()):
+        """Requests ``rids`` (finishing: _ans_finish) or req rows ``rows``
+        (re-prefilling) leave the early capture plan; the plan ends once no
+        row is left."""
+        an = self._ane
+        an["dead"].update(r for r in rids if r in an["rids"])
+        if rows:
+            an["dead"].update(rid for _, row, rid, *_ in an["notes"] if row in rows)
+        if len(an["dead"]) >= len(an["rids"]):
+            self._ans_early_end()
+
+    def _ds_hold(self, fx):
+        """Layer ``fx``'s window buffers outlive the ds copies reading them
+        (record_stream, once per buffer)."""
+        kb, r = fx["kbuf"], fx.get("ds_rec")
+        if r is None or r() is not kb:
+            kb.record_stream(self._stg.ds)
+            fx["vbuf"].record_stream(self._stg.ds)
+            fx["ds_rec"] = weakref.ref(kb)
+
+    def _ans_finish(self, req, kv_len):
+        """PicoKVRadixCache.cache_finished_req, before it takes the note: the
+        request's positions [next, kv_len) still in its dense window take host
+        slots, copied on ds after the decode stream's queued work (the step
+        that wrote its last token): straight from every layer's window row
+        (ans_rows), or from a gather where a window is not one. Nothing on
+        failure: the tree then gets the tokens noted so far."""
+        if self._sp is not None:
+            import time as _time
+            _ts = _time.perf_counter()
+        try:
+            stg, w, t, lo = self._stg, None, None, None
+            if self._ane is not None:
+                self._ans_early_drop(rids=(req.rid,))
+            cur = self._ans_cur or torch.cuda.current_stream(self.device)
+            try:
+                row = getattr(req.kv, "req_pool_idx", None)
+                if row is not None and self._own.get(int(row)) == req.rid:
+                    lo = self._ans_next(req.rid, req)
+                    if lo is not None and lo < kv_len:
+                        w = self._ans_window(int(row), lo, int(kv_len))
+                        if w is not None and not all(fx is not None and k.is_contiguous()
+                                                     for k, _, _, fx in w[0]):
+                            with torch.cuda.stream(cur):
+                                t = torch.stack((torch.stack([k[s:s + w[1]] for k, _, s, _ in w[0]]),
+                                                 torch.stack([v[s:s + w[1]] for _, v, s, _ in w[0]])), 2)
+            except Exception as e:
+                w = None
+                if not getattr(self, "_ans_warned", False):
+                    self._ans_warned = True
+                    logger.warning(f"[PicoKVAttnBackend] radix answer K/V: gather failed ({e!r}): "
+                                   f"decode tokens not cached")
+            ok = w is not None
+            if stg.sync is not None:
+                ok = stg.sync(ok)
+            if not ok:
+                return
+            src, m = w
+            x = stg.ans_alloc(m)
+            if x is None:
+                return
+            with torch.cuda.stream(cur):
+                if t is not None:
+                    stg.ans_copy(t, stg.ans_runs(x))
+                else:
+                    for *_, fx in src:
+                        self._ds_hold(fx)
+                    stg.ans_rows([(k, v, s) for k, v, s, _ in src], m, stg.ans_runs(x))
+                    # the slot change refilling this row's window waits for them
+                    ev = self._fin_ev = torch.cuda.Event()
+                    ev.record(stg.ds)
+            stg.tree.pk_note(req.rid, lo, x)
+            if _ANS_DUMP:
+                self._ans_dump([(req.rid, lo, self._ans_host_l0(x))], req)
+        finally:
+            if self._sp is not None:
+                self._sp_host("ans_finish", _ts)
+
+    @staticmethod
+    def _ans_dump(spans, req=None):
+        """PICOKV_RADIX_ANSWER_DUMP: spans [(rid, first position, layer-0
+        K/V [m, 2, KVH, D])] (and req's token ids) to files (syncs)."""
+        torch.cuda.synchronize()  # the gather ran on the decode stream
+        os.makedirs(_ANS_DUMP, exist_ok=True)
+        for rid, lo, kv in spans:
+            torch.save(kv.cpu(), os.path.join(_ANS_DUMP, f"{rid}_{lo}.pt"))
+        if req is not None:
+            torch.save(list(req.origin_input_ids) + list(req.output_ids),
+                       os.path.join(_ANS_DUMP, f"{req.rid}_tokens.pt"))
+
+    def _ans_host_l0(self, x):
+        """PICOKV_RADIX_ANSWER_DUMP: layer 0's K/V [m, 2, KVH, D] in host slots
+        ``x``, as the copies into them left it (syncs ds)."""
+        stg = self._stg
+        stg.ds.synchronize()
+        return torch.cat([stg.pool[p][0, a:a + n] for p, a, _, n in stg.ans_runs(x)])
+
+    def _ans_window(self, row, lo, hi):
+        """Where positions [lo, lo + m) of req row ``row`` (m: up to hi, within
+        every layer's window) live: the decode batch, the fast build's stash,
+        its request cache. ([(K, V [T, KVH, D], first slot, the layer's fixed
+        dict, None: a request cache)] per layer, m); None: some layer's window
+        does not start at or before lo."""
+        sink, L, dt = int(self._scfg.sink_size), self._stg.L, self._stg.dtype
+        b, st, rc = self._batch, self._pools, self._reqs.get(row)
+        bi = bj = None
+        if b is not None and row in b["rids"] and row not in (b.get("stale") or ()):
+            bi = b["rids"].index(row)
+        if self._fast and st is not None and st.get("fixed"):
+            bj = st["idx"].get(row)
+        src = []
+        for lid in range(L):
+            fx = b["fixed"].get(lid) if bi is not None else None
+            if fx is not None:
+                sh = b["shared"]
+                d = sh["dlens_py"][bi] if sh is not None else fx["dlens0"][bi]
+                src.append((fx["kbuf"][bi], fx["vbuf"][bi], fx["gl_py"][bi], int(d), fx))
+                continue
+            fx = st["fixed"].get(lid) if bj is not None else None
+            if fx is not None:
+                src.append((fx["kbuf"][bj], fx["vbuf"][bj], fx["gl_py"][bj], int(st["lens"][bj]), fx))
+                continue
+            c = rc.layers.get(lid) if rc is not None else None
+            if c is not None:
+                k, v = c.dense_key[0].transpose(0, 1), c.dense_value[0].transpose(0, 1)
+                g = _c_gl(c)
+            elif rc is not None and lid in rc._dense:
+                k, v = (y[0].transpose(0, 1) for y in rc._dense[lid])
+                g = 0
+            else:
+                return None
+            src.append((k, v, g, int(k.shape[0]), None))
+        m = min([hi] + [g + d for _, _, g, d, _ in src]) - lo
+        if m <= 0:
+            return None
+        out = []
+        for k, v, g, d, fx in src:
+            s0 = lo - g
+            if s0 < 0 or (g > 0 and s0 < sink) or k.dtype != dt:
+                return None
+            out.append((k, v, s0, fx))
+        return out, m
 
     def _slide_regrow(self, fx, layer_id, n):
         """A row's global segment is about to pass its scheduled capacity:
@@ -5859,7 +7710,7 @@ class PicoKVAttnBackend(AttentionBackend):
             if over:
                 hd = (2 if slot else 1) * self._slide_head
                 old = [(st.k[i], st.v[i]) for i in over]
-                st.alloc(over, [_round_up(need[i] + hd, 512) for i in over])
+                st.grow(over, [_round_up(need[i] + hd, 512) for i in over])
                 self._row_copy(list(zip(old, [(st.k[i], st.v[i]) for i in over])))
                 st.sync()
                 del old
@@ -6025,6 +7876,8 @@ class PicoKVAttnBackend(AttentionBackend):
             # local tokens into the global segment (every layer merges +
             # shifts at its own call, before its append). wpos == the
             # pre-append window length here, so n is computed on device.
+            if self._ane is not None:  # (every layer copied within the epoch)
+                self._ans_early_end()
             W = self._batch["W"]
             n = [min(_SLIDE_S, max(0, d - W)) for d in sh["dlens_py"]]
             if any(n):
@@ -6034,9 +7887,35 @@ class PicoKVAttnBackend(AttentionBackend):
                 sh["dlens_py"] = [d - m for d, m in zip(sh["dlens_py"], n)]
                 sh["cur"] = max(sh["dlens_py"])
                 sh["bnd_step"], sh["bnd_n"], sh["bnd_t"] = sh["step"], n, n_t
+                if self._ans:
+                    if self._sp is not None:
+                        import time as _time
+                        _ts = _time.perf_counter()
+                    self._ans_plan(fixed, sh, n)
+                    if self._sp is not None:
+                        self._sp_host("ans_plan", _ts)
+                        if "ans" in sh:
+                            self._sp["f"].add("ans")
+            if self._ans:  # every row's window tokens past its noted ones
+                if self._sp is not None:
+                    import time as _time
+                    _ts = _time.perf_counter()
+                self._ans_early(fixed, sh)
+                if self._sp is not None:
+                    self._sp_host("ans_early", _ts)
+        if self._sp is not None and sh.get("bnd_step") is not None:
+            k = sh["step"] - sh["bnd_step"]
+            if k == 0:
+                self._sp["f"].add("bnd")
+            elif 0 < k <= 3:
+                self._sp["f"].add("post")
         sh["dlens_py"] = ([d + 1 for d in sh["dlens_py"]] if inc is None
                           else [d + m for d, m in zip(sh["dlens_py"], inc)])
         sh["cur"] += 1
+        if self._ans:
+            self._ans_cur = _t.cuda.current_stream(fixed["kbuf"].device)
+            if self._ane is not None and self._batch.get("tok") is not self._ane["b"]:
+                self._ans_early_end()  # its batch is gone: drop what it took
         if sh["cur"] > sh["cap"]:  # grow every layer's pool together (rare)
             newcap = sh["cap"] * 2
             for fx in self._batch["fixed"].values():
@@ -6052,6 +7931,8 @@ class PicoKVAttnBackend(AttentionBackend):
                 fx["batched"].dense_key = nk.permute(0, 2, 1, 3)
                 fx["batched"].dense_value = nv.permute(0, 2, 1, 3)
             sh["cap"] = newcap
+            if self._ane is not None:  # the plan's later copies read the new windows
+                self._ane["w"] = False
             sh["indices"] = _t.empty(
                 kbuf.shape[0] * newcap, dtype=_t.int32, device=sh["wpos"].device)
             self._graph_clear(self._batch["g"])  # pool/table addresses changed
@@ -6630,6 +8511,10 @@ class PicoKVAttnBackend(AttentionBackend):
             # graphs turned off by failures must come back at a batch change
             if self._graph_rearm is not None:
                 self._maybe_rearm_graphs()
+            ev = self._fin_ev
+            if ev is not None and S is not None:  # windows a finish still copies (ds)
+                self._fin_ev = None
+                _t.cuda.current_stream(self.device).wait_event(ev)
             if S is not None and self._slot_change(rids, S):
                 if sp is not None:
                     sp["f"].add("slot")

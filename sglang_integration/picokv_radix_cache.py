@@ -179,6 +179,9 @@ class PicoKVRadixCache(RadixCache):
         self._ins_host = self._ins_taken = None
         self.picokv_rtok = None  # the backend's stage reserve (tokens), set at attach
         self._pk_hot = None  # the backend's _ChunkStage when its GPU hot tier is on
+        # the backend's capture of a finishing request's decode-written K/V
+        # (PICOKV_RADIX_ANSWER): (req, kv_len) -> notes them before the insert
+        self._pk_answer = None
         self._hot_n = 0  # accounting tokens the hot tier's mirrors hold
         # PICOKV_RADIX_HOT_FREE: a mirror is taken only while this fraction of
         # the pool stays free after it
@@ -466,6 +469,9 @@ class PicoKVRadixCache(RadixCache):
 
     def cache_finished_req(self, req, is_insert: bool = True, *, owned_kv_len: int):
         self._free_hold(req)
+        if (self._pk_answer is not None and is_insert and not self.disable
+                and not getattr(self, "disable_finished_insert", False)):
+            self._pk_answer(req, owned_kv_len)  # its window's tokens join the note
         note = self._notes.pop(req.rid, None)
         self._pf.pop(req.rid, None)
         if self.disable or not is_insert:
