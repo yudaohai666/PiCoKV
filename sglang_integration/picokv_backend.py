@@ -402,6 +402,13 @@ def _kvp_seg(n: int) -> int:
     return -(-n // (2 << 20)) * (2 << 20)
 
 
+def _kvp_waste(n: int) -> float:
+    """Bytes of its segment an n-byte block leaves unused (blocks under 10
+    MiB share their 20 MiB segment)."""
+    s = _kvp_seg(n)
+    return (s - s // n * n) / (s // n)
+
+
 def _kvp_freed(acc, gen, n):
     if gen == acc[2]:
         acc[0] -= n  # into the current pool
@@ -423,11 +430,23 @@ class _KVPool:
     once that many bytes are freed into dropped pools. Free bytes are
     modeled without a snapshot: a block outside every known segment starts
     a new one (sized as the allocator does), live bytes are tracked by
-    storage finalizers. Expandable segments are not modeled (off)."""
+    storage finalizers. Expandable segments are not modeled (off).
 
-    def __init__(self, slack: int):
+    Arena (PICOKV_KV_POOL_ARENA_MB): a block of 10 MiB or more gets its own
+    segment rounded up to 2 MiB, so a 32k prompt's 10.31 MiB key and value
+    buffers held 12 MiB each (14% of the packed codes). grow() caches one
+    block of a whole number of buffer pairs before a pair that does not fit
+    the newest arena's modeled free tail; the pairs carve it back to back.
+    Only when the exact segments would leave 2% of the pair unused: with the
+    arena 24 prompts of 122,880 tokens (0.5% unused) peaked 76 MiB higher
+    (its cached tail), 24 of 120,000 (2.6%) 1.35 GiB lower, 96 of 32,768
+    8.6 GiB lower."""
+
+    def __init__(self, slack: int, arena: int = 0):
         self.pool = torch.cuda.MemPool(use_on_oom=True)
-        self.slack = slack
+        self.slack, self.arena = slack, arena
+        self.front = (0, 0)  # [start, end) of the newest arena's free tail
+        self.cool = 0  # pairs left without growth after an arena ran out of memory
         self.acc = [0, 0, 0]  # live bytes, bytes freed into dropped pools, generation
         self.model = None if slack > 0 else False  # None: no block yet
         self.bases, self.size, self.res = [], {}, 0
@@ -441,6 +460,34 @@ class _KVPool:
         self.size = {s["address"]: s["total_size"] for s in snap}
         self.res = sum(self.size.values())
 
+    def grow(self, nk: int, nv: int, dev):
+        """Before allocating an nk-byte and an nv-byte buffer (not while capturing)."""
+        n = _round_up(nk, 512) + _round_up(nv, 512)
+        if not self.model or not self.arena or 2 * n > self.arena:
+            return
+        if _kvp_waste(nk) + _kvp_waste(nv) < 0.02 * n:
+            return
+        if self.front[1] - self.front[0] >= n:
+            return
+        if self.cool:
+            self.cool -= 1
+            return
+        sz = _round_up(self.arena // n * n, 2 << 20)
+        try:
+            with self.use():
+                a = torch.empty(sz, dtype=torch.uint8, device=dev)
+        except torch.OutOfMemoryError:  # near full: exact segments for a while
+            self.cool = 64
+            return
+        p, b = a.data_ptr(), self.bases
+        del a  # cached in the pool, free
+        j = bisect.bisect_right(b, p) - 1
+        if j < 0 or p >= b[j] + self.size[b[j]]:
+            bisect.insort(b, p)
+            self.size[p] = sz
+            self.res += sz
+        self.front = (p, p + sz)
+
     def track(self, *ts):
         acc = self.acc
         for t in ts:
@@ -452,11 +499,16 @@ class _KVPool:
             weakref.finalize(st, _kvp_freed, acc, acc[2], n)
             if self.model:
                 p, b = st.data_ptr(), self.bases
+                f0, f1 = self.front
+                if f0 <= p < f1:
+                    self.front = (p + n, f1)
                 j = bisect.bisect_right(b, p) - 1
                 if j < 0 or p >= b[j] + self.size[b[j]]:
                     bisect.insort(b, p)
                     self.size[p] = s = _kvp_seg(n)
                     self.res += s
+                    if n <= f1 - f0:  # the modeled tail would have fit: stale
+                        self.front = (0, 0)
             elif self.model is None:
                 snap = self.pool.snapshot()
                 self.model = not any(s["is_expandable"] for s in snap)
@@ -483,7 +535,7 @@ class _KVPool:
         self.pool = torch.cuda.MemPool(use_on_oom=True)  # the old one's free segments go
         acc[0], acc[2] = 0, acc[2] + 1
         self.bases, self.size, self.res = [], {}, 0
-        self.off, self.next = 0, self.slack
+        self.off, self.next, self.front = 0, self.slack, (0, 0)
         self.rotations += 1
         logger.info(f"[PicoKVAttnBackend] KV pool replaced: {free / (1 << 30):.2f} GiB of "
                     f"cached free blocks released ({self.rotations} so far)")
@@ -2814,7 +2866,8 @@ class PicoKVAttnBackend(AttentionBackend):
         if self._prealloc and os.environ.get("PICOKV_KV_POOL", "1") == "1":
             try:
                 self._kvpool = _KVPool(
-                    int(float(os.environ.get("PICOKV_KV_POOL_SLACK_MB", "2048")) * (1 << 20)))
+                    int(float(os.environ.get("PICOKV_KV_POOL_SLACK_MB", "2048")) * (1 << 20)),
+                    int(float(os.environ.get("PICOKV_KV_POOL_ARENA_MB", "256")) * (1 << 20)))
             except Exception:  # no MemPool (older torch): the default pool
                 self._kvpool = None
         self._fused_append = os.environ.get("PICOKV_FUSED_APPEND", "1") == "1"
@@ -3525,6 +3578,8 @@ class PicoKVAttnBackend(AttentionBackend):
             KS, zq = glen, 0
         else:
             pool = self._kvpool if not torch.cuda.is_current_stream_capturing() else None
+            if pool is not None:
+                pool.grow(8 * H * KW * cap, 8 * H * (cap // 64) * CV, dev)
             with pool.use() if pool is not None else contextlib.nullcontext():
                 pka = torch.empty((1, H, KW, cap), dtype=torch.int64, device=dev)
                 pv = torch.empty((1, H, cap // 64, CV), dtype=torch.int64, device=dev)
@@ -3738,6 +3793,8 @@ class PicoKVAttnBackend(AttentionBackend):
                 continue
             _, H, KW, _ = pk.shape
             if pool is not None:
+                pool.grow(pk.element_size() * H * KW * cap,
+                          pv.element_size() * H * (cap // 64) * int(pv.shape[-1]), pk.device)
                 with pool.use():
                     kf = alloc(1, H, KW, cap, dtype=pk.dtype, device=pk.device)
                     vf = alloc(1, H, cap // 64, int(pv.shape[-1]), dtype=pv.dtype, device=pv.device)
