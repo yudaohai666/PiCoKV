@@ -6016,6 +6016,8 @@ class PicoKVAttnBackend(AttentionBackend):
                 "fi_lse": _t.empty(B, self.num_q_heads, device=dev, dtype=torch.float32),
                 # custom window kernel output (ln-space LSE, unlike fi_lse)
                 "win_lse": _t.empty(B, self.num_q_heads, device=dev, dtype=torch.float32),
+                # the Triton split window's row max (window_attn.window_lse)
+                "win_max": _t.empty(B, self.num_q_heads, device=dev, dtype=torch.float32),
             }
         return sh
 
@@ -6159,14 +6161,16 @@ class PicoKVAttnBackend(AttentionBackend):
         return m
 
     def _window_attn(self, kbuf, vbuf, lpl, q_, out, lse, meta=None, pdl=False,
-                     split=False):
+                     split=False, mx=None):
         """Plan-free dense-window attention over the token-major pools with
         device lens ``lpl``: the Triton kernels (_tri_win; ``pdl``: launched
         as programmatic dependents; ``split``: the LSE now, and a third
         return value that launches the output from it), FA3 (ln-LSE
         returned, ``lse`` unused; ``meta``: its scheduler metadata for these
         lens, _fa3_sched) or the custom kernel (writes ``out``/``lse`` in
-        place). Returns (out [B,QH,1,D], ln-LSE [B,QH,1][, out_fn])."""
+        place). ``mx`` [B,QH] fp32: the split pair's row max (its output
+        then as FA3, P = exp(s - max)). Returns (out [B,QH,1,D], ln-LSE
+        [B,QH,1][, out_fn])."""
         B = kbuf.shape[0]
         o4 = out.view(B, self.num_q_heads, 1, self.head_dim)
         w = self._tri_win
@@ -6175,15 +6179,16 @@ class PicoKVAttnBackend(AttentionBackend):
                 and lse.is_contiguous() and kbuf.is_contiguous() and vbuf.is_contiguous()):
             # compile every variant on the eager steps (a no-op after the
             # first call and inside a capture, which reaches the split pair)
-            w.warm(q_, kbuf, vbuf, lpl, lse, out, self.scaling)
+            w.warm(q_, kbuf, vbuf, lpl, lse, out, self.scaling, mx=mx)
         else:
             w = None
         if w is not None and (split or self._tri_serial):
             sc = self.scaling
             l3 = lse.view(B, self.num_q_heads, 1)
             if split and B <= self._tri_split_bs:
-                w.window_lse(q_, kbuf, lpl, lse, sc, pdl=pdl)
-                return o4, l3, lambda: w.window_out_from_lse(q_, kbuf, vbuf, lpl, lse, out, sc)
+                w.window_lse(q_, kbuf, lpl, lse, sc, pdl=pdl, mx=mx)
+                return o4, l3, lambda: w.window_out_from_lse(q_, kbuf, vbuf, lpl, lse, out, sc,
+                                                             mx=mx)
             w.window_attn(q_, kbuf, vbuf, lpl, lse, out, sc, pdl=pdl)
             return o4, l3
         if self._fa3 is not None:
@@ -6359,7 +6364,7 @@ class PicoKVAttnBackend(AttentionBackend):
                         kbuf, vbuf, sh["lpl"], qs,
                         bufs["fi_out"] if out is None else out.view(bufs["fi_out"].shape),
                         bufs["win_lse"], meta=self._fa3_meta(sh, kbuf),
-                        pdl=pdl and self._tri_pdl, split=split)
+                        pdl=pdl and self._tri_pdl, split=split, mx=bufs["win_max"])
                 fi = self._fi["wrapper"]
                 out, lse2 = fi.run(qs, (kt, vt),
                                    out=bufs["fi_out"], lse=bufs["fi_lse"], return_lse=True)
