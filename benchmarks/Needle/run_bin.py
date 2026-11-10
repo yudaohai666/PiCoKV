@@ -68,6 +68,8 @@ class Transformer(ModelProvider):
         bpc_fix_layers: list[int] | None = None,
         bpc_use_cuda_kernel: bool = True,
         bpc_offline_proj_path: str | None = BPC_DEFAULT_OFFLINE_PROJ_PATH,
+        # BitDecoding params (--method bitdecoding)
+        bitdecoding_allow_unvalidated: bool = False,
     ):
         self.max_new_tokens = int(max_new_tokens)
         self.method = method
@@ -110,6 +112,8 @@ class Transformer(ModelProvider):
             bpc_fix_layers=bpc_fix_layers,
             bpc_use_cuda_kernel=bpc_use_cuda_kernel,
             bpc_offline_proj_path=bpc_offline_proj_path,
+            # BitDecoding params (--method bitdecoding)
+            bitdecoding_allow_unvalidated=bitdecoding_allow_unvalidated,
         )
 
     def evaluate_model(self, prompt, needle=None) -> str:
@@ -222,6 +226,8 @@ def run_experiment(
     bpc_fix_layers: list[int] | None = None,
     bpc_use_cuda_kernel: bool = True,
     bpc_offline_proj_path: str | None = BPC_DEFAULT_OFFLINE_PROJ_PATH,
+    # BitDecoding params (--method bitdecoding)
+    bitdecoding_allow_unvalidated: bool = False,
 ) -> dict[tuple[int, int], str]:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -264,6 +270,8 @@ def run_experiment(
         bpc_fix_layers=bpc_fix_layers,
         bpc_use_cuda_kernel=bpc_use_cuda_kernel,
         bpc_offline_proj_path=bpc_offline_proj_path,
+        # BitDecoding params (--method bitdecoding)
+        bitdecoding_allow_unvalidated=bitdecoding_allow_unvalidated,
     )
     tester = LLMNeedleHaystackTester(model)
     results = {}
@@ -400,6 +408,19 @@ def main() -> None:
         default=BPC_DEFAULT_OFFLINE_PROJ_PATH,
         help="BPC: path to a learned offline hash-projection .pt (e.g. src/BPC/ckp/projections/*.pt); pass '' for the online (random) projection",
     )
+    # ── BitDecoding params (--method bitdecoding) ──
+    # Only 4-bit/g128 is numerically correct in the released kernel; every other
+    # (bits, group) combination applies another group's scale to part of each
+    # dequant fragment (see common._load_bitdecoding_model). 2-bit has NO valid
+    # group size at all and degenerates to '!!!!...' on a needle prompt. This
+    # flag exists so that degeneration can be MEASURED and reported as a kernel
+    # bug; never put a run that needs it in an accuracy column unlabelled.
+    parser.add_argument(
+        "--bitdecoding-allow-unvalidated",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="run a numerically INVALID BitDecoding (bits, group_size) combination anyway",
+    )
     args = parser.parse_args()
     if args.k_bits is None:
         args.k_bits = 2 if args.method == "kivi" else 320
@@ -470,6 +491,7 @@ def main() -> None:
         bpc_fix_layers=parse_int_list(args.bpc_fix_layers),
         bpc_use_cuda_kernel=args.bpc_use_cuda_kernel,
         bpc_offline_proj_path=args.bpc_offline_proj_path,
+        bitdecoding_allow_unvalidated=args.bitdecoding_allow_unvalidated,
     )
 
 

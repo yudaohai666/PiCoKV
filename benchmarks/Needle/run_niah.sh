@@ -12,8 +12,12 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 GPU="${GPU:-0}"
 MODEL="${MODEL:-/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct}"
 MODEL_TAG="$(basename "${MODEL%/}")"
-BASE_RESULT_DIR="results/niah"
-VIS_DIR="${BASE_RESULT_DIR}/vis"
+# Overridable for the same reason PROF_DIR is in profile_decode.sh: a
+# self-contained campaign (e.g. a rebuttal) lands in its own tree instead of
+# mixing with results/niah's historical runs. VIS_DIR follows it so the heatmap
+# does not get orphaned from the results.json it was rendered from.
+BASE_RESULT_DIR="${BASE_RESULT_DIR:-results/niah}"
+VIS_DIR="${VIS_DIR:-${BASE_RESULT_DIR}/vis}"
 
 # ── benchmark runtime params ──
 LENGTHS="${LENGTHS:-8192,16384,24576,32768,40960,49152,57344,65536,73728,81920,90112,98304,106496,114688,122880,131072}"
@@ -57,6 +61,8 @@ POLAR_MODE="${POLAR_MODE:-mixed}"; POLAR_RBITS="${POLAR_RBITS:-3}"; POLAR_TBITS=
 # bpc (src/BPC); default = offline (mixlen-mixdata projection)
 BPC_MASK_OUT="${BPC_MASK_OUT:-0.98}"; BPC_MIN_REMAIN="${BPC_MIN_REMAIN:-128}"; BPC_ERR_RATIO="${BPC_ERR_RATIO:-0.1}"; BPC_FIX_LAYERS="${BPC_FIX_LAYERS:-0,1}"
 BPC_OFFLINE_PROJ_PATH="${BPC_OFFLINE_PROJ_PATH:-${REPO_ROOT}/src/BPC/ckp/projections/llama3-1-8b-ins-projection-mixlen-mixdata.pt}"
+# bitdecoding (src/BitDecoding); 4-bit/g128 is the only numerically valid combo
+BD_BITS="${BD_BITS:-4}"; BD_GROUP="${BD_GROUP:-128}"; BD_ALLOW_UNVALIDATED="${BD_ALLOW_UNVALIDATED:-0}"
 
 # Build METHOD_ARGS[] and TAG for a method. Needs REPO_ROOT, MODEL_TAG + the
 # per-method defaults above. picokv TAG matches run_ruler/run_infinitebench's
@@ -115,6 +121,17 @@ build_method_args() {
         METHOD_ARGS+=(--bpc-offline-proj-path "${BPC_OFFLINE_PROJ_PATH}")
         TAG="bpc_offline"
       fi
+      ;;
+    bitdecoding)
+      # Without this case bitdecoding fell to the default branch and got
+      # TAG="bitdecoding", so a 2-bit and a 4-bit arm shared one results.json.
+      # run_bin.py resumes by (length, depth), so the second arm would skip the
+      # first's cells instead of recomputing them -- one heatmap made of two
+      # configs. Mirrors common.output_tag()'s bitdecoding_{bits}bit_g{group}.
+      METHOD_ARGS=(--num-bits "${BD_BITS}" --group-size "${BD_GROUP}")
+      [ "${BD_ALLOW_UNVALIDATED}" = "1" ] && METHOD_ARGS+=(--bitdecoding-allow-unvalidated)
+      TAG="bitdecoding_${BD_BITS}bit_g${BD_GROUP}"
+      :
       ;;
   esac
 }

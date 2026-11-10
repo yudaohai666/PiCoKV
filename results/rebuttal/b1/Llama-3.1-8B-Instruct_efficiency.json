@@ -14,6 +14,16 @@
         "prefill_kv_gb": 0.286,
         "decode_kv_gb": 0.294
       },
+      "bitdecoding_2bit_g32": {
+        "prompt_len": 16384,
+        "prefill_ms": 743.052,
+        "decode_ms_per_token": 18.6929,
+        "decode_toks_per_s": 53.5,
+        "prefill_peak_gb": 19.409,
+        "decode_peak_gb": 15.38,
+        "prefill_kv_gb": 0.381,
+        "decode_kv_gb": 0.389
+      },
       "bitdecoding_4bit_g128": {
         "prompt_len": 16384,
         "prefill_ms": 710.83,
@@ -95,6 +105,16 @@
         "decode_peak_gb": 15.566,
         "prefill_kv_gb": 0.567,
         "decode_kv_gb": 0.575
+      },
+      "bitdecoding_2bit_g32": {
+        "prompt_len": 32768,
+        "prefill_ms": 1933.574,
+        "decode_ms_per_token": 18.6863,
+        "decode_toks_per_s": 53.52,
+        "prefill_peak_gb": 23.824,
+        "decode_peak_gb": 15.755,
+        "prefill_kv_gb": 0.756,
+        "decode_kv_gb": 0.764
       },
       "bitdecoding_4bit_g128": {
         "prompt_len": 32768,
@@ -178,6 +198,16 @@
         "prefill_kv_gb": 1.129,
         "decode_kv_gb": 1.137
       },
+      "bitdecoding_2bit_g32": {
+        "prompt_len": 65536,
+        "prefill_ms": 5495.974,
+        "decode_ms_per_token": 18.5895,
+        "decode_toks_per_s": 53.79,
+        "prefill_peak_gb": 32.653,
+        "decode_peak_gb": 16.506,
+        "prefill_kv_gb": 1.506,
+        "decode_kv_gb": 1.514
+      },
       "bitdecoding_4bit_g128": {
         "prompt_len": 65536,
         "prefill_ms": 5341.576,
@@ -260,6 +290,16 @@
         "prefill_kv_gb": 2.254,
         "decode_kv_gb": 2.262
       },
+      "bitdecoding_2bit_g32": {
+        "prompt_len": 131072,
+        "prefill_ms": 17908.215,
+        "decode_ms_per_token": 21.3161,
+        "decode_toks_per_s": 46.91,
+        "prefill_peak_gb": 50.312,
+        "decode_peak_gb": 18.009,
+        "prefill_kv_gb": 3.006,
+        "decode_kv_gb": 3.014
+      },
       "bitdecoding_4bit_g128": {
         "prompt_len": 131072,
         "prefill_ms": 17505.823,
@@ -333,6 +373,17 @@
     },
     "262144": {
       "bitdecoding_2bit_g128": {
+        "prompt_len": 262144,
+        "error": "out_of_memory",
+        "prefill_ms": null,
+        "decode_ms_per_token": null,
+        "decode_toks_per_s": null,
+        "prefill_peak_gb": null,
+        "decode_peak_gb": null,
+        "prefill_kv_gb": null,
+        "decode_kv_gb": null
+      },
+      "bitdecoding_2bit_g32": {
         "prompt_len": 262144,
         "error": "out_of_memory",
         "prefill_ms": null,
