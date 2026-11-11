@@ -795,9 +795,11 @@ backend name.
 
 Same checkout and `apply.sh` as above. Requirements: sm_90, `tp_size=1` (the
 decode kernels are built for GLM-4.7-Flash's 20 query heads), bf16,
-`page_size=4`, and SGLang's GLM-4.7-Flash path needs `deep_gemm` in the venv
-(tested: `sgl-deep-gemm` 0.2.0). The path B decode kernels
-(`picokv_mla_sm90/decode_i8.cuh`) are JIT-compiled on first use.
+`page_size=4` (set when not given), and SGLang's GLM-4.7-Flash path needs
+`deep_gemm` in the venv (tested: `sgl-deep-gemm` 0.2.0). The path B decode
+kernels (`picokv_mla_sm90/decode_i8.cuh`) are JIT-compiled on first use.
+Server arguments the backend does not support are rejected at startup
+(Limitations).
 
 ```bash
 export PYTHONPATH=<WS>/sglang/python
@@ -809,7 +811,7 @@ import sglang as sgl
 
 eng = sgl.Engine(
     model_path="<path>/GLM-4.7-Flash",
-    attention_backend="picokv_mla", page_size=4,
+    attention_backend="picokv_mla",   # page_size defaults to 4
     dtype="bfloat16", tp_size=1, trust_remote_code=True,
     mem_fraction_static=0.85,
 )                                     # radix cache on by default (R-exact, below)
@@ -841,11 +843,14 @@ sha0 ... all ...`.
 - **Prefill (path A).** The batch's latent rows (dense rows copied,
   compressed ones decoded) are filled into a bf16 scratch and stock fa3 runs
   on it.
-- **Decode (path B, `decode_i8.py`).** Stock fa3 over the dense rows (sink +
-  tail) with lse, attention over the codes of the compressed rows in int8
-  code space (q projected through `dec`, int8 hi/lo terms), merged per head.
-  All of it is captured in the decode CUDA graph; the host part (slide,
-  checks) runs before the replay.
+- **Decode (path B, `decode_i8.py`).** Per layer: q is projected through
+  `dec` into int8 code space (hi / lo terms); one attention kernel scores the
+  codes of the compressed rows in int8 and, in its first CTAs, attends over
+  the dense rows (sink + tail, at most 384) exactly in bf16 with an fp32
+  output and lse; a combine and a merge join the two parts per head. All of
+  it is captured in the decode CUDA graph; the host part (slide, checks) runs
+  before the replay. `SGLANG_PICOKV_MLA_FUSED_DENSE=0` runs the dense rows
+  through stock fa3 instead.
 - **Radix (R-exact, `picokv_mla/radix.py`, on by default).** Tree slots are
   always compressed, and a pinned host mirror keeps their exact latent (every
   compress writes it). A hit of prefix length m by a request with fire point
@@ -869,6 +874,8 @@ sha0 ... all ...`.
 | `SGLANG_PICOKV_MLA_LOCAL` | `256` | Exact local window (the last positions of a sequence) |
 | `SGLANG_PICOKV_MLA_CHUNK` | `64` | Decode slide: rows that left the local window are compressed in chunks of this many rows. Must be > 0 with path B (it bounds a row's dense rows at sink + local + chunk = 384) |
 | `SGLANG_PICOKV_MLA_PATH_B` | `1` | Decode over the codes inside the decode CUDA graph. `0` = path A for decode too (bf16 scratch + fa3, no CUDA graphs; reference / debug) |
+| `SGLANG_PICOKV_MLA_FUSED_DENSE` | `1` | Path B: the attention kernel's first CTAs attend over the dense rows. `0` = stock fa3 over them before the code part |
+| `SGLANG_PICOKV_MLA_DSPLIT` | `0` | Path B, opt-in: the dense rows of each request are split over 3 CTAs by query-head group (a separate kernel build, `-DPKI8_DSPLIT=1`). Same outputs as the default build (batch-1 GSM8K: identical text). Decode step vs the default build (median of 4 engines x 2 repeats, radix cache and overlap scheduler on): 1 x 4k -3.5%, 1 x 8k -3.7%, 2 x 4k -3.3%, 8 x 1k -2.3%, 1 x 32k +0.7%, 8 x 4k +0.4%, 1 x 128k +0.4%, 8 x 16k +0.5%, 32 x 4k +0.2%, 32 x 16k +0.7%. It is not the default because the long-prompt rows get slower: the split build's code-row loop compiles to a slower schedule |
 | `SGLANG_PICOKV_MLA_MAX_RUNNING` | `256` | Rows of the path B decode workspace; `max_running_requests` is capped at it (logged) |
 | `SGLANG_PICOKV_MLA_RADIX` | `1` | Radix cache through the R-exact tree. `0` = the backend refuses to start unless `disable_radix_cache=True` (a stock hit would skip the fire and read compressed rows as a prefix computed exact) |
 | `SGLANG_PICOKV_MLA_FIRE_CAP` | `1` | A prefill chunk that would cross the fire point F ends at F. `0` = a chunk may cross F; its tokens past F then read `[64, F - 256)` exact (counted and logged as a warning) |
@@ -892,8 +899,8 @@ slots x 1 KB = 33.6 GiB of host memory at init (about 17 s).
 
 This patch on upstream sglang 567d592, bf16, `page_size=4`, radix cache and
 overlap scheduler on unless noted, greedy decoding. fa3 is stock
-`attention_backend="fa3"` with the same settings. The gates used a projection
-set whose `enc` / `dec` tensors equal the repo's (`torch.equal`).
+`attention_backend="fa3"` with the same settings. picokv_mla uses the repo's
+projection set.
 
 | Test | picokv_mla | fa3 |
 |---|---|---|
@@ -901,12 +908,18 @@ set whose `enc` / `dec` tensors equal the repo's (`torch.equal`).
 | Same, 64k | 1.3583 / 0.7165 | 1.3691 / 0.7162 |
 | Same, radix cache off, 32k / 64k | 1.4138 / 0.6982, 1.3588 / 0.7161 | |
 | Needles: 24 docs x 8 numbers at 16k / 32k / 64k (192 questions) | 99.48 | 99.48 |
-| GSM8K, 1319 questions, 48 concurrent | 94.62 | 95.00 |
-| Multi-turn GSM8K: 165 chains of 8 turns (each turn appends the previous answer and the next question), 48 concurrent chains | 91.05, 89.99 (two runs); overlap scheduler off 90.30 | 91.05 |
-| Multi-turn: prompt tokens served from the radix cache | 94.07% | 94.09% |
+| GSM8K, 1319 questions, 48 concurrent | 94.85 | 95.68 |
+| Multi-turn GSM8K: 165 chains of 8 turns (each turn appends the previous answer and the next question), 48 concurrent chains | 90.22, 90.98 (two runs) | 91.05 |
+| Multi-turn: prompt tokens served from the radix cache | 94.04%, 94.08% | 94.09% |
 
-The GSM8K standard error is about 0.6 points, the multi-turn one about 0.8.
-Peak allocated device memory in the GSM8K run: 72,659 MiB vs 72,682 MiB.
+Paired over the same questions, picokv_mla minus fa3 is -0.83 +- 0.45 points
+on GSM8K (35 of 1319 answers differ in correctness) and -0.83 +- 0.63 on the
+multi-turn set. Runs with 48 concurrent requests are not deterministic: earlier
+runs of the previous decode kernels gave 94.62 vs 95.00 on GSM8K and 91.05 /
+89.99 on the multi-turn set. With one request at a time (radix cache and
+overlap scheduler off) the first 24 GSM8K answers are the same text as with the
+previous kernels. Peak allocated device memory in the GSM8K run (previous
+kernels; the current ones allocate the same buffers): 72,659 MiB vs 72,682 MiB.
 
 Decode speed, same batch on both backends (ms per decode step, median over
 4 engines x 2 repeats, 256 generated tokens with `ignore_eos`, distinct
@@ -914,11 +927,15 @@ prompts):
 
 | Batch x prompt | picokv_mla | fa3 | Difference |
 |---|---|---|---|
-| 1 x 4k | 9.20 | 7.43 | +24% |
-| 1 x 32k | 10.17 | 7.96 | +28% |
-| 1 x 128k | 11.47 | 9.85 | +17% |
-| 8 x 16k | 17.60 | 15.80 | +11% |
-| 32 x 4k (512 tokens) | 26.02 | 23.14 | +12% |
+| 1 x 4k | 8.27 | 7.39 | +12% |
+| 1 x 8k | 8.41 | 7.50 | +12% |
+| 2 x 4k | 9.61 | 8.70 | +10% |
+| 8 x 1k | 14.61 | 13.45 | +9% |
+| 1 x 32k | 8.56 | 7.88 | +9% |
+| 8 x 4k | 14.74 | 13.96 | +6% |
+| 1 x 128k | 9.74 | 9.80 | -0.6% |
+| 8 x 16k | 16.27 | 15.72 | +3.5% |
+| 32 x 4k (512 tokens) | 24.99 | 23.21 | +7.6% |
 
 Batches that do not fit fa3's pool (all requests submitted at once; output
 tokens per second over the whole run, wall time, median time to first token;
@@ -926,28 +943,39 @@ no radix hits):
 
 | Load | picokv_mla | fa3 |
 |---|---|---|
-| 32 x 16k, 256 tokens | 281-284 tok/s, 28.8-29.1 s, 10.7-11.1 s | 243-247 tok/s, 33.2-33.7 s, 15.0-15.3 s |
-| 32 x 16k, 2048 tokens | 575-577 tok/s, 113.6-114.0 s, 11.0 s | 484-486 tok/s, 135.0-135.4 s, 49.5 s |
-| 16 x 32k, 1024 tokens | 261-264 tok/s, 62.0-62.9 s, 10.7-10.8 s | 222 tok/s, 73.9 s, 31.5 s |
+| 32 x 16k, 256 tokens | 344-357 tok/s, 22.9-23.8 s, 5.9-6.9 s (first repeat); 283-286 tok/s, 28.7-28.9 s, 11.0-11.2 s (second) | 244-247 tok/s, 33.2-33.6 s, 15.0-15.2 s |
+| 32 x 16k, 2048 tokens | 599-601 tok/s, 109.1-109.4 s, 11.0-11.1 s | 482-486 tok/s, 134.9-136.1 s, 49.4-49.8 s |
+| 16 x 32k, 1024 tokens | 270-275 tok/s, 59.6-60.7 s, 10.7-12.1 s | 220-222 tok/s, 73.7-74.4 s, 31.4-31.7 s |
 
-Same batch, picokv_mla's decode is slower: path B runs fa3 over the dense
-rows plus the code-space attention and a merge, more kernels and more work
-than fa3 over bf16 rows. It is faster when the cache bounds the batch:
-fa3 holds about 12 of these 16k requests at a time, picokv_mla all 32.
+The 32 x 16k, 256-token load runs twice per engine: picokv_mla's first
+repeat is faster than its second, fa3's two repeats are the same.
+
+Same batch, picokv_mla's decode is slower below 128k prompts (+6-12% up to
+32k, +3.5% at 8 x 16k) and the same at 1 x 128k. Path B does work fa3 does
+not: it projects the query into code space, compresses the rows that leave
+the local window every 64 steps and combines the code part with the dense
+part; a compressed token is a quarter of fa3's bytes, which pays for that
+work at 128k. It is faster when the cache bounds the batch: fa3 holds about
+12 of these 16k requests at a time, picokv_mla all 32.
 
 ### Limitations (`picokv_mla`)
 
-- sm_90, `tp_size=1` (the decode kernels assert 20 query heads per rank),
-  bf16 latent, `page_size=4`. fp8 KV, speculative decoding, prefill / decode
-  disaggregation and HiCache are untested and not guarded.
+- sm_90, one GPU, 20 query heads (GLM-4.7-Flash), bf16 latent,
+  `page_size=4`. The server rejects at startup what the backend does not
+  support: tensor / pipeline / context parallelism, DP attention, speculative
+  decoding, fp8 KV, HiCache, prefill / decode disaggregation, streaming
+  sessions, two-batch overlap, MoE all-to-all backends, deterministic
+  inference, the KV canary and other radix cache backends. Mixed chunked
+  prefill and torch.compile are turned off with a warning.
 - Path B rejects `SGLANG_ENABLE_METADATA_GLUE_GRAPH` (that graph would
   freeze the host part that runs before each replay). Path A has no CUDA
   graphs.
-- Same-batch decode is 11-28% slower than fa3 (table above).
+- Same-batch decode is up to 12% slower than fa3 below 128k prompts (table
+  above); at 1 x 128k it is the same.
 - Radix: the host mirror pins about 33.6 GiB at init. Every compress also
   writes the rows' exact latent to it (1 KB per token per layer through
-  PCIe). At 32 x 16k misses the run takes 28.8-29.0 s vs 28.3-28.5 s with
-  the radix cache off; at 32 x 4k the decode step is +0.2%.
+  PCIe). With the previous decode kernels, at 32 x 16k misses the run took
+  28.8-29.0 s vs 28.3-28.5 s with the radix cache off; at 32 x 4k the decode step is +0.2%.
 - Overlap scheduler: picokv_mla's decode reports its shared reads as ending
   after the graph replay (`shared_read_ends`), so the scheduler stream's
   pool writes for the next batch (codes and row maps at a finish or fire,
