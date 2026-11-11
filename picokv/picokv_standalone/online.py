@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -12,6 +14,21 @@ from .constants import (
     ONLINE_GROUP_BITS,
     ONLINE_MATMUL_DTYPE,
 )
+
+# Named profiler ranges for the prefill stage breakdown (projection fitting vs
+# GPC vs EAS vs packing). Opt-in via PICOKV_PROFILE_RANGES=1 so the default
+# measured path is untouched: `record_function.__enter__` is a dispatcher call,
+# and these ranges sit inside the per-group loop (10 groups x 2 sides x 32
+# layers), which would otherwise add a few ms to every reported prefill_ms.
+# A single shared nullcontext, not a fresh one per call, for the same reason.
+_PROFILE_RANGES = os.environ.get("PICOKV_PROFILE_RANGES", "0") == "1"
+_NULL_RANGE = contextlib.nullcontext()
+
+if _PROFILE_RANGES:
+    from torch.profiler import record_function as profile_range
+else:
+    def profile_range(name: str):  # noqa: D103 - see _PROFILE_RANGES above
+        return _NULL_RANGE
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,22 +257,23 @@ def quantize_block32_online(
 
     residual = target.reshape(rows, length, dim).contiguous().clone()
     if fixed_encoders is None:
-        init_columns = (
-            init_vectors.reshape(rows, groups, ONLINE_GROUP_BITS, dim)
-            .transpose(-1, -2)
-            .contiguous()
-            .reshape(rows * groups, dim, ONLINE_GROUP_BITS)
-        )
-        init_q = _cholesky_qr(init_columns).reshape(
-            rows,
-            groups,
-            dim,
-            ONLINE_GROUP_BITS,
-        )
-        sample_residual, sample_indices = _sample_residual(
-            residual,
-            direction_sample_size,
-        )
+        with profile_range("picokv/prefill/fit_init"):
+            init_columns = (
+                init_vectors.reshape(rows, groups, ONLINE_GROUP_BITS, dim)
+                .transpose(-1, -2)
+                .contiguous()
+                .reshape(rows * groups, dim, ONLINE_GROUP_BITS)
+            )
+            init_q = _cholesky_qr(init_columns).reshape(
+                rows,
+                groups,
+                dim,
+                ONLINE_GROUP_BITS,
+            )
+            sample_residual, sample_indices = _sample_residual(
+                residual,
+                direction_sample_size,
+            )
     else:
         # Fixed encoders make the power iteration and sampling dead work.
         sample_residual, sample_indices = None, None
@@ -271,50 +289,54 @@ def quantize_block32_online(
         # One covariance power step estimates the dominant residual subspace;
         # Householder QR preserves accuracy after residual groups accumulate.
         if fixed_encoders is None:
-            q = _pm_covariance_step(sample_residual, init_q[:, group_idx])
-            encoder = _householder_qr(q).transpose(-1, -2).contiguous()
+            with profile_range("picokv/prefill/fit_encoder"):
+                q = _pm_covariance_step(sample_residual, init_q[:, group_idx])
+                encoder = _householder_qr(q).transpose(-1, -2).contiguous()
         else:
             encoder = fixed_encoders[:, group_idx]
         used_encoders[:, start:end] = encoder.to(dtype=target.dtype)
 
         # Quantize to strict {-1,+1}, fit this group's decoder, then subtract
         # its reconstruction before learning the next group.
-        residual_m = residual.to(dtype=ONLINE_MATMUL_DTYPE)
-        group_codes_m = torch.matmul(
-            residual_m,
-            encoder.to(dtype=ONLINE_MATMUL_DTYPE).transpose(-1, -2),
-        )
-        _strict_binary_sign_(group_codes_m)
-        if fixed_decoders is None:
-            group_decoder = _solve_decoder_from_matrices(
-                group_codes_m,
+        with profile_range("picokv/prefill/gpc_encode"):
+            residual_m = residual.to(dtype=ONLINE_MATMUL_DTYPE)
+            group_codes_m = torch.matmul(
                 residual_m,
+                encoder.to(dtype=ONLINE_MATMUL_DTYPE).transpose(-1, -2),
             )
+            _strict_binary_sign_(group_codes_m)
+        if fixed_decoders is None:
+            with profile_range("picokv/prefill/fit_decoder"):
+                group_decoder = _solve_decoder_from_matrices(
+                    group_codes_m,
+                    residual_m,
+                )
         else:
             group_decoder = fixed_decoders[:, group_idx]
         decoder_m = group_decoder.to(dtype=ONLINE_MATMUL_DTYPE)
 
-        torch.baddbmm(
-            residual,
-            group_codes_m,
-            decoder_m,
-            beta=1.0,
-            alpha=-1.0,
-            out=residual,
-        )
-        if sample_indices is not None:
-            sample_codes = group_codes_m.index_select(1, sample_indices)
+        with profile_range("picokv/prefill/gpc_residual"):
             torch.baddbmm(
-                sample_residual,
-                sample_codes,
+                residual,
+                group_codes_m,
                 decoder_m,
                 beta=1.0,
                 alpha=-1.0,
-                out=sample_residual,
+                out=residual,
             )
+            if sample_indices is not None:
+                sample_codes = group_codes_m.index_select(1, sample_indices)
+                torch.baddbmm(
+                    sample_residual,
+                    sample_codes,
+                    decoder_m,
+                    beta=1.0,
+                    alpha=-1.0,
+                    out=sample_residual,
+                )
 
-        codes[:, :, start:end] = group_codes_m.to(dtype=torch.int8)
-        decoder[:, start:end] = group_decoder.to(dtype=target.dtype)
+            codes[:, :, start:end] = group_codes_m.to(dtype=torch.int8)
+            decoder[:, start:end] = group_decoder.to(dtype=target.dtype)
 
     # vector_norm fuses the bf16->fp32 upcast into the reduction's load, where
     # residual.float().norm(dim=-1) first materialized the whole fp32 copy --
@@ -329,14 +351,16 @@ def quantize_block32_online(
     # exactness matters because err feeds a topk in prepare._select_eas_indices,
     # where a 1 ulp drift would silently reselect EAS tokens; the regression test
     # pins it through an int32 view.
-    token_error = torch.linalg.vector_norm(residual, dim=-1, dtype=torch.float32)
+    with profile_range("picokv/prefill/err_norm"):
+        token_error = torch.linalg.vector_norm(residual, dim=-1, dtype=torch.float32)
 
-    return OnlineQuantizedTensor(
-        codes=codes.reshape(batch, heads, length, bits).contiguous(),
-        decoder=decoder.reshape(batch, heads, bits, dim).contiguous(),
-        err=token_error.reshape(batch, heads, length).contiguous(),
-        encoders=used_encoders.reshape(batch, heads, bits, dim).contiguous(),
-    )
+    with profile_range("picokv/prefill/online_tail"):
+        return OnlineQuantizedTensor(
+            codes=codes.reshape(batch, heads, length, bits).contiguous(),
+            decoder=decoder.reshape(batch, heads, bits, dim).contiguous(),
+            err=token_error.reshape(batch, heads, length).contiguous(),
+            encoders=used_encoders.reshape(batch, heads, bits, dim).contiguous(),
+        )
 
 
-__all__ = ["OnlineQuantizedTensor", "quantize_block32_online"]
+__all__ = ["OnlineQuantizedTensor", "profile_range", "quantize_block32_online"]

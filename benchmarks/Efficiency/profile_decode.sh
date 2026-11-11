@@ -30,6 +30,11 @@ BATCH="${BATCH:-1}"         # prefill/decode batch size
 WARMUP="${WARMUP:-2}"       # untimed decode steps before profiling
 ACTIVE="${ACTIVE:-64}"      # profiled decode steps
 ROWS="${ROWS:-30}"          # key_averages table rows
+# Which stage profile_decode.py records. Not fixed at "decode": answering
+# "what does online prefill spend its time on" needs the prefill stage, whose
+# named ranges (picokv/prefill/*) only exist with PICOKV_PROFILE_RANGES=1.
+STAGE="${STAGE:-decode}"
+PREFILL_WARMUP="${PREFILL_WARMUP:-1}"
 # Optional real-text dataset (.jsonl with "text" fields). Empty = use random token ids.
 DATASET="${DATASET:-${SCRIPT_DIR}/datasets/PaulGrahamEssays.jsonl}"
 # Override the auto trace file (results/efficiency/prof/{method}_{LENGTH}.json).
@@ -111,14 +116,19 @@ for method in "${METHODS[@]}"; do
   build_method_args "${method}"
   # TAG, not ${method}: the breakdown depends on every per-method knob, so a
   # bare method name made two configs at the same length overwrite each other.
-  TRACE="${OUTPUT_PATH:-${PROF_DIR}/${TAG}_${LENGTH}.json}"
+  # STAGE joins it for the same reason: a prefill and a decode profile of one
+  # config would otherwise land on the same file.
+  stage_sfx=""
+  [ "${STAGE}" != "decode" ] && stage_sfx="_${STAGE}"
+  TRACE="${OUTPUT_PATH:-${PROF_DIR}/${TAG}${stage_sfx}_${LENGTH}.json}"
   # profile_decode.py prints the key_averages table to stdout only; the --trace
   # file is the chrome trace. Tee so the per-op numbers are persisted too.
   REPORT="${TRACE%.json}.txt"
-  echo "=== Profiling decode: method=${method} tag=${TAG} length=${LENGTH} -> ${TRACE} ==="
+  echo "=== Profiling ${STAGE}: method=${method} tag=${TAG} length=${LENGTH} -> ${TRACE} ==="
   CUDA_VISIBLE_DEVICES=${GPU} python "${SCRIPT_DIR}/profile_decode.py" \
-    --model "${MODEL}" --method "${method}" \
+    --model "${MODEL}" --method "${method}" --stage "${STAGE}" \
     --length "${LENGTH}" --batch "${BATCH}" --warmup "${WARMUP}" --active "${ACTIVE}" --rows "${ROWS}" \
+    --prefill-warmup "${PREFILL_WARMUP}" \
     ${DATASET:+--dataset "${DATASET}"} \
     --trace "${TRACE}" "${METHOD_ARGS[@]}" 2>&1 | tee "${REPORT}"
 done

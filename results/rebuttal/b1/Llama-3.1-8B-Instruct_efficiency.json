@@ -66,13 +66,13 @@
       },
       "picokv_k320_v320_offline": {
         "prompt_len": 16384,
-        "prefill_ms": 690.414,
-        "decode_ms_per_token": 18.467,
-        "decode_toks_per_s": 54.15,
-        "prefill_peak_gb": 16.659,
-        "decode_peak_gb": 15.445,
-        "prefill_kv_gb": 0.404,
-        "decode_kv_gb": 0.412
+        "prefill_ms": 778.405,
+        "decode_ms_per_token": 18.4568,
+        "decode_toks_per_s": 54.18,
+        "prefill_peak_gb": 16.684,
+        "decode_peak_gb": 15.471,
+        "prefill_kv_gb": 0.437,
+        "decode_kv_gb": 0.445
       },
       "picokv_k320_v320": {
         "prompt_len": 16384,
@@ -158,13 +158,13 @@
       },
       "picokv_k320_v320_offline": {
         "prompt_len": 32768,
-        "prefill_ms": 1780.062,
-        "decode_ms_per_token": 18.8142,
-        "decode_toks_per_s": 53.15,
-        "prefill_peak_gb": 17.615,
-        "decode_peak_gb": 15.758,
-        "prefill_kv_gb": 0.717,
-        "decode_kv_gb": 0.725
+        "prefill_ms": 1923.646,
+        "decode_ms_per_token": 18.3791,
+        "decode_toks_per_s": 54.41,
+        "prefill_peak_gb": 17.671,
+        "decode_peak_gb": 15.819,
+        "prefill_kv_gb": 0.783,
+        "decode_kv_gb": 0.791
       },
       "picokv_k320_v320": {
         "prompt_len": 32768,
@@ -250,13 +250,13 @@
       },
       "picokv_k320_v320_offline": {
         "prompt_len": 65536,
-        "prefill_ms": 5176.924,
-        "decode_ms_per_token": 18.5307,
-        "decode_toks_per_s": 53.96,
-        "prefill_peak_gb": 20.113,
-        "decode_peak_gb": 16.383,
-        "prefill_kv_gb": 1.342,
-        "decode_kv_gb": 1.35
+        "prefill_ms": 5411.89,
+        "decode_ms_per_token": 18.7471,
+        "decode_toks_per_s": 53.34,
+        "prefill_peak_gb": 20.234,
+        "decode_peak_gb": 16.515,
+        "prefill_kv_gb": 1.476,
+        "decode_kv_gb": 1.484
       },
       "picokv_k320_v320": {
         "prompt_len": 65536,
@@ -342,13 +342,13 @@
       },
       "picokv_k320_v320_offline": {
         "prompt_len": 131072,
-        "prefill_ms": 17223.897,
-        "decode_ms_per_token": 19.0315,
-        "decode_toks_per_s": 52.54,
-        "prefill_peak_gb": 25.107,
-        "decode_peak_gb": 17.636,
-        "prefill_kv_gb": 2.592,
-        "decode_kv_gb": 2.6
+        "prefill_ms": 17800.732,
+        "decode_ms_per_token": 19.7236,
+        "decode_toks_per_s": 50.7,
+        "prefill_peak_gb": 25.359,
+        "decode_peak_gb": 17.906,
+        "prefill_kv_gb": 2.861,
+        "decode_kv_gb": 2.869
       },
       "picokv_k320_v320": {
         "prompt_len": 131072,
@@ -437,13 +437,13 @@
       },
       "picokv_k320_v320_offline": {
         "prompt_len": 262144,
-        "prefill_ms": 63068.693,
-        "decode_ms_per_token": 23.1339,
-        "decode_toks_per_s": 43.23,
-        "prefill_peak_gb": 35.096,
-        "decode_peak_gb": 20.142,
-        "prefill_kv_gb": 5.092,
-        "decode_kv_gb": 5.1
+        "prefill_ms": 64419.044,
+        "decode_ms_per_token": 24.7671,
+        "decode_toks_per_s": 40.38,
+        "prefill_peak_gb": 35.61,
+        "decode_peak_gb": 20.689,
+        "prefill_kv_gb": 5.631,
+        "decode_kv_gb": 5.639
       },
       "picokv_k320_v320": {
         "prompt_len": 262144,

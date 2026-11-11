@@ -1,0 +1,68 @@
+{
+  "method": "picokv",
+  "tag": "picokv_k320_v320_offline",
+  "model": "/root/paddlejob/pfsl3space/pfsl3space_ydh/data/Llama-3.1-8B-Instruct",
+  "batch_size": 1,
+  "decode_tokens": 64,
+  "config": {
+    "k_bits": 320,
+    "v_bits": 320,
+    "group_size": 32,
+    "residual_length": 32,
+    "exp_bits": 4,
+    "eas": 0.01,
+    "zerorope": 20
+  },
+  "results": {
+    "16384": {
+      "prompt_len": 16384,
+      "prefill_ms": 688.109,
+      "decode_ms_per_token": 18.3551,
+      "decode_toks_per_s": 54.48,
+      "prefill_peak_gb": 16.692,
+      "decode_peak_gb": 15.479,
+      "prefill_kv_gb": 0.437,
+      "decode_kv_gb": 0.445
+    },
+    "32768": {
+      "prompt_len": 32768,
+      "prefill_ms": 1782.122,
+      "decode_ms_per_token": 18.7605,
+      "decode_toks_per_s": 53.3,
+      "prefill_peak_gb": 17.68,
+      "decode_peak_gb": 15.827,
+      "prefill_kv_gb": 0.783,
+      "decode_kv_gb": 0.791
+    },
+    "65536": {
+      "prompt_len": 65536,
+      "prefill_ms": 5174.877,
+      "decode_ms_per_token": 18.5208,
+      "decode_toks_per_s": 53.99,
+      "prefill_peak_gb": 20.243,
+      "decode_peak_gb": 16.523,
+      "prefill_kv_gb": 1.476,
+      "decode_kv_gb": 1.484
+    },
+    "131072": {
+      "prompt_len": 131072,
+      "prefill_ms": 17273.686,
+      "decode_ms_per_token": 19.736,
+      "decode_toks_per_s": 50.67,
+      "prefill_peak_gb": 25.368,
+      "decode_peak_gb": 17.914,
+      "prefill_kv_gb": 2.861,
+      "decode_kv_gb": 2.869
+    },
+    "262144": {
+      "prompt_len": 262144,
+      "prefill_ms": 63086.588,
+      "decode_ms_per_token": 25.1805,
+      "decode_toks_per_s": 39.71,
+      "prefill_peak_gb": 35.619,
+      "decode_peak_gb": 20.697,
+      "prefill_kv_gb": 5.631,
+      "decode_kv_gb": 5.639
+    }
+  }
+}

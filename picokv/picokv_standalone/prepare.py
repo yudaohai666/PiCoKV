@@ -13,7 +13,7 @@ import torch
 
 from .cache import PreparedKVCache
 from .constants import SUPPORTED_CODE_BITS, SUPPORTED_EXP_BITS
-from .online import _prepare_fixed_block32, quantize_block32_online
+from .online import _prepare_fixed_block32, profile_range, quantize_block32_online
 
 try:
     from picokv.picokv_prefill_cuda_extension.picokv_prefill_cuda import (
@@ -325,22 +325,23 @@ def prepare_kv_cache(
         raise RuntimeError("PiCoKV prefill CUDA extension is unavailable")
 
     key_global = value_global = None
-    if not key_fused:
-        key_global = full_key[:, :, global_start : global_start + global_len].clone()
-        _apply_zerorope_(key_global, int(zerorope))
-    if not value_fused:
-        value_global = full_value[
-            :,
-            :,
-            global_start : global_start + global_len,
-        ].contiguous()
+    with profile_range("picokv/prefill/slice_zerorope"):
+        if not key_fused:
+            key_global = full_key[:, :, global_start : global_start + global_len].clone()
+            _apply_zerorope_(key_global, int(zerorope))
+        if not value_fused:
+            value_global = full_value[
+                :,
+                :,
+                global_start : global_start + global_len,
+            ].contiguous()
 
     # This internal K/V overlap is part of the measured fast path.  It is not
     # the removed async-prepare/prefill overlap API.
     current_stream = torch.cuda.current_stream(full_key.device)
     value_stream = _side_stream(full_key.device)
     value_stream.wait_stream(current_stream)
-    with torch.cuda.stream(value_stream):
+    with torch.cuda.stream(value_stream), profile_range("picokv/prefill/value_side"):
         if value_fused:
             value_projection = _prepare_fixed_block32_cached(
                 value_decoders, batch, heads, value_bits, dim,
@@ -368,78 +369,85 @@ def prepare_kv_cache(
                 encoders=value_encoders,
                 decoders=value_decoders,
             )
-    if key_fused:
-        key_projection = _prepare_fixed_block32_cached(
-            key_decoders, batch, heads, key_bits, dim,
-            full_key.device, full_key.dtype,
-        ).view(batch, heads, key_bits, dim)
-        packed_key_all, key_err = blockk_fixed_cuda(
-            full_key,
-            _prepare_fixed_block32_cached(
-                key_encoders, batch, heads, key_bits, dim,
+    with profile_range("picokv/prefill/key_side"):
+        if key_fused:
+            key_projection = _prepare_fixed_block32_cached(
+                key_decoders, batch, heads, key_bits, dim,
                 full_key.device, full_key.dtype,
-            ).view(batch, heads, key_bits, dim),
-            key_projection,
-            global_start,
-            global_len,
-            zerorope=int(zerorope),
-            apply_zerorope=True,
-            pack_key_layout=True,
-        )
-    else:
-        key_block = quantize_block32_online(
-            key_global,
-            key_bits,
-            direction_sample_size=direction_sample_size,
-            seed=int(seed),
-            encoders=key_encoders,
-            decoders=key_decoders,
-        )
-    current_stream.wait_stream(value_stream)
+            ).view(batch, heads, key_bits, dim)
+            packed_key_all, key_err = blockk_fixed_cuda(
+                full_key,
+                _prepare_fixed_block32_cached(
+                    key_encoders, batch, heads, key_bits, dim,
+                    full_key.device, full_key.dtype,
+                ).view(batch, heads, key_bits, dim),
+                key_projection,
+                global_start,
+                global_len,
+                zerorope=int(zerorope),
+                apply_zerorope=True,
+                pack_key_layout=True,
+            )
+        else:
+            key_block = quantize_block32_online(
+                key_global,
+                key_bits,
+                direction_sample_size=direction_sample_size,
+                seed=int(seed),
+                encoders=key_encoders,
+                decoders=key_decoders,
+            )
+    with profile_range("picokv/prefill/join_streams"):
+        current_stream.wait_stream(value_stream)
 
     # Pack all codes once (reference path only; the fused kernel already wrote
     # packed words).  The fused gather then moves EAS tokens into the dense
     # cache and removes the same positions from the packed global cache.
     if not key_fused:
-        packed_key_all = pack_key_transposed_cuda(key_block.codes)
-        key_err = key_block.err
+        with profile_range("picokv/prefill/pack_key"):
+            packed_key_all = pack_key_transposed_cuda(key_block.codes)
+            key_err = key_block.err
     if not value_fused:
-        packed_value_all = pack_value_token_cuda(value_block.codes)
-        value_err = value_block.err
-    eas_size = max(1, int(global_len * float(eas)))
-    eas_indices, kept_indices = _select_eas_and_kept_indices(
-        key_err,
-        value_err,
-        eas_size,
-    )
-    dense_key, dense_value, packed_key, packed_value = (
-        gather_pack_from_packed_cuda(
-            full_key,
-            full_value,
-            packed_key_all,
-            packed_value_all,
-            eas_indices,
-            kept_indices,
-            int(sink_size),
-            int(local_size),
+        with profile_range("picokv/prefill/pack_value"):
+            packed_value_all = pack_value_token_cuda(value_block.codes)
+            value_err = value_block.err
+    with profile_range("picokv/prefill/eas_select"):
+        eas_size = max(1, int(global_len * float(eas)))
+        eas_indices, kept_indices = _select_eas_and_kept_indices(
+            key_err,
+            value_err,
+            eas_size,
         )
-    )
+    with profile_range("picokv/prefill/gather_dense"):
+        dense_key, dense_value, packed_key, packed_value = (
+            gather_pack_from_packed_cuda(
+                full_key,
+                full_value,
+                packed_key_all,
+                packed_value_all,
+                eas_indices,
+                kept_indices,
+                int(sink_size),
+                int(local_size),
+            )
+        )
 
     # Decode consumes K projection transposed, so materialize it once here.
-    if not key_fused:
-        key_projection = key_block.decoder.contiguous()
-    if not value_fused:
-        value_projection = value_block.decoder.contiguous()
-    return PreparedKVCache(
-        dense_key=dense_key,
-        dense_value=dense_value,
-        key_projection=key_projection,
-        value_projection=value_projection,
-        key_projection_t=key_projection.transpose(-1, -2).contiguous(),
-        packed_key=packed_key,
-        packed_value=packed_value,
-        exp_bits=exp_bits,
-    )
+    with profile_range("picokv/prefill/tail"):
+        if not key_fused:
+            key_projection = key_block.decoder.contiguous()
+        if not value_fused:
+            value_projection = value_block.decoder.contiguous()
+        return PreparedKVCache(
+            dense_key=dense_key,
+            dense_value=dense_value,
+            key_projection=key_projection,
+            value_projection=value_projection,
+            key_projection_t=key_projection.transpose(-1, -2).contiguous(),
+            packed_key=packed_key,
+            packed_value=packed_value,
+            exp_bits=exp_bits,
+        )
 
 
 __all__ = ["prepare_kv_cache"]

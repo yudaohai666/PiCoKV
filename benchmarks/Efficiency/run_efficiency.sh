@@ -116,6 +116,13 @@ build_method_args() {
       [ "${ZEROROPE}" != "20" ] && TAG+="_zr${ZEROROPE}"
       [ "${EAS}" != "0.01" ]    && TAG+="_eas${EAS}"
       [ "${PRUNING}" = "1" ]    && METHOD_ARGS+=(--pruning) && TAG+="_prune"
+      # Prefill-cost ablation arms. Both are timing-only: encodersonly throws
+      # away the decoder that was fitted to these very encoders, and nofuse
+      # forces the PyTorch reference loop, so neither is a deployable mode and
+      # neither may be quoted for accuracy. Tagged because they would otherwise
+      # overwrite the real picokv_offline_k320_v320 result file.
+      [ "${PICOKV_IGNORE_OFFLINE_DECODERS:-0}" = "1" ] && TAG+="_encodersonly"
+      [ "${PICOKV_DISABLE_FUSED_QUANT:-0}" = "1" ]     && TAG+="_nofuse"
       # A false `[ ]` above leaves the branch's status at 1, which would trip
       # `set -e` at the call site if this script ever gains it. `:` resets it.
       :

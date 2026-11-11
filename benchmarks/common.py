@@ -393,6 +393,17 @@ def _load_picokv_model(
         key_decoders = _projs["key_decoder"]
         value_decoders = _projs["value_decoder"]
         print(f"offline projection: {offline_proj_path}", flush=True)
+        # Ablation-only: keep the offline encoders but drop the decoders, so
+        # prefill skips the Householder/power-iteration encoder fit yet still
+        # runs the per-group least-squares decoder solve. Combined with plain
+        # online (both fitted) and PICOKV_DISABLE_FUSED_QUANT=1 + both fixed
+        # (neither fitted), the three wall times separate encoder fitting from
+        # decoder fitting from GPC itself. Not a deployable mode: the stored
+        # decoder is the one matched to these encoders, so discarding it only
+        # makes reconstruction worse -- never report accuracy from this path.
+        if os.environ.get("PICOKV_IGNORE_OFFLINE_DECODERS", "0") == "1":
+            key_decoders = value_decoders = None
+            print("offline projection: decoders IGNORED (timing ablation)", flush=True)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     # With a single visible GPU, device_map="auto" can offload layers to CPU
