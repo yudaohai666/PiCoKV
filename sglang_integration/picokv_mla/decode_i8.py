@@ -4,9 +4,10 @@ Per request the compressed rows are the positions ``[SINK, SINK + nc)``, ``nc = 
 dense rows are the sink ``[0, min(SINK, L))`` and the tail ``[SINK + nc, L)``. Per layer
 (``picokv_mla_sm90/decode_i8.cuh``):
 
-* dense: stock fa3 over the dense rows (``pki8_plan`` builds their page table once per forward), with lse;
 * qproj: ``q' = q_nope @ dec^T`` quantised per head to int8 hi / lo terms (the q record);
-* attn: int8 score per compressed entry, ``P = fp16 2^(s - R)``, ``Y = sum P c`` per (CTA, row) segment;
+* attn: int8 score per compressed entry, ``P = fp16 2^(s - R)``, ``Y = sum P c`` per (CTA, row) segment; its first
+  ``B`` CTAs (``3 B`` with ``DENSE_SPLIT``) take the dense rows (``pki8_plan`` builds their page table once per forward):
+  exact bf16 attention with ``o_d`` fp32 and lse (``FUSED_DENSE = 0`` or ``dw > 384``: stock fa3 before qproj instead);
 * combine: segments -> ``A'' = (2 y - L) / L`` (fp16), lse_c; merge: ``o_c = A'' @ dec`` merged with the dense part.
 
 Every grid depends only on the batch size and every count lives on the device, so the launches can be captured in a
@@ -15,6 +16,7 @@ CUDA graph."""
 from __future__ import annotations
 
 import math
+import os
 
 import torch
 import triton
@@ -33,6 +35,17 @@ UE = 128  # compressed entries per unit
 QREC_B = 10 * 40 * 128 + HN * 128 + 2 * HN * 4  # q record per row (decode_i8.cuh)
 MERGE_KS = 0  # merge split-K ranks; 0 = by the row count
 DENSE_SPLITS = 0  # fa3 num_splits of the dense part (sink + tail); 0 = 1 at B >= 32 (measured), else fa3's
+FUSED_DENSE = os.environ.get("SGLANG_PICOKV_MLA_FUSED_DENSE", "1") != "0"  # dense part in the attn kernel, else fa3
+FUSED_MAXDW = 384  # DCfg::MAXDW
+# fused, B <= G / 2: G - B code CTAs share the first wave with the B dense CTAs when the code part is short enough
+# (U B <= 3 G (G - B), U = compressed units: ~5 us a unit vs ~15 us a dense CTA, measured), else G and the last B code
+# CTAs run in a second wave. 0: never, 1: always, 2: by U B
+DENSE_SHRINK = 2
+# fused, U <= G - 3 B: G - 3 B code CTAs of one unit each (the code part as with G - B) and 3 dense CTAs a row, one per
+# mma head group (bitwise the 1-CTA result). The attn grid then always has 3 B dense CTAs (the 2 B extra ones exit at
+# once when the plan does not split). Opt-in: the split build (PKI8_DSPLIT) is -12 .. -19 % a layer where the plan
+# splits (b1 .. b4, short rows) but +1 .. 3 % elsewhere (8 x 128k, 32 x 32k: the code path's register allocation)
+DENSE_SPLIT = os.environ.get("SGLANG_PICOKV_MLA_DSPLIT", "0") != "0"
 
 
 @cache_once
@@ -46,12 +59,12 @@ def _module():
             ("combine", "sglang::pki8_combine_dispatch"),
             ("merge", "sglang::pki8_merge_dispatch"),
         ],
-        extra_cuda_cflags=["-DNDEBUG", "--use_fast_math"],
+        extra_cuda_cflags=["-DNDEBUG", "--use_fast_math"] + (["-DPKI8_DSPLIT=1"] if DENSE_SPLIT else []),
     )
 
 
 @triton.jit
-def _pki8_plan_kernel(seq_ptr, ce_ptr, rpi_ptr, plan_ptr, B, SINK: tl.constexpr, UE: tl.constexpr,
+def _pki8_plan_kernel(seq_ptr, ce_ptr, rpi_ptr, plan_ptr, B, G, SHRINK, SPLIT, SINK: tl.constexpr, UE: tl.constexpr,
                       BP: tl.constexpr):
     i = tl.arange(0, BP)
     m = i < B
@@ -69,6 +82,13 @@ def _pki8_plan_kernel(seq_ptr, ce_ptr, rpi_ptr, plan_ptr, B, SINK: tl.constexpr,
     z = i == 0
     tl.store(plan_ptr + i, tl.zeros([BP], tl.int32), mask=z)
     tl.store(plan_ptr + (B + 1) + i, tl.zeros([BP], tl.int32), mask=z)
+    nu_all = tl.sum(nu, 0)
+    small = (SHRINK == 1) | ((SHRINK == 2) & (nu_all * B <= 3 * G * (G - B)))
+    split = (SPLIT != 0) & (SHRINK != 0) & (3 * B < G) & (nu_all <= G - 3 * B)
+    nct = tl.where(split, G - 3 * B, tl.where(small, G - B, G))
+    tl.store(plan_ptr + 4 * (B + 1) + i, tl.zeros([BP], tl.int32) + nct, mask=z)
+    tl.store(plan_ptr + 4 * (B + 1) + 1 + i, tl.zeros([BP], tl.int32) + tl.where(split, 3, tl.where(small, 1, 0)),
+             mask=z)
 
 
 @triton.jit
@@ -96,7 +116,7 @@ def _sm_count(dev) -> int:
 
 
 def _ws_layout(max_bs: int, dw: int, sms: int):
-    return [("plan", (4, max_bs + 1), torch.int32), ("dpt", (max_bs, dw), torch.int32),
+    return [("plan", (4 * (max_bs + 1) + 2,), torch.int32), ("dpt", (max_bs, dw), torch.int32),
             ("dlen", (max_bs,), torch.int32), ("cuq", (max_bs + 1,), torch.int32),
             ("qrec", (max_bs, QREC_B), torch.uint8), ("yp", (sms + max_bs, H, BITS), torch.float32),
             ("mlp", (sms + max_bs, 2, HN), torch.float32), ("a2", (max_bs, H, BITS), torch.float16),
@@ -134,12 +154,17 @@ class Pki8Workspace:
         return _ws_offsets(max_bs, dw, sms)[1]
 
 
+def _dsplit(ws: Pki8Workspace, B: int) -> bool:  # the plan may split the dense rows by head group
+    return DENSE_SPLIT and bool(DENSE_SHRINK) and 3 * B < ws.G
+
+
 def pki8_plan(ws: Pki8Workspace, ce, seq_lens, req_pool_indices, r2t, s2d, B: int):
     """The per-forward plan of ``B`` rows from seq_lens, the req pool indices, ``ce`` (int32 compressed end per req pool
     slot), req_to_token and slot2dense (device tensors; graph-safe)."""
     assert B <= ws.max_bs, (B, ws.max_bs)
-    _pki8_plan_kernel[(1,)](seq_lens, ce, req_pool_indices, ws.plan, B, SINK=SINK, UE=UE,
-                            BP=max(16, triton.next_power_of_2(B)))
+    fused = FUSED_DENSE and ws.dw <= FUSED_MAXDW and B <= ws.G // 2
+    _pki8_plan_kernel[(1,)](seq_lens, ce, req_pool_indices, ws.plan, B, ws.G, DENSE_SHRINK if fused else 0,
+                            int(_dsplit(ws, B)), SINK=SINK, UE=UE, BP=max(16, triton.next_power_of_2(B)))
     _pki8_dense_pt_kernel[(B, triton.cdiv(ws.dw, 128))](seq_lens, ce, req_pool_indices, r2t, r2t.stride(0), s2d,
                                                         ws.dpt, ws.dlen, ws.dw, SINK=SINK, BLK=128)
 
@@ -151,17 +176,26 @@ def pki8_decode(ws: Pki8Workspace, q_nope, q_rope, arena, dense, dec, r2t, B: in
     [rows, 576] bf16 view; dec [1280, 512] bf16; out [B, H, 512] bf16."""
     mod = _module()
     stream = torch.cuda.current_stream(q_nope.device).cuda_stream
-    od, lse = flash_attn_with_kvcache(
-        q=q_rope, k_cache=dense[:, NOPE:].view(-1, 1, 1, ROPE), v_cache=dense[:, :NOPE].view(-1, 1, 1, NOPE),
-        qv=q_nope, page_table=ws.dpt[:B], cache_seqlens=ws.dlen[:B], cu_seqlens_q=ws.cuq[:B + 1], max_seqlen_q=1,
-        softmax_scale=scale, causal=True, num_splits=DENSE_SPLITS or (1 if B >= 32 else 0), return_softmax_lse=True)[:2]
-    od = od.view(B, H, NOPE)
+    fused = FUSED_DENSE and ws.dw <= FUSED_MAXDW
+    if fused:  # [B][H][512] fp32 | [B][H] log2 units, written by the attn kernel's dense CTAs
+        od = torch.empty((B, H, NOPE), dtype=torch.float32, device=q_nope.device)
+        lse = torch.empty((B, H), dtype=torch.float32, device=q_nope.device)
+        nd, ld_h, ld_b = (3 * B if _dsplit(ws, B) else B), 1, H
+    else:
+        od, lse = flash_attn_with_kvcache(
+            q=q_rope, k_cache=dense[:, NOPE:].view(-1, 1, 1, ROPE), v_cache=dense[:, :NOPE].view(-1, 1, 1, NOPE),
+            qv=q_nope, page_table=ws.dpt[:B], cache_seqlens=ws.dlen[:B], cu_seqlens_q=ws.cuq[:B + 1],
+            max_seqlen_q=1, softmax_scale=scale, causal=True, num_splits=DENSE_SPLITS or (1 if B >= 32 else 0),
+            return_softmax_lse=True)[:2]
+        od = od.view(B, H, NOPE)
+        nd, ld_h, ld_b = 0, lse.stride(0), lse.stride(1)
     p = int(pdl)
     mod.qproj(q_nope, q_rope, dec, ws.qrec, B, q_nope.stride(0), q_nope.stride(1), q_rope.stride(0),
               q_rope.stride(1), p, stream)
-    mod.attn(ws.qrec, arena, r2t, ws.plan, ws.yp, ws.mlp, B, r2t.stride(0), scale * math.log2(math.e), ws.G, p,
-             stream)
-    mod.combine(ws.plan, ws.yp, ws.mlp, ws.a2, ws.lsec, B, ws.G, p, stream)
-    mod.merge(ws.a2, ws.lsec, dec, od, lse, out, B, od.stride(0), od.stride(1), lse.stride(0), lse.stride(1),
-              out.stride(0), out.stride(1), MERGE_KS, p, stream)
+    mod.attn(ws.qrec, arena, r2t, ws.plan, ws.yp, ws.mlp, B, r2t.stride(0), scale * math.log2(math.e), ws.G, q_nope,
+             q_rope, q_nope.stride(0), q_nope.stride(1), q_rope.stride(0), q_rope.stride(1), ws.dpt, ws.dlen, ws.dw,
+             dense, od, lse, nd, p, stream)
+    mod.combine(ws.plan, ws.yp, ws.mlp, ws.a2, ws.lsec, B, p, stream)
+    mod.merge(ws.a2, ws.lsec, dec, od, lse, out, B, od.stride(0), od.stride(1), ld_h, ld_b, out.stride(0),
+              out.stride(1), MERGE_KS, int(fused), p, stream)
     return out

@@ -1,8 +1,8 @@
 diff --git a/python/sglang/srt/arg_groups/attention_hook.py b/python/sglang/srt/arg_groups/attention_hook.py
-index b5ef4ed9..ab0cbda7 100644
+index b5ef4ed9..91269105 100644
 --- a/python/sglang/srt/arg_groups/attention_hook.py
 +++ b/python/sglang/srt/arg_groups/attention_hook.py
-@@ -609,3 +609,184 @@ def handle_deterministic_inference(server_args: Any):
+@@ -609,3 +609,285 @@ def handle_deterministic_inference(server_args: Any):
                  logger.warning(
                      "NCCL_ALGO is set to 'allreduce:tree', the NCCL channel count is pinned, and custom and symmetric-memory all reduce are disabled for deterministic inference when TP size > 1."
                  )
@@ -187,8 +187,109 @@ index b5ef4ed9..ab0cbda7 100644
 +                cfg.cuda_graph_config, Phase.PREFILL, backend=Backend.DISABLED
 +            ),
 +        )
++
++
++def handle_picokv_mla_serving_constraints(server_args: Any):
++    """Serving constraints of the picokv_mla attention backend (PiCoKV on the
++    MLA latent pool, layers/attention/picokv_mla).
++
++    The pool keeps pages of 4 latent rows (codes or dense bf16 rows) and the
++    path B decode kernels are built for one GLM-4.7-Flash rank (20 query
++    heads, 512 latent + 64 rope). Features whose KV path bypasses the pool's
++    codes or that were not validated are rejected; page_size defaults to 4.
++    Runs before handle_gpu_memory_settings and the page-size default.
++    """
++    cfg = resolving_view(server_args)
++    backends = attention_backends_of(cfg)
++    if "picokv_mla" not in backends:
++        return
++    from sglang.srt.layers.attention.picokv_mla import PATH_B, RADIX
++
++    src = "_handle_picokv_mla_serving_constraints"
++    if backends != ("picokv_mla", "picokv_mla"):
++        raise ValueError(
++            "picokv_mla must serve both prefill and decode (got prefill=%r, "
++            "decode=%r): the fire at the end of the prompt and the decode "
++            "slide run in the backend." % backends
++        )
++    for name, bad in (
++        # the decode kernels and the fire are per rank of one 20-head group
++        ("tensor parallelism (tp_size > 1)", cfg.tp_size > 1),
++        # a draft or verify forward would read and slide the pool out of step
++        ("speculative decoding", cfg.speculative_algorithm is not None),
++        ("DP attention", cfg.enable_dp_attention),
++        ("pipeline parallelism", cfg.pp_size > 1),
++        ("decode context parallelism", cfg.dcp_size > 1),
++        # the host tiers copy pool pages without the codes' bookkeeping
++        ("hierarchical cache", cfg.enable_hierarchical_cache),
++        ("PD disaggregation", cfg.disaggregation_mode != "null"),
++        ("streaming sessions", cfg.enable_streaming_session),
++        ("prefill context parallelism",
++         bool(getattr(cfg, "enable_prefill_cp", False))
++         or (getattr(cfg, "attn_cp_size", 1) or 1) > 1),
++        ("diffusion LLM decoding", getattr(cfg, "dllm_algorithm", None) is not None),
++        ("PD multiplexing", bool(getattr(cfg, "enable_pdmux", False))),
++        ("MoE all-to-all backends",
++         getattr(cfg, "moe_a2a_backend", None) not in (None, "none")),
++        ("two-batch overlap", bool(getattr(cfg, "enable_two_batch_overlap", False))),
++        # the canary audits token pool rows, the compressed rows hold codes
++        ("KV canary", getattr(cfg, "kv_canary", None) not in (None, "none")),
++        # path B splits the code rows by batch size (not batch invariant)
++        ("deterministic inference", cfg.enable_deterministic_inference),
++    ):
++        if bad:
++            raise ValueError(f"picokv_mla attention backend does not support {name}")
++    # the pool stores bf16 dense rows and int8 codes; an fp8 latent is not
++    # implemented
++    if cfg.kv_cache_dtype not in (None, "auto", "bf16", "bfloat16"):
++        raise ValueError(
++            f"picokv_mla needs a bf16 latent pool, got --kv-cache-dtype {cfg.kv_cache_dtype}"
++        )
++    # a registered radix backend would replace the R-exact tree
++    # (mem_cache/registry.py create_tree_cache), whose hits read exact rows
++    if (
++        RADIX
++        and not cfg.disable_radix_cache
++        and cfg.radix_cache_backend is not None
++    ):
++        raise ValueError(
++            "picokv_mla with the radix cache uses its own tree; drop "
++            f"--radix-cache-backend {cfg.radix_cache_backend!r} or pass "
++            "--disable-radix-cache"
++        )
++    hf = model_config_of(server_args).hf_config
++    lora, rope = getattr(hf, "kv_lora_rank", None), getattr(hf, "qk_rope_head_dim", None)
++    if (lora, rope) != (512, 64):
++        raise ValueError(
++            f"picokv_mla needs an MLA model with a 512 latent + 64 rope "
++            f"(kv_lora_rank={lora}, qk_rope_head_dim={rope})"
++        )
++    heads = getattr(hf, "num_attention_heads", None)
++    if PATH_B and heads != 20:
++        # decode_i8.H; SGLANG_PICOKV_MLA_PATH_B=0 decodes through fa3
++        raise ValueError(
++            f"picokv_mla path B decode kernels are built for 20 query heads, got "
++            f"{heads}; set SGLANG_PICOKV_MLA_PATH_B=0"
++        )
++    # pool.UNITS_PER_ROW: one page holds the 4 rows a code group covers
++    if cfg.page_size is None:
++        logger.info("picokv_mla: page_size set to 4.")
++        declare_resolution(server_args, src, page_size=4)
++    elif cfg.page_size != 4:
++        raise ValueError(f"picokv_mla needs page_size 4, got {cfg.page_size}")
++    if cfg.enable_mixed_chunk:
++        logger.warning("picokv_mla: mixed chunked prefill disabled (not validated).")
++        declare_resolution(server_args, src, enable_mixed_chunk=False)
++    if cfg.enable_torch_compile:
++        logger.warning("picokv_mla: torch.compile disabled (not validated).")
++        declare_resolution(server_args, src, enable_torch_compile=False)
++    if cfg.enable_memory_saver:
++        logger.warning(
++            "picokv_mla: release_memory_occupation is not validated with the "
++            "pool's code arena, host mirror and decode workspace."
++        )
 diff --git a/python/sglang/srt/arg_groups/choices.py b/python/sglang/srt/arg_groups/choices.py
-index 1ac5b914..82087754 100644
+index 1ac5b914..110dbb7d 100644
 --- a/python/sglang/srt/arg_groups/choices.py
 +++ b/python/sglang/srt/arg_groups/choices.py
 @@ -81,6 +81,8 @@ ATTENTION_BACKEND_CHOICES = [
@@ -200,15 +301,7 @@ index 1ac5b914..82087754 100644
      # NVIDIA specific
      "fa3",
      "fa4",
-@@ -117,6 +119,7 @@ DRAFT_ATTENTION_BACKEND_CHOICES = [
- DETERMINISTIC_ATTENTION_BACKEND_CHOICES = [
-     "ascend",
-     "fa3",
-+    "picokv_mla",
-     "fa4",
-     "flashinfer",
-     "intel_xpu",
-@@ -233,6 +236,7 @@ add_draft_attention_backend_choices = DRAFT_ATTENTION_BACKEND_CHOICES.extend
+@@ -233,6 +235,7 @@ add_draft_attention_backend_choices = DRAFT_ATTENTION_BACKEND_CHOICES.extend
  CHUNKED_PREFIX_CACHE_SUPPORTED_ATTENTION_BACKENDS = [
      "flashinfer",
      "fa3",
@@ -217,10 +310,10 @@ index 1ac5b914..82087754 100644
      "flashmla",
      "cutedsl_mla",
 diff --git a/python/sglang/srt/arg_groups/pipeline.py b/python/sglang/srt/arg_groups/pipeline.py
-index 496f37c9..3b5634ee 100644
+index 496f37c9..fc3039ce 100644
 --- a/python/sglang/srt/arg_groups/pipeline.py
 +++ b/python/sglang/srt/arg_groups/pipeline.py
-@@ -231,6 +231,12 @@ def run_resolution_pipeline(server_args: Any) -> None:
+@@ -231,6 +231,19 @@ def run_resolution_pipeline(server_args: Any) -> None:
  
      run_hook(handle_platform_defaults, server_args)
  
@@ -229,6 +322,13 @@ index 496f37c9..3b5634ee 100644
 +    from sglang.srt.arg_groups.attention_hook import handle_picokv_serving_constraints
 +
 +    run_hook(handle_picokv_serving_constraints, server_args)
++    # Same position: the page-size default and the memory budget read the
++    # page_size the picokv_mla constraints resolve.
++    from sglang.srt.arg_groups.attention_hook import (
++        handle_picokv_mla_serving_constraints,
++    )
++
++    run_hook(handle_picokv_mla_serving_constraints, server_args)
 +
      # Handle memory-related, chunked prefill, and CUDA graph batch size configurations.
      from sglang.srt.arg_groups.memory_hook import handle_gpu_memory_settings
