@@ -1,0 +1,4 @@
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:00<00:02,  1.12it/s]Loading checkpoint shards:  50%|█████     | 2/4 [00:01<00:01,  1.08it/s]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:02<00:00,  1.15it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:02<00:00,  1.59it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:02<00:00,  1.37it/s]
+Token indices sequence length is longer than the specified maximum sequence length for this model (446286 > 131072). Running this sequence through the model will result in indexing errors
+[picokv] L=32768: prefill=12887.585ms  decode=30.1004ms/tok (33.22 tok/s)  peak=17.624/15.772GB  kv=0.783/0.791GB
+[saved] rebuttal/results/uv_cuda_32k_20261110/efficiency_unpacked_fused.json

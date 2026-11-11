@@ -1,0 +1,407 @@
+Model: /home/zxh/zxh/models/Llama-3.1-8B-Instruct | Method: picokv | max_length: 127500
+Output dir: /data/zxh/PiCoKV2/rebuttal/BPC/results/uv_retest/longbench_full/shards/binarypc/triviaqa
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:00<00:02,  1.24it/s]Loading checkpoint shards:  50%|█████     | 2/4 [00:01<00:01,  1.19it/s]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:02<00:00,  1.26it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:02<00:00,  1.71it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:02<00:00,  1.50it/s]
+==================================================
+Evaluating dataset: triviaqa
+Processing triviaqa:   0%|          | 0/200 [00:00<?, ?it/s]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:   0%|          | 1/200 [00:10<36:23, 10.97s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:   1%|          | 2/200 [00:33<58:09, 17.62s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:   2%|▏         | 3/200 [00:51<58:54, 17.94s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:   2%|▏         | 4/200 [01:19<1:11:44, 21.96s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:   2%|▎         | 5/200 [01:36<1:04:49, 19.95s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:   3%|▎         | 6/200 [01:52<1:00:27, 18.70s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:   4%|▎         | 7/200 [02:04<52:45, 16.40s/it]  The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:   4%|▍         | 8/200 [02:14<46:11, 14.44s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:   4%|▍         | 9/200 [02:24<41:37, 13.08s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:   5%|▌         | 10/200 [02:37<41:52, 13.23s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:   6%|▌         | 11/200 [03:04<54:50, 17.41s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:   6%|▌         | 12/200 [03:19<51:37, 16.48s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:   6%|▋         | 13/200 [03:29<45:36, 14.63s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:   7%|▋         | 14/200 [03:47<48:03, 15.50s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:   8%|▊         | 15/200 [03:57<43:11, 14.01s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:   8%|▊         | 16/200 [04:08<39:49, 12.99s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:   8%|▊         | 17/200 [04:32<49:44, 16.31s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:   9%|▉         | 18/200 [04:41<43:27, 14.32s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  10%|▉         | 19/200 [05:04<50:37, 16.78s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  10%|█         | 20/200 [05:27<56:04, 18.69s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  10%|█         | 21/200 [05:45<55:00, 18.44s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  11%|█         | 22/200 [05:55<47:25, 15.99s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  12%|█▏        | 23/200 [06:08<44:24, 15.05s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  12%|█▏        | 24/200 [06:25<45:51, 15.64s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  12%|█▎        | 25/200 [06:50<53:48, 18.45s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  13%|█▎        | 26/200 [07:09<54:07, 18.66s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  14%|█▎        | 27/200 [07:36<1:00:26, 20.96s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  14%|█▍        | 28/200 [07:46<51:01, 17.80s/it]  The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  14%|█▍        | 29/200 [07:56<44:05, 15.47s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  15%|█▌        | 30/200 [08:13<45:16, 15.98s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  16%|█▌        | 31/200 [08:29<44:37, 15.84s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  16%|█▌        | 32/200 [08:39<39:33, 14.13s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  16%|█▋        | 33/200 [09:01<46:20, 16.65s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  17%|█▋        | 34/200 [09:12<41:13, 14.90s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  18%|█▊        | 35/200 [09:31<44:33, 16.21s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  18%|█▊        | 36/200 [10:01<55:10, 20.19s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  18%|█▊        | 37/200 [10:10<45:38, 16.80s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  19%|█▉        | 38/200 [10:39<55:42, 20.63s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  20%|█▉        | 39/200 [11:07<1:00:36, 22.59s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  20%|██        | 40/200 [11:23<55:34, 20.84s/it]  The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  20%|██        | 41/200 [11:35<48:12, 18.19s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  21%|██        | 42/200 [11:47<42:23, 16.10s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  22%|██▏       | 43/200 [11:56<37:16, 14.25s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  22%|██▏       | 44/200 [12:07<34:18, 13.19s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  22%|██▎       | 45/200 [12:25<37:53, 14.67s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  23%|██▎       | 46/200 [12:41<38:16, 14.91s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  24%|██▎       | 47/200 [12:54<36:39, 14.38s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  24%|██▍       | 48/200 [13:15<41:32, 16.40s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  24%|██▍       | 49/200 [13:35<43:49, 17.42s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  25%|██▌       | 50/200 [13:51<42:51, 17.14s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  26%|██▌       | 51/200 [14:06<40:47, 16.43s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  26%|██▌       | 52/200 [14:22<40:11, 16.29s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  26%|██▋       | 53/200 [14:33<36:03, 14.72s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  27%|██▋       | 54/200 [14:55<40:58, 16.84s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  28%|██▊       | 55/200 [15:05<35:29, 14.68s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  28%|██▊       | 56/200 [15:31<43:59, 18.33s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  28%|██▊       | 57/200 [15:48<42:14, 17.72s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  29%|██▉       | 58/200 [16:07<43:17, 18.29s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  30%|██▉       | 59/200 [16:33<47:53, 20.38s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  30%|███       | 60/200 [16:51<46:30, 19.93s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  30%|███       | 61/200 [17:06<42:25, 18.31s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  31%|███       | 62/200 [17:17<37:08, 16.15s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  32%|███▏      | 63/200 [17:42<42:36, 18.66s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  32%|███▏      | 64/200 [18:11<49:20, 21.77s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  32%|███▎      | 65/200 [18:27<45:20, 20.15s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  33%|███▎      | 66/200 [18:37<38:12, 17.11s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  34%|███▎      | 67/200 [18:48<33:56, 15.31s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  34%|███▍      | 68/200 [19:00<31:16, 14.22s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  34%|███▍      | 69/200 [19:14<30:53, 14.15s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  35%|███▌      | 70/200 [19:34<34:36, 15.97s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  36%|███▌      | 71/200 [19:50<34:05, 15.86s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  36%|███▌      | 72/200 [20:00<30:02, 14.08s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  36%|███▋      | 73/200 [20:09<27:09, 12.83s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  37%|███▋      | 74/200 [20:28<30:22, 14.46s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  38%|███▊      | 75/200 [20:54<37:40, 18.08s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  38%|███▊      | 76/200 [21:13<37:57, 18.37s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  38%|███▊      | 77/200 [21:27<34:37, 16.89s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  39%|███▉      | 78/200 [21:55<41:14, 20.28s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  40%|███▉      | 79/200 [22:06<35:12, 17.46s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  40%|████      | 80/200 [22:25<35:52, 17.94s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  40%|████      | 81/200 [22:36<31:35, 15.93s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  41%|████      | 82/200 [22:57<34:17, 17.43s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  42%|████▏     | 83/200 [23:17<35:35, 18.25s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  42%|████▏     | 84/200 [23:27<30:24, 15.73s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  42%|████▎     | 85/200 [23:37<26:51, 14.01s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  43%|████▎     | 86/200 [24:02<32:36, 17.16s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  44%|████▎     | 87/200 [24:12<28:30, 15.14s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  44%|████▍     | 88/200 [24:23<25:57, 13.91s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  44%|████▍     | 89/200 [24:39<26:54, 14.55s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  45%|████▌     | 90/200 [24:57<28:37, 15.61s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  46%|████▌     | 91/200 [25:07<25:22, 13.96s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  46%|████▌     | 92/200 [25:21<25:09, 13.98s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  46%|████▋     | 93/200 [25:44<29:26, 16.51s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  47%|████▋     | 94/200 [25:57<27:16, 15.44s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  48%|████▊     | 95/200 [26:18<30:05, 17.20s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  48%|████▊     | 96/200 [26:44<34:28, 19.89s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  48%|████▊     | 97/200 [27:08<36:20, 21.17s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  49%|████▉     | 98/200 [27:20<31:11, 18.35s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  50%|████▉     | 99/200 [27:43<32:59, 19.60s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  50%|█████     | 100/200 [28:00<31:31, 18.91s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  50%|█████     | 101/200 [28:25<34:08, 20.69s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  51%|█████     | 102/200 [28:50<35:54, 21.98s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  52%|█████▏    | 103/200 [29:15<37:08, 22.97s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  52%|█████▏    | 104/200 [29:37<36:26, 22.78s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  52%|█████▎    | 105/200 [30:07<39:13, 24.78s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  53%|█████▎    | 106/200 [30:33<39:28, 25.19s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  54%|█████▎    | 107/200 [31:04<41:59, 27.10s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  54%|█████▍    | 108/200 [31:20<36:14, 23.63s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  55%|█████▍    | 109/200 [31:31<30:11, 19.90s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  55%|█████▌    | 110/200 [31:55<31:22, 20.92s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  56%|█████▌    | 111/200 [32:11<29:01, 19.57s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  56%|█████▌    | 112/200 [32:21<24:32, 16.74s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  56%|█████▋    | 113/200 [32:44<26:49, 18.50s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  57%|█████▋    | 114/200 [32:54<23:04, 16.10s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  57%|█████▊    | 115/200 [33:10<22:37, 15.97s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  58%|█████▊    | 116/200 [33:27<22:53, 16.35s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  58%|█████▊    | 117/200 [33:50<25:16, 18.27s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  59%|█████▉    | 118/200 [34:13<26:49, 19.63s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  60%|█████▉    | 119/200 [34:23<22:39, 16.78s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  60%|██████    | 120/200 [34:32<19:31, 14.65s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  60%|██████    | 121/200 [34:59<24:00, 18.24s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  61%|██████    | 122/200 [35:23<26:03, 20.04s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  62%|██████▏   | 123/200 [35:37<23:27, 18.27s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  62%|██████▏   | 124/200 [35:48<20:18, 16.03s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  62%|██████▎   | 125/200 [36:07<20:56, 16.76s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  63%|██████▎   | 126/200 [36:17<18:11, 14.75s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  64%|██████▎   | 127/200 [36:39<20:39, 16.98s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  64%|██████▍   | 128/200 [37:07<24:19, 20.28s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  64%|██████▍   | 129/200 [37:19<21:11, 17.91s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  65%|██████▌   | 130/200 [37:48<24:35, 21.08s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  66%|██████▌   | 131/200 [37:58<20:27, 17.78s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  66%|██████▌   | 132/200 [38:08<17:27, 15.41s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  66%|██████▋   | 133/200 [38:18<15:28, 13.85s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  67%|██████▋   | 134/200 [38:29<14:09, 12.88s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  68%|██████▊   | 135/200 [38:41<13:56, 12.87s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  68%|██████▊   | 136/200 [39:13<19:39, 18.44s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  68%|██████▊   | 137/200 [39:38<21:20, 20.33s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  69%|██████▉   | 138/200 [40:04<22:44, 22.01s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  70%|██████▉   | 139/200 [40:14<18:43, 18.42s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  70%|███████   | 140/200 [40:32<18:33, 18.56s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  70%|███████   | 141/200 [41:01<21:03, 21.42s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  71%|███████   | 142/200 [41:17<19:15, 19.92s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  72%|███████▏  | 143/200 [41:34<18:05, 19.04s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  72%|███████▏  | 144/200 [41:45<15:35, 16.71s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  72%|███████▎  | 145/200 [41:56<13:47, 15.04s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  73%|███████▎  | 146/200 [42:13<14:01, 15.58s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  74%|███████▎  | 147/200 [42:26<13:02, 14.76s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  74%|███████▍  | 148/200 [42:49<14:57, 17.26s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  74%|███████▍  | 149/200 [43:10<15:41, 18.45s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  75%|███████▌  | 150/200 [43:30<15:35, 18.71s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  76%|███████▌  | 151/200 [43:40<13:12, 16.17s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  76%|███████▌  | 152/200 [44:10<16:20, 20.43s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  76%|███████▋  | 153/200 [44:21<13:45, 17.56s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  77%|███████▋  | 154/200 [44:48<15:33, 20.29s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  78%|███████▊  | 155/200 [45:02<13:43, 18.31s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  78%|███████▊  | 156/200 [45:28<15:18, 20.87s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  78%|███████▊  | 157/200 [45:38<12:36, 17.59s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  79%|███████▉  | 158/200 [45:57<12:30, 17.88s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  80%|███████▉  | 159/200 [46:13<11:54, 17.42s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  80%|████████  | 160/200 [46:41<13:36, 20.42s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  80%|████████  | 161/200 [46:55<12:03, 18.55s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  81%|████████  | 162/200 [47:15<12:00, 18.95s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  82%|████████▏ | 163/200 [47:28<10:41, 17.34s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  82%|████████▏ | 164/200 [47:44<10:08, 16.90s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  82%|████████▎ | 165/200 [47:54<08:37, 14.79s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  83%|████████▎ | 166/200 [48:04<07:34, 13.36s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  84%|████████▎ | 167/200 [48:14<06:47, 12.33s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  84%|████████▍ | 168/200 [48:39<08:32, 16.01s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  84%|████████▍ | 169/200 [49:07<10:11, 19.73s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  85%|████████▌ | 170/200 [49:17<08:22, 16.74s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  86%|████████▌ | 171/200 [49:36<08:25, 17.43s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  86%|████████▌ | 172/200 [50:01<09:11, 19.69s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  86%|████████▋ | 173/200 [50:25<09:26, 20.98s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  87%|████████▋ | 174/200 [50:41<08:29, 19.59s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  88%|████████▊ | 175/200 [50:54<07:17, 17.49s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  88%|████████▊ | 176/200 [51:19<07:58, 19.94s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  88%|████████▊ | 177/200 [51:36<07:13, 18.87s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  89%|████████▉ | 178/200 [51:54<06:48, 18.58s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  90%|████████▉ | 179/200 [52:04<05:35, 15.99s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  90%|█████████ | 180/200 [52:19<05:18, 15.91s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  90%|█████████ | 181/200 [52:39<05:23, 17.01s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  91%|█████████ | 182/200 [52:53<04:50, 16.16s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  92%|█████████▏| 183/200 [53:05<04:12, 14.83s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  92%|█████████▏| 184/200 [53:15<03:37, 13.56s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  92%|█████████▎| 185/200 [53:29<03:21, 13.45s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  93%|█████████▎| 186/200 [53:45<03:22, 14.49s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  94%|█████████▎| 187/200 [53:56<02:51, 13.18s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  94%|█████████▍| 188/200 [54:24<03:33, 17.78s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  94%|█████████▍| 189/200 [54:35<02:53, 15.75s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  95%|█████████▌| 190/200 [55:01<03:07, 18.74s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  96%|█████████▌| 191/200 [55:13<02:29, 16.64s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  96%|█████████▌| 192/200 [55:25<02:03, 15.46s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  96%|█████████▋| 193/200 [55:45<01:56, 16.65s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  97%|█████████▋| 194/200 [55:55<01:27, 14.64s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  98%|█████████▊| 195/200 [56:16<01:23, 16.75s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  98%|█████████▊| 196/200 [56:33<01:07, 16.84s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  98%|█████████▊| 197/200 [56:54<00:54, 18.02s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa:  99%|█████████▉| 198/200 [57:08<00:33, 16.87s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa: 100%|█████████▉| 199/200 [57:32<00:18, 18.84s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128001 for open-end generation.
+Processing triviaqa: 100%|██████████| 200/200 [57:42<00:00, 16.11s/it]Processing triviaqa: 100%|██████████| 200/200 [57:42<00:00, 17.31s/it]
+Finished triviaqa -> /data/zxh/PiCoKV2/rebuttal/BPC/results/uv_retest/longbench_full/shards/binarypc/triviaqa/triviaqa.jsonl

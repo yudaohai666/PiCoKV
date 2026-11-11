@@ -1,0 +1,407 @@
+Model: /home/zxh/zxh/models/Llama-3.1-8B-Instruct | Method: picokv | max_length: 127500
+Output dir: /data/zxh/PiCoKV2/rebuttal/BPC/results/uv_retest/longbench_full/shards/gpc/samsum
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:00<00:02,  1.05it/s]Loading checkpoint shards:  50%|█████     | 2/4 [00:01<00:01,  1.01it/s]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:02<00:00,  1.08it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:03<00:00,  1.55it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:03<00:00,  1.32it/s]
+==================================================
+Evaluating dataset: samsum
+Processing samsum:   0%|          | 0/200 [00:00<?, ?it/s]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:   0%|          | 1/200 [00:05<19:12,  5.79s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:   1%|          | 2/200 [00:10<16:29,  5.00s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:   2%|▏         | 3/200 [00:18<20:34,  6.27s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:   2%|▏         | 4/200 [00:24<20:20,  6.23s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:   2%|▎         | 5/200 [00:30<20:50,  6.41s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:   3%|▎         | 6/200 [00:39<22:45,  7.04s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:   4%|▎         | 7/200 [00:48<25:00,  7.77s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:   4%|▍         | 8/200 [00:57<26:21,  8.23s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:   4%|▍         | 9/200 [01:05<25:19,  7.96s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:   5%|▌         | 10/200 [01:09<21:52,  6.91s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:   6%|▌         | 11/200 [01:16<21:34,  6.85s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:   6%|▌         | 12/200 [01:23<21:19,  6.81s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:   6%|▋         | 13/200 [01:28<19:39,  6.31s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:   7%|▋         | 14/200 [01:36<20:59,  6.77s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:   8%|▊         | 15/200 [01:43<21:12,  6.88s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:   8%|▊         | 16/200 [01:49<20:56,  6.83s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:   8%|▊         | 17/200 [01:54<19:09,  6.28s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:   9%|▉         | 18/200 [01:59<17:30,  5.77s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  10%|▉         | 19/200 [02:07<19:10,  6.36s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  10%|█         | 20/200 [02:12<17:54,  5.97s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  10%|█         | 21/200 [02:21<20:34,  6.90s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  11%|█         | 22/200 [02:30<22:14,  7.50s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  12%|█▏        | 23/200 [02:34<19:35,  6.64s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  12%|█▏        | 24/200 [02:40<18:40,  6.37s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  12%|█▎        | 25/200 [02:48<20:09,  6.91s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  13%|█▎        | 26/200 [02:53<18:15,  6.30s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  14%|█▎        | 27/200 [03:00<18:36,  6.46s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  14%|█▍        | 28/200 [03:08<19:52,  6.93s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  14%|█▍        | 29/200 [03:15<19:28,  6.84s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  15%|█▌        | 30/200 [03:24<21:55,  7.74s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  16%|█▌        | 31/200 [03:30<19:44,  7.01s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  16%|█▌        | 32/200 [03:35<17:46,  6.35s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  16%|█▋        | 33/200 [03:40<17:07,  6.15s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  17%|█▋        | 34/200 [03:48<18:25,  6.66s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  18%|█▊        | 35/200 [03:52<16:12,  5.89s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  18%|█▊        | 36/200 [04:01<18:09,  6.64s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  18%|█▊        | 37/200 [04:08<18:59,  6.99s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  19%|█▉        | 38/200 [04:17<20:03,  7.43s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  20%|█▉        | 39/200 [04:24<20:01,  7.46s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  20%|██        | 40/200 [04:29<17:50,  6.69s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  20%|██        | 41/200 [04:33<15:42,  5.93s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  21%|██        | 42/200 [04:38<14:17,  5.42s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  22%|██▏       | 43/200 [04:43<14:26,  5.52s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  22%|██▏       | 44/200 [04:52<16:48,  6.46s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  22%|██▎       | 45/200 [05:00<17:32,  6.79s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  23%|██▎       | 46/200 [05:07<17:50,  6.95s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  24%|██▎       | 47/200 [05:11<15:46,  6.18s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  24%|██▍       | 48/200 [05:17<15:23,  6.08s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  24%|██▍       | 49/200 [05:21<13:53,  5.52s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  25%|██▌       | 50/200 [05:28<14:53,  5.96s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  26%|██▌       | 51/200 [05:33<13:58,  5.63s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  26%|██▌       | 52/200 [05:41<15:46,  6.40s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  26%|██▋       | 53/200 [05:50<17:00,  6.94s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  27%|██▋       | 54/200 [05:57<17:27,  7.18s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  28%|██▊       | 55/200 [06:02<15:35,  6.45s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  28%|██▊       | 56/200 [06:09<15:37,  6.51s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  28%|██▊       | 57/200 [06:18<17:26,  7.32s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  29%|██▉       | 58/200 [06:22<15:12,  6.42s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  30%|██▉       | 59/200 [06:27<14:07,  6.01s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  30%|███       | 60/200 [06:36<16:05,  6.90s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  30%|███       | 61/200 [06:41<14:30,  6.26s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  31%|███       | 62/200 [06:49<15:51,  6.90s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  32%|███▏      | 63/200 [06:55<14:47,  6.48s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  32%|███▏      | 64/200 [07:01<14:29,  6.39s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  32%|███▎      | 65/200 [07:09<15:23,  6.84s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  33%|███▎      | 66/200 [07:15<14:34,  6.52s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  34%|███▎      | 67/200 [07:19<13:02,  5.89s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  34%|███▍      | 68/200 [07:26<13:31,  6.15s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  34%|███▍      | 69/200 [07:33<13:40,  6.26s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  35%|███▌      | 70/200 [07:37<12:11,  5.63s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  36%|███▌      | 71/200 [07:44<13:05,  6.09s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  36%|███▌      | 72/200 [07:50<13:13,  6.20s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  36%|███▋      | 73/200 [07:55<12:05,  5.71s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  37%|███▋      | 74/200 [08:01<12:20,  5.88s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  38%|███▊      | 75/200 [08:07<12:15,  5.88s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  38%|███▊      | 76/200 [08:12<11:39,  5.64s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  38%|███▊      | 77/200 [08:20<13:08,  6.41s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  39%|███▉      | 78/200 [08:28<14:02,  6.91s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  40%|███▉      | 79/200 [08:34<13:26,  6.67s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  40%|████      | 80/200 [08:43<14:33,  7.28s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  40%|████      | 81/200 [08:49<13:34,  6.84s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  41%|████      | 82/200 [08:58<14:52,  7.56s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  42%|████▏     | 83/200 [09:04<13:35,  6.97s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  42%|████▏     | 84/200 [09:09<12:36,  6.52s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  42%|████▎     | 85/200 [09:17<13:13,  6.90s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  43%|████▎     | 86/200 [09:22<11:53,  6.26s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  44%|████▎     | 87/200 [09:26<10:52,  5.77s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  44%|████▍     | 88/200 [09:31<10:06,  5.42s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  44%|████▍     | 89/200 [09:37<10:32,  5.70s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  45%|████▌     | 90/200 [09:45<11:26,  6.24s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  46%|████▌     | 91/200 [09:49<10:22,  5.71s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  46%|████▌     | 92/200 [09:56<10:43,  5.96s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  46%|████▋     | 93/200 [10:04<11:49,  6.63s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  47%|████▋     | 94/200 [10:11<11:39,  6.60s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  48%|████▊     | 95/200 [10:18<11:56,  6.83s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  48%|████▊     | 96/200 [10:28<13:21,  7.70s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  48%|████▊     | 97/200 [10:33<12:02,  7.01s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  49%|████▉     | 98/200 [10:42<12:43,  7.48s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  50%|████▉     | 99/200 [10:46<11:02,  6.56s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  50%|█████     | 100/200 [10:52<10:35,  6.35s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  50%|█████     | 101/200 [11:00<11:11,  6.78s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  51%|█████     | 102/200 [11:07<11:21,  6.95s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  52%|█████▏    | 103/200 [11:14<11:09,  6.90s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  52%|█████▏    | 104/200 [11:19<09:56,  6.22s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  52%|█████▎    | 105/200 [11:23<09:04,  5.73s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  53%|█████▎    | 106/200 [11:30<09:21,  5.97s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  54%|█████▎    | 107/200 [11:35<08:53,  5.73s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  54%|█████▍    | 108/200 [11:41<08:57,  5.85s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  55%|█████▍    | 109/200 [11:47<08:57,  5.91s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  55%|█████▌    | 110/200 [11:53<08:46,  5.85s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  56%|█████▌    | 111/200 [11:58<08:28,  5.71s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  56%|█████▌    | 112/200 [12:06<09:15,  6.32s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  56%|█████▋    | 113/200 [12:12<09:06,  6.28s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  57%|█████▋    | 114/200 [12:18<08:38,  6.03s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  57%|█████▊    | 115/200 [12:23<08:11,  5.78s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  58%|█████▊    | 116/200 [12:27<07:37,  5.45s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  58%|█████▊    | 117/200 [12:32<07:12,  5.21s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  59%|█████▉    | 118/200 [12:42<08:51,  6.49s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  60%|█████▉    | 119/200 [12:47<08:31,  6.31s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  60%|██████    | 120/200 [12:53<08:06,  6.08s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  60%|██████    | 121/200 [12:59<07:53,  6.00s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  61%|██████    | 122/200 [13:04<07:28,  5.75s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  62%|██████▏   | 123/200 [13:11<07:44,  6.03s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  62%|██████▏   | 124/200 [13:20<08:44,  6.90s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  62%|██████▎   | 125/200 [13:25<07:53,  6.31s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  63%|██████▎   | 126/200 [13:30<07:26,  6.03s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  64%|██████▎   | 127/200 [13:39<08:21,  6.87s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  64%|██████▍   | 128/200 [13:47<08:44,  7.29s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  64%|██████▍   | 129/200 [13:52<07:49,  6.62s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  65%|██████▌   | 130/200 [13:56<06:54,  5.92s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  66%|██████▌   | 131/200 [14:01<06:22,  5.54s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  66%|██████▌   | 132/200 [14:08<06:37,  5.85s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  66%|██████▋   | 133/200 [14:16<07:16,  6.51s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  67%|██████▋   | 134/200 [14:22<07:07,  6.48s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  68%|██████▊   | 135/200 [14:29<07:04,  6.52s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  68%|██████▊   | 136/200 [14:37<07:28,  7.01s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  68%|██████▊   | 137/200 [14:41<06:34,  6.27s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  69%|██████▉   | 138/200 [14:46<05:53,  5.71s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  70%|██████▉   | 139/200 [14:50<05:17,  5.20s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  70%|███████   | 140/200 [14:55<05:11,  5.19s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  70%|███████   | 141/200 [15:04<06:17,  6.40s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  71%|███████   | 142/200 [15:13<06:46,  7.01s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  72%|███████▏  | 143/200 [15:18<06:06,  6.44s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  72%|███████▏  | 144/200 [15:23<05:42,  6.11s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  72%|███████▎  | 145/200 [15:30<05:48,  6.34s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  73%|███████▎  | 146/200 [15:36<05:42,  6.35s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  74%|███████▎  | 147/200 [15:43<05:42,  6.46s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  74%|███████▍  | 148/200 [15:50<05:42,  6.59s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  74%|███████▍  | 149/200 [15:59<06:18,  7.42s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  75%|███████▌  | 150/200 [16:07<06:19,  7.58s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  76%|███████▌  | 151/200 [16:12<05:26,  6.66s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  76%|███████▌  | 152/200 [16:19<05:23,  6.75s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  76%|███████▋  | 153/200 [16:27<05:34,  7.12s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  77%|███████▋  | 154/200 [16:33<05:20,  6.96s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  78%|███████▊  | 155/200 [16:40<05:12,  6.95s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  78%|███████▊  | 156/200 [16:45<04:34,  6.23s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  78%|███████▊  | 157/200 [16:53<04:49,  6.73s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  79%|███████▉  | 158/200 [17:00<04:53,  6.98s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  80%|███████▉  | 159/200 [17:06<04:26,  6.51s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  80%|████████  | 160/200 [17:10<04:00,  6.02s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  80%|████████  | 161/200 [17:20<04:30,  6.94s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  81%|████████  | 162/200 [17:25<04:05,  6.45s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  82%|████████▏ | 163/200 [17:32<04:08,  6.72s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  82%|████████▏ | 164/200 [17:38<03:53,  6.49s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  82%|████████▎ | 165/200 [17:46<04:06,  7.03s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  83%|████████▎ | 166/200 [17:51<03:33,  6.28s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  84%|████████▎ | 167/200 [18:00<03:51,  7.01s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  84%|████████▍ | 168/200 [18:07<03:46,  7.07s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  84%|████████▍ | 169/200 [18:12<03:21,  6.49s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  85%|████████▌ | 170/200 [18:19<03:17,  6.58s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  86%|████████▌ | 171/200 [18:27<03:26,  7.13s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  86%|████████▌ | 172/200 [18:31<02:52,  6.15s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  86%|████████▋ | 173/200 [18:38<02:53,  6.41s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  87%|████████▋ | 174/200 [18:47<03:03,  7.05s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  88%|████████▊ | 175/200 [18:52<02:44,  6.57s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  88%|████████▊ | 176/200 [18:57<02:25,  6.06s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  88%|████████▊ | 177/200 [19:05<02:31,  6.59s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  89%|████████▉ | 178/200 [19:09<02:06,  5.76s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  90%|████████▉ | 179/200 [19:18<02:21,  6.74s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  90%|█████████ | 180/200 [19:23<02:04,  6.22s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  90%|█████████ | 181/200 [19:31<02:10,  6.89s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  91%|█████████ | 182/200 [19:36<01:53,  6.29s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  92%|█████████▏| 183/200 [19:43<01:51,  6.58s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  92%|█████████▏| 184/200 [19:48<01:35,  5.97s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  92%|█████████▎| 185/200 [19:53<01:24,  5.64s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  93%|█████████▎| 186/200 [20:00<01:26,  6.17s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  94%|█████████▎| 187/200 [20:09<01:29,  6.88s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  94%|█████████▍| 188/200 [20:15<01:20,  6.71s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  94%|█████████▍| 189/200 [20:20<01:08,  6.24s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  95%|█████████▌| 190/200 [20:28<01:06,  6.64s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  96%|█████████▌| 191/200 [20:33<00:56,  6.24s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  96%|█████████▌| 192/200 [20:41<00:55,  6.89s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  96%|█████████▋| 193/200 [20:47<00:46,  6.65s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  97%|█████████▋| 194/200 [20:54<00:39,  6.57s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  98%|█████████▊| 195/200 [20:58<00:29,  5.87s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  98%|█████████▊| 196/200 [21:06<00:26,  6.55s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  98%|█████████▊| 197/200 [21:14<00:20,  6.80s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum:  99%|█████████▉| 198/200 [21:23<00:15,  7.54s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum: 100%|█████████▉| 199/200 [21:29<00:07,  7.12s/it]The following generation flags are not valid and may be ignored: ['top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Setting `pad_token_id` to `eos_token_id`:128009 for open-end generation.
+Processing samsum: 100%|██████████| 200/200 [21:38<00:00,  7.63s/it]Processing samsum: 100%|██████████| 200/200 [21:38<00:00,  6.49s/it]
+Finished samsum -> /data/zxh/PiCoKV2/rebuttal/BPC/results/uv_retest/longbench_full/shards/gpc/samsum/samsum.jsonl

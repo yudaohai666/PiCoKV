@@ -1,0 +1,12 @@
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:00<00:02,  1.24it/s]Loading checkpoint shards:  50%|█████     | 2/4 [00:01<00:01,  1.20it/s]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:02<00:00,  1.28it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:02<00:00,  1.73it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:02<00:00,  1.51it/s]
+Token indices sequence length is longer than the specified maximum sequence length for this model (446286 > 131072). Running this sequence through the model will result in indexing errors
+The following generation flags are not valid and may be ignored: ['temperature', 'top_p']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+{
+  "finite_cache_and_outputs": true,
+  "all_layers_320_bits": true,
+  "decode_calls": 96,
+  "expected_decode_calls": 96,
+  "packed_vs_same_cache_dense_max_relative_l2": 0.07129774987697601,
+  "gross_error_threshold": 0.35,
+  "passed": true
+}

@@ -1,0 +1,987 @@
+{
+  "backend": "packed",
+  "control_implementation": "cuda",
+  "model": "/home/zxh/zxh/models/Llama-3.1-8B-Instruct",
+  "prompt_len": 32768,
+  "layers": 32,
+  "batch_size": 1,
+  "decode_tokens": 64,
+  "decode_warmup": 2,
+  "repeats": 5,
+  "profile_tokens": 8,
+  "gpu": "NVIDIA GeForce RTX 3090",
+  "input_sha256": "9204c15b18f2cfb5c99fa7c2be1f01cad51c128d18bc64eb8dc1860f6db84c5d",
+  "scope": "Attention after cache append: includes compressed query projection/quantization, unpack/reconstruction, retained dense attention and output fusion; excludes QKV projection/RoPE/cache append/model o_proj/MLP",
+  "cuda_events": {
+    "attention": {
+      "median_ms_per_token_all_layers": 4.472676939330995,
+      "repeat_mean_ms_per_token_all_layers": [
+        4.404042917536572,
+        4.433171421755105,
+        4.472676939330995,
+        4.559559451183304,
+        4.589360467391089
+      ],
+      "mean_ms_per_layer": 0.1397711543540936,
+      "per_layer_mean_ms": {
+        "0": 0.23234169860370457,
+        "1": 0.13721039770171045,
+        "2": 0.13784369812346994,
+        "3": 0.13793049831874668,
+        "4": 0.1380901978816837,
+        "5": 0.13748239823617042,
+        "6": 0.13769389800727366,
+        "7": 0.13773239790461958,
+        "8": 0.13847779841162264,
+        "9": 0.1376230982132256,
+        "10": 0.13749299789778888,
+        "11": 0.13836889802478253,
+        "12": 0.13735099802725018,
+        "13": 0.13678149785846472,
+        "14": 0.13668619776144625,
+        "15": 0.13772229827009141,
+        "16": 0.13740909812040628,
+        "17": 0.13721509817987682,
+        "18": 0.1369259981904179,
+        "19": 0.13723669829778373,
+        "20": 0.13704699794761838,
+        "21": 0.13713049804791808,
+        "22": 0.13717329795472324,
+        "23": 0.13732239827513695,
+        "24": 0.13736349805258213,
+        "25": 0.13706029830500482,
+        "26": 0.13747949860990047,
+        "27": 0.13710129796527326,
+        "28": 0.13723959825001658,
+        "29": 0.13692539767362177,
+        "30": 0.1374220982193947,
+        "31": 0.13688149810768663
+      },
+      "calls": 10240
+    },
+    "cache_append": {
+      "median_ms_per_token_all_layers": 0.5881590101926122,
+      "repeat_mean_ms_per_token_all_layers": [
+        0.5822270087664947,
+        0.5842995092680212,
+        0.5881590101926122,
+        0.5938075112935621,
+        0.5990475120488554
+      ],
+      "mean_ms_per_layer": 0.01837996906851913,
+      "per_layer_mean_ms": {
+        "0": 0.04407509994925931,
+        "1": 0.017549600347410887,
+        "2": 0.017768500343663618,
+        "3": 0.017578800325281918,
+        "4": 0.017575500323437153,
+        "5": 0.017620200337842108,
+        "6": 0.017562300350982697,
+        "7": 0.017610400327248497,
+        "8": 0.017661400325596332,
+        "9": 0.01757420030189678,
+        "10": 0.017586100357584657,
+        "11": 0.017648600338725375,
+        "12": 0.01758130031521432,
+        "13": 0.017613400350091978,
+        "14": 0.01758150033419952,
+        "15": 0.017604000330902637,
+        "16": 0.017582500353455544,
+        "17": 0.017588300333591177,
+        "18": 0.01755660032504238,
+        "19": 0.017574900318868457,
+        "20": 0.017581400339258833,
+        "21": 0.01756630035233684,
+        "22": 0.01759800033760257,
+        "23": 0.017616500332951545,
+        "24": 0.01760060031665489,
+        "25": 0.017565400328021497,
+        "26": 0.01760760034667328,
+        "27": 0.017613700352376326,
+        "28": 0.017569100332912056,
+        "29": 0.017572000343352556,
+        "30": 0.0175876003166195,
+        "31": 0.017536700324853882
+      },
+      "calls": 10240
+    }
+  },
+  "kernel_profile": {
+    "attention": {
+      "mean_kernel_ms_per_token_all_layers": 4.1246065000000005,
+      "median_kernel_ms_per_token_all_layers": 4.1247845000000005,
+      "per_token_kernel_ms_all_layers": {
+        "2": 4.136445999999999,
+        "3": 4.137441000000001,
+        "4": 4.125505,
+        "5": 4.1203140000000005,
+        "6": 4.119973000000001,
+        "7": 4.126232999999999,
+        "8": 4.124064000000001,
+        "9": 4.106876
+      },
+      "per_layer_mean_kernel_ms": {
+        "0": 0.129323875,
+        "1": 0.128256375,
+        "2": 0.12891987500000002,
+        "3": 0.13038024999999998,
+        "4": 0.130412125,
+        "5": 0.12957587499999998,
+        "6": 0.1280315,
+        "7": 0.12954387500000003,
+        "8": 0.12915975,
+        "9": 0.12901200000000002,
+        "10": 0.12866825,
+        "11": 0.130000375,
+        "12": 0.12753225,
+        "13": 0.127879875,
+        "14": 0.1290005,
+        "15": 0.12959987500000003,
+        "16": 0.128363375,
+        "17": 0.12832775000000002,
+        "18": 0.128092,
+        "19": 0.129332,
+        "20": 0.128135875,
+        "21": 0.128303375,
+        "22": 0.12827575000000002,
+        "23": 0.129572125,
+        "24": 0.128640125,
+        "25": 0.12736000000000003,
+        "26": 0.12922,
+        "27": 0.128832375,
+        "28": 0.12885575000000002,
+        "29": 0.12984775,
+        "30": 0.12889187500000002,
+        "31": 0.12925975
+      },
+      "kernels": [
+        {
+          "name": "void (anonymous namespace)::picokv_v1_expbits_atomic2_runtime_unrolled_kernel<4, true, 4, 0>(long const*, long const*, long const*, float const*, float const*, float*, float*, int, int, int, int, int, int, int, int, int, float, float)",
+          "count": 256,
+          "total_us": 19834.174,
+          "ms_per_token_all_layers": 2.4792717499999997
+        },
+        {
+          "name": "void (anonymous namespace)::picokv_fused_output_projection_kernel<__nv_bfloat16>(__nv_bfloat16 const*, float const*, float const*, __nv_bfloat16 const*, __nv_bfloat16*, int, int, int, int, int, int)",
+          "count": 256,
+          "total_us": 7259.233999999991,
+          "ms_per_token_all_layers": 0.9074042499999989
+        },
+        {
+          "name": "void pytorch_flash::flash_fwd_splitkv_kernel<pytorch_flash::Flash_fwd_kernel_traits<128, 64, 128, 4, false, false, cutlass::bfloat16_t, pytorch_flash::Flash_kernel_traits<128, 64, 128, 4, cutlass::bfloat16_t> >, false, false, false, false, true, true, false>(pytorch_flash::Flash_fwd_params)",
+          "count": 256,
+          "total_us": 2656.664999999999,
+          "ms_per_token_all_layers": 0.33208312499999987
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_nn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_nn_align8::Params)",
+          "count": 256,
+          "total_us": 1136.5750000000014,
+          "ms_per_token_all_layers": 0.14207187500000018
+        },
+        {
+          "name": "void (anonymous namespace)::picokv_quantize_pack_projected_query_kernel<__nv_bfloat16>(__nv_bfloat16 const*, long*, float*, int, int, int, int)",
+          "count": 256,
+          "total_us": 866.5330000000031,
+          "ms_per_token_all_layers": 0.10831662500000039
+        },
+        {
+          "name": "void pytorch_flash::flash_fwd_splitkv_combine_kernel<pytorch_flash::Flash_fwd_kernel_traits<128, 64, 128, 4, false, false, cutlass::bfloat16_t, pytorch_flash::Flash_kernel_traits<128, 64, 128, 4, cutlass::bfloat16_t> >, 4, 3, true>(pytorch_flash::Flash_fwd_params)",
+          "count": 256,
+          "total_us": 822.5290000000024,
+          "ms_per_token_all_layers": 0.1028161250000003
+        },
+        {
+          "name": "Memset (Device)",
+          "count": 512,
+          "total_us": 421.14200000000005,
+          "ms_per_token_all_layers": 0.05264275000000001
+        }
+      ],
+      "calls": 256
+    },
+    "cache_append": {
+      "mean_kernel_ms_per_token_all_layers": 0.43872000000000005,
+      "median_kernel_ms_per_token_all_layers": 0.4387195000000001,
+      "per_token_kernel_ms_all_layers": {
+        "2": 0.4399660000000001,
+        "3": 0.4388470000000001,
+        "4": 0.436668,
+        "5": 0.439138,
+        "6": 0.44048400000000004,
+        "7": 0.4385920000000001,
+        "8": 0.4385910000000002,
+        "9": 0.43747399999999986
+      },
+      "per_layer_mean_kernel_ms": {
+        "0": 0.013708,
+        "1": 0.013736,
+        "2": 0.013804,
+        "3": 0.013727875000000002,
+        "4": 0.013724,
+        "5": 0.013743875000000001,
+        "6": 0.013724125000000002,
+        "7": 0.013791875000000002,
+        "8": 0.013756,
+        "9": 0.013676,
+        "10": 0.013732000000000001,
+        "11": 0.01372025,
+        "12": 0.0137,
+        "13": 0.013720375,
+        "14": 0.013604000000000002,
+        "15": 0.013599875,
+        "16": 0.013680125000000001,
+        "17": 0.013616,
+        "18": 0.013651749999999999,
+        "19": 0.013744000000000001,
+        "20": 0.013672000000000002,
+        "21": 0.01363575,
+        "22": 0.013675625000000002,
+        "23": 0.013743875000000001,
+        "24": 0.013752125,
+        "25": 0.013708125,
+        "26": 0.013664125000000003,
+        "27": 0.013819999999999999,
+        "28": 0.013732125,
+        "29": 0.0137,
+        "30": 0.013768375,
+        "31": 0.01368775
+      },
+      "kernels": [
+        {
+          "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_contig<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 4, 128, 1>(at::native::(anonymous namespace)::OpaqueType<2u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+          "count": 512,
+          "total_us": 3509.759999999993,
+          "ms_per_token_all_layers": 0.4387199999999991
+        }
+      ],
+      "calls": 256
+    }
+  },
+  "instrumented_model_ms_per_token": 27.84582220192533,
+  "model_timing_note": "Includes event instrumentation overhead; use previous uninstrumented efficiency results for model throughput",
+  "event_timing_note": "Median of five repeat means (64 tokens x all layers); CUDA event interval may include host launch gaps; no synchronization within attention calls",
+  "kernel_timing_note": "Separate warmed profiler pass; actual CUDA kernel/memory durations matched by runtime launch correlation and CPU scope timestamps; excludes host gaps and avoids ATen parent/child attribution errors for custom extensions",
+  "first_measured_token_shapes_by_layer": {
+    "0": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "1": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "2": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "3": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "4": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "5": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "6": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "7": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "8": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "9": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "10": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "11": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "12": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "13": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "14": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "15": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "16": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "17": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "18": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "19": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "20": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "21": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "22": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "23": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "24": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "25": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "26": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "27": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "28": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "29": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "30": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "31": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    }
+  },
+  "source_sha256": {
+    "rebuttal/measure_attention.py": "e8696cbe4c5c0000d8691ab30fc6d1571d43e339e040954126393ae217a8230d",
+    "picokv/picokv_standalone/decode.py": "020c3ff30efbda291769d3c881f5a826e95f5a3a440741abde2fbe3ed43379c3",
+    "picokv/picokv_cuda_extension/cuda_kernel.cu": "6a56efd89ab34e225acd79be993d1a14ca6d0fa2998866992f3c25bbf6486bcf",
+    "rebuttal/reconstruct_cuda_attention.py": "7b64d116b69d993c891ac4cedf69c6bf497dbf24f0268ea56de3710fadb9d15b",
+    "rebuttal/unpacked_kernel_attention.py": "89e197dbecaaf176bb98b88a36bccd243278217765ca0e3b1e1111d622374b03",
+    "benchmarks/Efficiency/run_efficiency.py": "0b558489c326507b6d5b24be7ac9c64317c17919cf88c80c3e35305791ae02fa",
+    "rebuttal/cuda_attention.py": "ba2d38eec7e4e0c782556b30b8f8b8fd328dfe9162621e6fc1cb4902fd823570",
+    "rebuttal/cuda/attention.cu": "b311cf2fe0cf860a6cdd1916710eca4fc7362e6616e43abbeb7f2cfca20eddd8",
+    "rebuttal/cuda/attention.cpp": "04eb6513125f17063bf09c84e1d6648498be948f4703eacc8a0918a6a30f060b",
+    "rebuttal/cuda/attention_ptx.cuh": "91edb1904ec6bbd2cc82d16420424979c8767b3251242b1b54d6772f0722b60c",
+    "rebuttal/reconstruct_cuda_attention_triton.py": "929ceb5d9086e14da61f8dcc16521204d626327c6d68d5f6c609b3593c4b34ec",
+    "rebuttal/unpacked_kernel_attention_triton.py": "fad47664bc21b96f9c617c1c43abd71e3a5968ff298b3906dfefbfdfeb39b12b"
+  },
+  "sources_unchanged_during_measurement": true,
+  "elapsed_seconds": 237.66660976409912
+}

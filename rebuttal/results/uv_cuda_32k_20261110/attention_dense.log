@@ -1,0 +1,15 @@
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:00<00:02,  1.18it/s]Loading checkpoint shards:  50%|█████     | 2/4 [00:01<00:01,  1.14it/s]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:02<00:00,  1.24it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:02<00:00,  1.67it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:02<00:00,  1.45it/s]
+Token indices sequence length is longer than the specified maximum sequence length for this model (446286 > 131072). Running this sequence through the model will result in indexing errors
+[dense] prefill 1
+[dense] prefill 2
+[dense] prefill 3
+[dense] prefill 4
+[dense] prefill 5
+[dense] prefill 6
+{
+  "backend": "dense",
+  "attention_event_ms": 6.178935564821586,
+  "attention_kernel_ms": 6.11721975,
+  "cache_append_kernel_ms": 12.875580750000001,
+  "output": "rebuttal/results/uv_cuda_32k_20261110/attention_dense.json"
+}

@@ -1,0 +1,311 @@
+{
+  "status": "completed",
+  "started_at": "2026-11-10T18:01:23.755462+08:00",
+  "args": {
+    "model": "/home/zxh/zxh/models/Llama-3.1-8B-Instruct",
+    "dataset": "/data/zxh/PiCoKV2/benchmarks/Efficiency/datasets/PaulGrahamEssays.jsonl",
+    "length": 16384,
+    "warmup": 2,
+    "repeats": 5,
+    "output": "rebuttal/BPC/results/uv_retest/single_layer/length_16384.json"
+  },
+  "physical_gpu": "0",
+  "gpu": "NVIDIA GeForce RTX 3090",
+  "torch": "2.6.0+cu124",
+  "git_head": "4a16afab6a434bd3956826e840467aa009e4418b",
+  "source_sha256": {
+    "rebuttal/BPC/single_layer_prefill.py": "9f39856aa82fef3bb6a0df48482d70c2e858e1c2f3b2c3888ed50658d83bb467",
+    "rebuttal/BPC/encoding.py": "a8ca10ef0cf3bdd8b8c8a440ef26256e6323538141546eed75cd003d23cba7cf",
+    "picokv/picokv_standalone/online.py": "24edc1cb3d75048449431cb4244fbabab9ff4b6a821e52a1ce4e7bef0193b59b",
+    "picokv/picokv_standalone/prepare.py": "f9f8fef2a6b4d14c28376ca31a3894e9f12c0f31e182967eb055333dead8572f",
+    "picokv/picokv_standalone/transformers.py": "819ef05c6b41b76797fd129ccd401b9bb6128097da862b733a779640381f8a37",
+    "src/BPC/bpc/bpc/bpc_pytorch.py": "1c9a43483d0d3a7d9d93d3699b22b84b0d6a5a7753d4063591371416e5834d7e"
+  },
+  "prepare_config": {
+    "key_bits": 320,
+    "value_bits": 320,
+    "direction_sample_size": 8192,
+    "sink_size": 64,
+    "local_size": 256,
+    "eas": 0.01,
+    "zerorope": 20,
+    "exp_bits": 4,
+    "seed": 0,
+    "use_fused_quant": true
+  },
+  "timing_scope": "one complete production attention-module prefill forward: QKV projections, RoPE application, online KV prepare, exact causal FlashAttention, output projection",
+  "excluded": "model loading, tokenization, embeddings, input RMSNorm, RoPE cos/sin construction, MLP, other layers, LM head, cleanup, validation",
+  "measurement": "synchronized wall clock plus CUDA events; GPC/BPC alternate order on the same GPU; native per-layer CUDA events for prepare; separate events for exact attention",
+  "warmup": {
+    "gpc": [
+      {
+        "prefill_wall_ms": 459.7793468274176,
+        "prefill_cuda_ms": 459.7268371582031,
+        "prepare_cuda_ms": 301.275146484375,
+        "exact_attention_cuda_ms": 35.86048126220703,
+        "peak_allocated_gib": 0.7813720703125,
+        "incremental_peak_gib": 0.5625,
+        "cache_gib": 0.0136566162109375,
+        "global_len": 15744,
+        "dense_len": 640,
+        "finite_outputs_and_projections": true,
+        "sampled_prefill_output_matches": true
+      },
+      {
+        "prefill_wall_ms": 77.23624492064118,
+        "prefill_cuda_ms": 77.1942367553711,
+        "prepare_cuda_ms": 27.325439453125,
+        "exact_attention_cuda_ms": 28.917760848999023,
+        "peak_allocated_gib": 0.7912979125976562,
+        "incremental_peak_gib": 0.5625,
+        "cache_gib": 0.0136566162109375,
+        "global_len": 15744,
+        "dense_len": 640,
+        "finite_outputs_and_projections": true,
+        "sampled_prefill_output_matches": true
+      }
+    ],
+    "binarypc": [
+      {
+        "prefill_wall_ms": 579.3839762918651,
+        "prefill_cuda_ms": 579.330078125,
+        "prepare_cuda_ms": 525.9888916015625,
+        "exact_attention_cuda_ms": 30.851072311401367,
+        "peak_allocated_gib": 0.7912979125976562,
+        "incremental_peak_gib": 0.5625,
+        "cache_gib": 0.0136566162109375,
+        "global_len": 15744,
+        "dense_len": 640,
+        "finite_outputs_and_projections": true,
+        "sampled_prefill_output_matches": true
+      },
+      {
+        "prefill_wall_ms": 562.2405270114541,
+        "prefill_cuda_ms": 562.1875610351562,
+        "prepare_cuda_ms": 510.40972900390625,
+        "exact_attention_cuda_ms": 30.895103454589844,
+        "peak_allocated_gib": 0.7912979125976562,
+        "incremental_peak_gib": 0.5625,
+        "cache_gib": 0.0136566162109375,
+        "global_len": 15744,
+        "dense_len": 640,
+        "finite_outputs_and_projections": true,
+        "sampled_prefill_output_matches": true
+      }
+    ]
+  },
+  "samples": {
+    "gpc": [
+      {
+        "prefill_wall_ms": 77.81983399763703,
+        "prefill_cuda_ms": 77.78675079345703,
+        "prepare_cuda_ms": 27.468799591064453,
+        "exact_attention_cuda_ms": 29.197311401367188,
+        "peak_allocated_gib": 0.7912979125976562,
+        "incremental_peak_gib": 0.5625,
+        "cache_gib": 0.0136566162109375,
+        "global_len": 15744,
+        "dense_len": 640,
+        "finite_outputs_and_projections": true,
+        "sampled_prefill_output_matches": true
+      },
+      {
+        "prefill_wall_ms": 77.29281904175878,
+        "prefill_cuda_ms": 77.25615692138672,
+        "prepare_cuda_ms": 27.695104598999023,
+        "exact_attention_cuda_ms": 29.037567138671875,
+        "peak_allocated_gib": 0.7912979125976562,
+        "incremental_peak_gib": 0.5625,
+        "cache_gib": 0.0136566162109375,
+        "global_len": 15744,
+        "dense_len": 640,
+        "finite_outputs_and_projections": true,
+        "sampled_prefill_output_matches": true
+      },
+      {
+        "prefill_wall_ms": 77.74664182215929,
+        "prefill_cuda_ms": 77.70915222167969,
+        "prepare_cuda_ms": 27.460607528686523,
+        "exact_attention_cuda_ms": 29.394943237304688,
+        "peak_allocated_gib": 0.7912979125976562,
+        "incremental_peak_gib": 0.5625,
+        "cache_gib": 0.0136566162109375,
+        "global_len": 15744,
+        "dense_len": 640,
+        "finite_outputs_and_projections": true,
+        "sampled_prefill_output_matches": true
+      },
+      {
+        "prefill_wall_ms": 110.9200268983841,
+        "prefill_cuda_ms": 110.88617706298828,
+        "prepare_cuda_ms": 61.37446212768555,
+        "exact_attention_cuda_ms": 29.130752563476562,
+        "peak_allocated_gib": 0.7912979125976562,
+        "incremental_peak_gib": 0.5625,
+        "cache_gib": 0.0136566162109375,
+        "global_len": 15744,
+        "dense_len": 640,
+        "finite_outputs_and_projections": true,
+        "sampled_prefill_output_matches": true
+      },
+      {
+        "prefill_wall_ms": 78.24323931708932,
+        "prefill_cuda_ms": 78.19574737548828,
+        "prepare_cuda_ms": 27.917312622070312,
+        "exact_attention_cuda_ms": 29.0119686126709,
+        "peak_allocated_gib": 0.7912979125976562,
+        "incremental_peak_gib": 0.5625,
+        "cache_gib": 0.0136566162109375,
+        "global_len": 15744,
+        "dense_len": 640,
+        "finite_outputs_and_projections": true,
+        "sampled_prefill_output_matches": true
+      }
+    ],
+    "binarypc": [
+      {
+        "prefill_wall_ms": 562.6109018921852,
+        "prefill_cuda_ms": 562.5488891601562,
+        "prepare_cuda_ms": 510.7026062011719,
+        "exact_attention_cuda_ms": 31.021055221557617,
+        "peak_allocated_gib": 0.7912979125976562,
+        "incremental_peak_gib": 0.5625,
+        "cache_gib": 0.0136566162109375,
+        "global_len": 15744,
+        "dense_len": 640,
+        "finite_outputs_and_projections": true,
+        "sampled_prefill_output_matches": true
+      },
+      {
+        "prefill_wall_ms": 562.5427309423685,
+        "prefill_cuda_ms": 562.4849853515625,
+        "prepare_cuda_ms": 510.6504211425781,
+        "exact_attention_cuda_ms": 31.005695343017578,
+        "peak_allocated_gib": 0.7912979125976562,
+        "incremental_peak_gib": 0.5625,
+        "cache_gib": 0.0136566162109375,
+        "global_len": 15744,
+        "dense_len": 640,
+        "finite_outputs_and_projections": true,
+        "sampled_prefill_output_matches": true
+      },
+      {
+        "prefill_wall_ms": 561.9915807619691,
+        "prefill_cuda_ms": 561.942626953125,
+        "prepare_cuda_ms": 510.0339660644531,
+        "exact_attention_cuda_ms": 31.02003288269043,
+        "peak_allocated_gib": 0.7912979125976562,
+        "incremental_peak_gib": 0.5625,
+        "cache_gib": 0.0136566162109375,
+        "global_len": 15744,
+        "dense_len": 640,
+        "finite_outputs_and_projections": true,
+        "sampled_prefill_output_matches": true
+      },
+      {
+        "prefill_wall_ms": 567.2818212769926,
+        "prefill_cuda_ms": 567.234130859375,
+        "prepare_cuda_ms": 514.0991821289062,
+        "exact_attention_cuda_ms": 31.112192153930664,
+        "peak_allocated_gib": 0.7912979125976562,
+        "incremental_peak_gib": 0.5625,
+        "cache_gib": 0.0136566162109375,
+        "global_len": 15744,
+        "dense_len": 640,
+        "finite_outputs_and_projections": true,
+        "sampled_prefill_output_matches": true
+      },
+      {
+        "prefill_wall_ms": 562.6883087679744,
+        "prefill_cuda_ms": 562.6359252929688,
+        "prepare_cuda_ms": 510.3984680175781,
+        "exact_attention_cuda_ms": 31.303680419921875,
+        "peak_allocated_gib": 0.7912979125976562,
+        "incremental_peak_gib": 0.5625,
+        "cache_gib": 0.0136566162109375,
+        "global_len": 15744,
+        "dense_len": 640,
+        "finite_outputs_and_projections": true,
+        "sampled_prefill_output_matches": true
+      }
+    ]
+  },
+  "inputs": {
+    "token_ids_sha256": "0ae7cc0b20fffac9670a43e730bf9feb8d1f6c8b545ba167a5d658760ae69a26",
+    "normalized_hidden_shape": [
+      1,
+      16384,
+      4096
+    ],
+    "query_heads": 32,
+    "kv_heads": 8,
+    "head_dim": 128,
+    "layer_index": 0,
+    "input": "PG real-text prefix, exact layer-0 normalized embeddings",
+    "model_max_position_embeddings": 131072,
+    "beyond_model_context": false
+  },
+  "baseline_allocated_gib": 0.2188720703125,
+  "summary": {
+    "gpc": {
+      "prefill_wall_ms_median": 77.81983399763703,
+      "prefill_wall_ms_min_max": [
+        77.29281904175878,
+        110.9200268983841
+      ],
+      "prefill_cuda_ms_median": 77.78675079345703,
+      "prefill_cuda_ms_min_max": [
+        77.25615692138672,
+        110.88617706298828
+      ],
+      "prepare_cuda_ms_median": 27.695104598999023,
+      "prepare_cuda_ms_min_max": [
+        27.460607528686523,
+        61.37446212768555
+      ],
+      "exact_attention_cuda_ms_median": 29.130752563476562,
+      "exact_attention_cuda_ms_min_max": [
+        29.0119686126709,
+        29.394943237304688
+      ],
+      "cache_gib_median": 0.0136566162109375,
+      "cache_gib_min_max": [
+        0.0136566162109375,
+        0.0136566162109375
+      ],
+      "peak_allocated_gib_max": 0.7912979125976562,
+      "incremental_peak_gib_max": 0.5625
+    },
+    "binarypc": {
+      "prefill_wall_ms_median": 562.6109018921852,
+      "prefill_wall_ms_min_max": [
+        561.9915807619691,
+        567.2818212769926
+      ],
+      "prefill_cuda_ms_median": 562.5488891601562,
+      "prefill_cuda_ms_min_max": [
+        561.942626953125,
+        567.234130859375
+      ],
+      "prepare_cuda_ms_median": 510.6504211425781,
+      "prepare_cuda_ms_min_max": [
+        510.0339660644531,
+        514.0991821289062
+      ],
+      "exact_attention_cuda_ms_median": 31.021055221557617,
+      "exact_attention_cuda_ms_min_max": [
+        31.005695343017578,
+        31.303680419921875
+      ],
+      "cache_gib_median": 0.0136566162109375,
+      "cache_gib_min_max": [
+        0.0136566162109375,
+        0.0136566162109375
+      ],
+      "peak_allocated_gib_max": 0.7912979125976562,
+      "incremental_peak_gib_max": 0.5625
+    }
+  },
+  "source_unchanged": true,
+  "finished_at": "2026-11-10T18:01:34.689001+08:00"
+}

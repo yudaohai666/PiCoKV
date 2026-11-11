@@ -1,0 +1,8 @@
+starting attention dense
+finished attention dense 6.11721975
+starting attention packed
+finished attention packed 4.1246065000000005
+starting attention unpacked_fused
+finished attention unpacked_fused 6.62569475
+starting attention reconstruct_cuda
+finished attention reconstruct_cuda 25.088843875

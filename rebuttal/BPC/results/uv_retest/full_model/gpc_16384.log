@@ -1,0 +1,4 @@
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:00<00:02,  1.02it/s]Loading checkpoint shards:  50%|█████     | 2/4 [00:01<00:02,  1.00s/it]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:02<00:00,  1.07it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:03<00:00,  1.53it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:03<00:00,  1.30it/s]
+Token indices sequence length is longer than the specified maximum sequence length for this model (446286 > 131072). Running this sequence through the model will result in indexing errors
+[picokv] L=16384: prefill=5399.907ms  decode=26.9341ms/tok (37.13 tok/s)  peak=16.647/15.433GB  kv=0.437/0.445GB
+[saved] rebuttal/BPC/results/uv_retest/full_model/gpc_16384.json

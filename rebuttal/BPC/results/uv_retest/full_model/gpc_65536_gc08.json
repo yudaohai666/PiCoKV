@@ -1,0 +1,28 @@
+{
+  "method": "picokv",
+  "tag": "picokv_k320_v320_coding_gpc",
+  "model": "/home/zxh/zxh/models/Llama-3.1-8B-Instruct",
+  "batch_size": 1,
+  "decode_tokens": 64,
+  "config": {
+    "k_bits": 320,
+    "v_bits": 320,
+    "group_size": 32,
+    "residual_length": 32,
+    "exp_bits": 4,
+    "eas": 0.01,
+    "zerorope": 20
+  },
+  "results": {
+    "65536": {
+      "prompt_len": 65536,
+      "prefill_ms": 34391.812,
+      "decode_ms_per_token": 30.5644,
+      "decode_toks_per_s": 32.72,
+      "prefill_peak_gb": 20.187,
+      "decode_peak_gb": 16.468,
+      "prefill_kv_gb": 1.476,
+      "decode_kv_gb": 1.484
+    }
+  }
+}

@@ -1,0 +1,15 @@
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:00<00:02,  1.06it/s]Loading checkpoint shards:  50%|█████     | 2/4 [00:01<00:01,  1.02it/s]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:02<00:00,  1.08it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:03<00:00,  1.54it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:03<00:00,  1.32it/s]
+Token indices sequence length is longer than the specified maximum sequence length for this model (446286 > 131072). Running this sequence through the model will result in indexing errors
+[unpacked_fused] prefill 1
+[unpacked_fused] prefill 2
+[unpacked_fused] prefill 3
+[unpacked_fused] prefill 4
+[unpacked_fused] prefill 5
+[unpacked_fused] prefill 6
+{
+  "backend": "unpacked_fused",
+  "attention_event_ms": 7.233545920113102,
+  "attention_kernel_ms": 6.62569475,
+  "cache_append_kernel_ms": 0.442368125,
+  "output": "rebuttal/results/uv_cuda_32k_20261110/attention_unpacked_fused.json"
+}

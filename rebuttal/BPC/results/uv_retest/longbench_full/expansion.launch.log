@@ -1,0 +1,23 @@
+2026-11-11T00:17:00.480340+08:00 START binarypc/samsum GPU 0
+2026-11-11T00:17:00.483535+08:00 START binarypc/qasper GPU 1
+2026-11-11T00:17:00.486958+08:00 START binarypc/passage_count GPU 2
+2026-11-11T00:17:00.489082+08:00 START binarypc/musique GPU 3
+2026-11-11T00:27:05.570609+08:00 ADOPTED COMPLETED binarypc/repobench-p
+2026-11-11T00:27:05.571013+08:00 START binarypc/trec GPU 4
+2026-11-11T00:52:57.793635+08:00 COMPLETED binarypc/qasper
+2026-11-11T00:52:57.795276+08:00 START binarypc/passage_retrieval_en GPU 1
+2026-11-11T01:10:00.758666+08:00 ADOPTED COMPLETED binarypc/lcc
+2026-11-11T01:10:00.759175+08:00 START binarypc/hotpotqa GPU 5
+2026-11-11T01:10:05.845514+08:00 COMPLETED binarypc/trec
+2026-11-11T01:10:05.846009+08:00 START binarypc/triviaqa GPU 4
+2026-11-11T01:14:05.077939+08:00 COMPLETED binarypc/samsum
+2026-11-11T01:14:05.079643+08:00 START binarypc/multifieldqa_en GPU 0
+2026-11-11T01:24:19.216007+08:00 COMPLETED binarypc/passage_count
+2026-11-11T01:24:19.217683+08:00 START binarypc/2wikimqa GPU 2
+2026-11-11T01:29:32.518369+08:00 COMPLETED binarypc/musique
+2026-11-11T01:44:13.274341+08:00 COMPLETED binarypc/multifieldqa_en
+2026-11-11T01:49:52.829350+08:00 COMPLETED binarypc/passage_retrieval_en
+2026-11-11T02:05:35.150522+08:00 COMPLETED binarypc/2wikimqa
+2026-11-11T02:07:56.865434+08:00 COMPLETED binarypc/triviaqa
+2026-11-11T02:10:14.345162+08:00 COMPLETED binarypc/hotpotqa
+2026-11-11T02:11:58.226103+08:00 ALL COMPLETED {"scope": "16 tasks, all samples per task", "samples_per_encoding": 3750, "dense": {"musique": 33.06, "passage_retrieval_en": 99.5, "qasper": 44.5, "multifieldqa_en": 55.56, "lcc": 63.21, "trec": 72.5, "narrativeqa": 28.76, "passage_count": 11.1, "samsum": 43.88, "2wikimqa": 49.16, "hotpotqa": 57.86, "repobench-p": 56.57, "multi_news": 27.04, "triviaqa": 91.65, "qmsum": 25.53, "gov_report": 34.54, "avg": 49.65}, "gpc": {"musique": 33.08, "passage_retrieval_en": 100.0, "qasper": 43.99, "multifieldqa_en": 55.86, "lcc": 63.33, "trec": 72.5, "narrativeqa": 29.66, "passage_count": 10.25, "samsum": 43.95, "2wikimqa": 48.89, "hotpotqa": 58.11, "repobench-p": 56.97, "multi_news": 26.71, "triviaqa": 92.33, "qmsum": 24.8, "gov_report": 33.27, "avg": 49.61}, "binarypc": {"musique": 33.2, "passage_retrieval_en": 100.0, "qasper": 43.66, "multifieldqa_en": 56.18, "lcc": 62.96, "trec": 72.5, "narrativeqa": 30.02, "passage_count": 10.35, "samsum": 43.73, "2wikimqa": 50.28, "hotpotqa": 57.61, "repobench-p": 56.7, "multi_news": 26.64, "triviaqa": 92.05, "qmsum": 25.32, "gov_report": 33.48, "avg": 49.67}, "delta_binarypc_minus_gpc": {"gov_report": 0.21, "repobench-p": -0.27, "triviaqa": -0.28, "lcc": -0.37, "qasper": -0.33, "multifieldqa_en": 0.32, "narrativeqa": 0.36, "hotpotqa": -0.5, "2wikimqa": 1.39, "musique": 0.12, "qmsum": 0.52, "trec": 0.0, "samsum": -0.22, "passage_count": 0.1, "passage_retrieval_en": 0.0, "multi_news": -0.07, "avg": 0.06}, "sample_order_verified": true, "source_hashes_unchanged": true}

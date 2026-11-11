@@ -1,0 +1,981 @@
+{
+  "backend": "unpacked_fused",
+  "control_implementation": "cuda",
+  "model": "/home/zxh/zxh/models/Llama-3.1-8B-Instruct",
+  "prompt_len": 32768,
+  "layers": 32,
+  "batch_size": 1,
+  "decode_tokens": 64,
+  "decode_warmup": 2,
+  "repeats": 5,
+  "profile_tokens": 8,
+  "gpu": "NVIDIA GeForce RTX 3090",
+  "input_sha256": "9204c15b18f2cfb5c99fa7c2be1f01cad51c128d18bc64eb8dc1860f6db84c5d",
+  "scope": "Attention after cache append: includes compressed query projection/quantization, unpack/reconstruction, retained dense attention and output fusion; excludes QKV projection/RoPE/cache append/model o_proj/MLP",
+  "cuda_events": {
+    "attention": {
+      "median_ms_per_token_all_layers": 7.233545920113102,
+      "repeat_mean_ms_per_token_all_layers": [
+        6.998540530214086,
+        7.148229016922414,
+        7.246779968263581,
+        7.243605914758518,
+        7.233545920113102
+      ],
+      "mean_ms_per_layer": 0.22604831000353443,
+      "per_layer_mean_ms": {
+        "0": 0.32359879920259116,
+        "1": 0.22229759907349944,
+        "2": 0.22130019864998757,
+        "3": 0.21802029986865817,
+        "4": 0.2213140989188105,
+        "5": 0.22784739867784082,
+        "6": 0.2210214989259839,
+        "7": 0.22290719947777687,
+        "8": 0.2235730986110866,
+        "9": 0.2274765984620899,
+        "10": 0.2228587983176112,
+        "11": 0.21841049967333676,
+        "12": 0.21827379921451212,
+        "13": 0.22062309850007294,
+        "14": 0.21816419963724912,
+        "15": 0.21812549945898355,
+        "16": 0.22502629798837007,
+        "17": 0.21920459917746485,
+        "18": 0.21797559959813953,
+        "19": 0.2261843981221318,
+        "20": 0.2197447989601642,
+        "21": 0.219038099097088,
+        "22": 0.22149919900111853,
+        "23": 0.22046539983712138,
+        "24": 0.2244334983639419,
+        "25": 0.22036899952217937,
+        "26": 0.21850949940271674,
+        "27": 0.21943749939091503,
+        "28": 0.21795279965735972,
+        "29": 0.21963389907032252,
+        "30": 0.22080439906567334,
+        "31": 0.21804859912954272
+      },
+      "calls": 10240
+    },
+    "cache_append": {
+      "median_ms_per_token_all_layers": 0.6169715129653923,
+      "repeat_mean_ms_per_token_all_layers": [
+        0.589485010394128,
+        0.6169715129653923,
+        0.6185975106491242,
+        0.613169011689024,
+        0.6170005050662439
+      ],
+      "mean_ms_per_layer": 0.01928035978016851,
+      "per_layer_mean_ms": {
+        "0": 0.04402149977395311,
+        "1": 0.01826910037198104,
+        "2": 0.01827930034487508,
+        "3": 0.018061800324358047,
+        "4": 0.01802030035178177,
+        "5": 0.018935000372584908,
+        "6": 0.01906950034899637,
+        "7": 0.018815100321080535,
+        "8": 0.018900700320955366,
+        "9": 0.01883030034368858,
+        "10": 0.018874200334539636,
+        "11": 0.018068100343225525,
+        "12": 0.018048200325574727,
+        "13": 0.018014400330139325,
+        "14": 0.01797540034749545,
+        "15": 0.017990800325060265,
+        "16": 0.018010600347770377,
+        "17": 0.018024200305808334,
+        "18": 0.01799770034849644,
+        "19": 0.018026900320546702,
+        "20": 0.018071900348877533,
+        "21": 0.01804260032949969,
+        "22": 0.01842750032665208,
+        "23": 0.01889840030344203,
+        "24": 0.018519600346917287,
+        "25": 0.018448800296755507,
+        "26": 0.018131800350965933,
+        "27": 0.0181233003269881,
+        "28": 0.01801160034374334,
+        "29": 0.01801420032279566,
+        "30": 0.01811370030627586,
+        "31": 0.01800820034695789
+      },
+      "calls": 10240
+    }
+  },
+  "kernel_profile": {
+    "attention": {
+      "mean_kernel_ms_per_token_all_layers": 6.62569475,
+      "median_kernel_ms_per_token_all_layers": 6.617007000000001,
+      "per_token_kernel_ms_all_layers": {
+        "2": 6.621569999999999,
+        "3": 6.616288000000002,
+        "4": 6.612639,
+        "5": 6.6124909999999995,
+        "6": 6.612132,
+        "7": 6.617726,
+        "8": 6.657537999999999,
+        "9": 6.655174
+      },
+      "per_layer_mean_kernel_ms": {
+        "0": 0.20714375,
+        "1": 0.20884075000000002,
+        "2": 0.20604424999999998,
+        "3": 0.20784037499999997,
+        "4": 0.205724125,
+        "5": 0.207808875,
+        "6": 0.205168,
+        "7": 0.206916,
+        "8": 0.20758374999999998,
+        "9": 0.20507974999999998,
+        "10": 0.205196,
+        "11": 0.21303187499999998,
+        "12": 0.2072405,
+        "13": 0.20773187499999998,
+        "14": 0.20531575,
+        "15": 0.20549137500000003,
+        "16": 0.21013199999999999,
+        "17": 0.205544375,
+        "18": 0.205552,
+        "19": 0.20876774999999997,
+        "20": 0.20705624999999997,
+        "21": 0.20516800000000002,
+        "22": 0.206195875,
+        "23": 0.2053435,
+        "24": 0.205217,
+        "25": 0.210984125,
+        "26": 0.20522849999999998,
+        "27": 0.20758387500000003,
+        "28": 0.21136787499999998,
+        "29": 0.20507600000000004,
+        "30": 0.20665574999999997,
+        "31": 0.20766487499999997
+      },
+      "kernels": [
+        {
+          "name": "void (anonymous namespace)::unpacked_bf16_attention_kernel_ptx<128, 8, 1, 320>(__nv_bfloat16 const*, unsigned long const*, unsigned long const*, float const*, float*, float*, int, int, int, float)",
+          "count": 256,
+          "total_us": 40661.780000000035,
+          "ms_per_token_all_layers": 5.0827225000000045
+        },
+        {
+          "name": "void (anonymous namespace)::picokv_fused_output_projection_kernel<__nv_bfloat16>(__nv_bfloat16 const*, float const*, float const*, __nv_bfloat16 const*, __nv_bfloat16*, int, int, int, int, int, int)",
+          "count": 256,
+          "total_us": 7155.967,
+          "ms_per_token_all_layers": 0.8944958749999999
+        },
+        {
+          "name": "void pytorch_flash::flash_fwd_splitkv_kernel<pytorch_flash::Flash_fwd_kernel_traits<128, 64, 128, 4, false, false, cutlass::bfloat16_t, pytorch_flash::Flash_kernel_traits<128, 64, 128, 4, cutlass::bfloat16_t> >, false, false, false, false, true, true, false>(pytorch_flash::Flash_fwd_params)",
+          "count": 256,
+          "total_us": 2680.643999999999,
+          "ms_per_token_all_layers": 0.33508049999999984
+        },
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_nn_align8>(cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x2_nn_align8::Params)",
+          "count": 256,
+          "total_us": 1149.7639999999992,
+          "ms_per_token_all_layers": 0.1437204999999999
+        },
+        {
+          "name": "void pytorch_flash::flash_fwd_splitkv_combine_kernel<pytorch_flash::Flash_fwd_kernel_traits<128, 64, 128, 4, false, false, cutlass::bfloat16_t, pytorch_flash::Flash_kernel_traits<128, 64, 128, 4, cutlass::bfloat16_t> >, 4, 3, true>(pytorch_flash::Flash_fwd_params)",
+          "count": 256,
+          "total_us": 833.215000000002,
+          "ms_per_token_all_layers": 0.10415187500000024
+        },
+        {
+          "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >(int, at::native::FillFunctor<float>, std::array<char*, 1ul>)",
+          "count": 512,
+          "total_us": 524.188,
+          "ms_per_token_all_layers": 0.0655235
+        }
+      ],
+      "calls": 256
+    },
+    "cache_append": {
+      "mean_kernel_ms_per_token_all_layers": 0.442368125,
+      "median_kernel_ms_per_token_all_layers": 0.4424,
+      "per_token_kernel_ms_all_layers": {
+        "2": 0.44086099999999995,
+        "3": 0.44243000000000005,
+        "4": 0.4430759999999999,
+        "5": 0.4399060000000001,
+        "6": 0.44237000000000004,
+        "7": 0.4419240000000001,
+        "8": 0.44371000000000005,
+        "9": 0.4446679999999999
+      },
+      "per_layer_mean_kernel_ms": {
+        "0": 0.013892125000000002,
+        "1": 0.013808,
+        "2": 0.013879999999999998,
+        "3": 0.01393175,
+        "4": 0.013867875000000002,
+        "5": 0.013892125,
+        "6": 0.013812000000000001,
+        "7": 0.013852125,
+        "8": 0.013916125,
+        "9": 0.013788,
+        "10": 0.013884,
+        "11": 0.013828124999999998,
+        "12": 0.0138555,
+        "13": 0.013792124999999999,
+        "14": 0.013763875000000002,
+        "15": 0.01382775,
+        "16": 0.013752125000000002,
+        "17": 0.013688,
+        "18": 0.013807999999999999,
+        "19": 0.013795875,
+        "20": 0.013816,
+        "21": 0.013787999999999998,
+        "22": 0.013800125,
+        "23": 0.013788124999999998,
+        "24": 0.013812,
+        "25": 0.013860125000000001,
+        "26": 0.013747875000000001,
+        "27": 0.013788,
+        "28": 0.013952125000000001,
+        "29": 0.013760000000000001,
+        "30": 0.01378425,
+        "31": 0.013836000000000001
+      },
+      "kernels": [
+        {
+          "name": "void at::native::(anonymous namespace)::CatArrayBatchedCopy_contig<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 4, 128, 1>(at::native::(anonymous namespace)::OpaqueType<2u>*, at::native::(anonymous namespace)::CatArrInputTensorMetadata<at::native::(anonymous namespace)::OpaqueType<2u>, unsigned int, 128, 1>, at::native::(anonymous namespace)::TensorSizeStride<unsigned int, 4u>, int, unsigned int)",
+          "count": 512,
+          "total_us": 3538.9449999999924,
+          "ms_per_token_all_layers": 0.44236812499999906
+        }
+      ],
+      "calls": 256
+    }
+  },
+  "instrumented_model_ms_per_token": 30.976412766904105,
+  "model_timing_note": "Includes event instrumentation overhead; use previous uninstrumented efficiency results for model throughput",
+  "event_timing_note": "Median of five repeat means (64 tokens x all layers); CUDA event interval may include host launch gaps; no synchronization within attention calls",
+  "kernel_timing_note": "Separate warmed profiler pass; actual CUDA kernel/memory durations matched by runtime launch correlation and CPU scope timestamps; excludes host gaps and avoids ATen parent/child attribution errors for custom extensions",
+  "first_measured_token_shapes_by_layer": {
+    "0": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "1": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "2": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "3": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "4": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "5": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "6": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "7": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "8": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "9": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "10": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "11": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "12": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "13": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "14": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "15": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "16": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "17": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "18": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "19": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "20": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "21": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "22": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "23": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "24": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "25": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "26": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "27": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "28": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "29": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "30": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    },
+    "31": {
+      "query": [
+        1,
+        32,
+        1,
+        128
+      ],
+      "global_len": 31800,
+      "dense_len": 971,
+      "packed_key": [
+        1,
+        8,
+        5,
+        31800
+      ],
+      "packed_value": [
+        1,
+        8,
+        497,
+        320
+      ]
+    }
+  },
+  "source_sha256": {
+    "rebuttal/measure_attention.py": "e8696cbe4c5c0000d8691ab30fc6d1571d43e339e040954126393ae217a8230d",
+    "picokv/picokv_standalone/decode.py": "020c3ff30efbda291769d3c881f5a826e95f5a3a440741abde2fbe3ed43379c3",
+    "picokv/picokv_cuda_extension/cuda_kernel.cu": "6a56efd89ab34e225acd79be993d1a14ca6d0fa2998866992f3c25bbf6486bcf",
+    "rebuttal/reconstruct_cuda_attention.py": "7b64d116b69d993c891ac4cedf69c6bf497dbf24f0268ea56de3710fadb9d15b",
+    "rebuttal/unpacked_kernel_attention.py": "89e197dbecaaf176bb98b88a36bccd243278217765ca0e3b1e1111d622374b03",
+    "benchmarks/Efficiency/run_efficiency.py": "0b558489c326507b6d5b24be7ac9c64317c17919cf88c80c3e35305791ae02fa",
+    "rebuttal/cuda_attention.py": "ba2d38eec7e4e0c782556b30b8f8b8fd328dfe9162621e6fc1cb4902fd823570",
+    "rebuttal/cuda/attention.cu": "b311cf2fe0cf860a6cdd1916710eca4fc7362e6616e43abbeb7f2cfca20eddd8",
+    "rebuttal/cuda/attention.cpp": "04eb6513125f17063bf09c84e1d6648498be948f4703eacc8a0918a6a30f060b",
+    "rebuttal/cuda/attention_ptx.cuh": "91edb1904ec6bbd2cc82d16420424979c8767b3251242b1b54d6772f0722b60c",
+    "rebuttal/reconstruct_cuda_attention_triton.py": "929ceb5d9086e14da61f8dcc16521204d626327c6d68d5f6c609b3593c4b34ec",
+    "rebuttal/unpacked_kernel_attention_triton.py": "fad47664bc21b96f9c617c1c43abd71e3a5968ff298b3906dfefbfdfeb39b12b"
+  },
+  "sources_unchanged_during_measurement": true,
+  "elapsed_seconds": 98.48010540008545
+}

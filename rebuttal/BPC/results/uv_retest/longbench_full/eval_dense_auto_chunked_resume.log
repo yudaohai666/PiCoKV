@@ -1,0 +1,4 @@
+/data/zxh/PiCoKV/.venv/lib/python3.12/site-packages/fuzzywuzzy/fuzz.py:11: UserWarning: Using slow pure-python SequenceMatcher. Install python-Levenshtein to remove this warning
+  warnings.warn('Using slow pure-python SequenceMatcher. Install python-Levenshtein to remove this warning')
+Evaluating on: ['musique.jsonl', 'passage_retrieval_en.jsonl', 'qasper.jsonl', 'multifieldqa_en.jsonl', 'lcc.jsonl', 'trec.jsonl', 'narrativeqa.jsonl', 'passage_count.jsonl', 'samsum.jsonl', '2wikimqa.jsonl', 'hotpotqa.jsonl', 'repobench-p.jsonl', 'multi_news.jsonl', 'triviaqa.jsonl', 'qmsum.jsonl', 'gov_report.jsonl']
+{'musique': 33.06, 'passage_retrieval_en': 99.5, 'qasper': 44.5, 'multifieldqa_en': 55.56, 'lcc': 63.21, 'trec': 72.5, 'narrativeqa': 28.76, 'passage_count': 11.1, 'samsum': 43.88, '2wikimqa': 49.16, 'hotpotqa': 57.86, 'repobench-p': 56.57, 'multi_news': 27.04, 'triviaqa': 91.65, 'qmsum': 25.53, 'gov_report': 34.54, 'avg': 49.65}

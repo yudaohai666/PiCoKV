@@ -1,0 +1,15 @@
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:00<00:02,  1.03it/s]Loading checkpoint shards:  50%|█████     | 2/4 [00:01<00:01,  1.01it/s]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:02<00:00,  1.07it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:03<00:00,  1.53it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:03<00:00,  1.30it/s]
+Token indices sequence length is longer than the specified maximum sequence length for this model (446286 > 131072). Running this sequence through the model will result in indexing errors
+[reconstruct_cuda] prefill 1
+[reconstruct_cuda] prefill 2
+[reconstruct_cuda] prefill 3
+[reconstruct_cuda] prefill 4
+[reconstruct_cuda] prefill 5
+[reconstruct_cuda] prefill 6
+{
+  "backend": "reconstruct_cuda",
+  "attention_event_ms": 25.922605981118977,
+  "attention_kernel_ms": 25.088843875,
+  "cache_append_kernel_ms": 0.47701249999999995,
+  "output": "rebuttal/results/uv_cuda_32k_20261110/attention_reconstruct_cuda.json"
+}

@@ -1,0 +1,39 @@
+{
+  "status": "completed",
+  "device": "cuda",
+  "verbatim_functions": [
+    "find_binary_projection",
+    "binary_project_pytorch"
+  ],
+  "source_sha256": "1c9a43483d0d3a7d9d93d3699b22b84b0d6a5a7753d4063591371416e5834d7e",
+  "copied_file_sha256": "2f9814ed667a9bbacc959140a003f8dad4032aea2d05e995698c0b6627df90e2",
+  "replay_before_packing_ast_identical": true,
+  "samples": [
+    {
+      "bits": 64,
+      "length": 17,
+      "fitting_codes_exact": true,
+      "decoder_exact": true,
+      "replay_codes_exact": true,
+      "global_rng_consumption_exact": true,
+      "adapter_exact": true
+    },
+    {
+      "bits": 320,
+      "length": 65,
+      "fitting_codes_exact": true,
+      "decoder_exact": true,
+      "replay_codes_exact": true,
+      "global_rng_consumption_exact": true,
+      "adapter_exact": true
+    }
+  ],
+  "no_hfm_prepare_packing_decode": {
+    "raw_key_reaches_bpc_even_when_config_zerorope20": true,
+    "raw_value_reaches_bpc": true,
+    "packing_codes_exact": true,
+    "packed_matches_same_cache_dense": true,
+    "context_restores_after_exception": true,
+    "input_unchanged": true
+  }
+}

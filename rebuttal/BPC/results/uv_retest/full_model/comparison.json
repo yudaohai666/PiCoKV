@@ -1,0 +1,108 @@
+{
+  "status": "completed",
+  "completed_at": "2026-11-10T18:29:42.355590+08:00",
+  "environment": "../environment.json",
+  "python": "/data/zxh/PiCoKV/.venv/bin/python3",
+  "warmup": 1,
+  "repeats": 3,
+  "decode_warmup_steps": 2,
+  "decode_tokens": 64,
+  "scope": "original run_efficiency via rebuttal/BPC/run.py, independent single GPU per length",
+  "checks": {
+    "all_6_formal_runs_completed_without_error": true,
+    "all_metrics_finite_positive": true,
+    "source_hashes_unchanged": true,
+    "uv_environment_versions_match": true,
+    "paired_args_and_gpu_match": true,
+    "paired_cache_sizes_equal": true
+  },
+  "results": [
+    {
+      "prompt_tokens": 16384,
+      "physical_gpu": "5",
+      "allocator": "expandable_segments:True",
+      "gpc": {
+        "prompt_len": 16384,
+        "prefill_ms": 5399.907,
+        "decode_ms_per_token": 26.9341,
+        "decode_toks_per_s": 37.13,
+        "prefill_peak_gb": 16.647,
+        "decode_peak_gb": 15.433,
+        "prefill_kv_gb": 0.437,
+        "decode_kv_gb": 0.445
+      },
+      "gpc_source_file": "gpc_16384.json",
+      "binarypc": {
+        "prompt_len": 16384,
+        "prefill_ms": 21940.008,
+        "decode_ms_per_token": 27.1982,
+        "decode_toks_per_s": 36.77,
+        "prefill_peak_gb": 16.646,
+        "decode_peak_gb": 15.431,
+        "prefill_kv_gb": 0.437,
+        "decode_kv_gb": 0.445
+      },
+      "binarypc_source_file": "binarypc_16384.json",
+      "prefill_ratio_binarypc_over_gpc": 4.063034418926104,
+      "decode_ratio_binarypc_over_gpc": 0.9903043361163479
+    },
+    {
+      "prompt_tokens": 32768,
+      "physical_gpu": "6",
+      "allocator": "expandable_segments:True",
+      "gpc": {
+        "prompt_len": 32768,
+        "prefill_ms": 12756.658,
+        "decode_ms_per_token": 28.4307,
+        "decode_toks_per_s": 35.17,
+        "prefill_peak_gb": 17.63,
+        "decode_peak_gb": 15.774,
+        "prefill_kv_gb": 0.783,
+        "decode_kv_gb": 0.791
+      },
+      "gpc_source_file": "gpc_32768.json",
+      "binarypc": {
+        "prompt_len": 32768,
+        "prefill_ms": 46620.966,
+        "decode_ms_per_token": 28.5944,
+        "decode_toks_per_s": 34.97,
+        "prefill_peak_gb": 17.631,
+        "decode_peak_gb": 15.775,
+        "prefill_kv_gb": 0.783,
+        "decode_kv_gb": 0.791
+      },
+      "binarypc_source_file": "binarypc_32768.json",
+      "prefill_ratio_binarypc_over_gpc": 3.6546379153536925,
+      "decode_ratio_binarypc_over_gpc": 0.9943133352288882
+    },
+    {
+      "prompt_tokens": 65536,
+      "physical_gpu": "7",
+      "allocator": "expandable_segments:True,garbage_collection_threshold:0.8",
+      "gpc": {
+        "prompt_len": 65536,
+        "prefill_ms": 34391.812,
+        "decode_ms_per_token": 30.5644,
+        "decode_toks_per_s": 32.72,
+        "prefill_peak_gb": 20.187,
+        "decode_peak_gb": 16.468,
+        "prefill_kv_gb": 1.476,
+        "decode_kv_gb": 1.484
+      },
+      "gpc_source_file": "gpc_65536_gc08.json",
+      "binarypc": {
+        "prompt_len": 65536,
+        "prefill_ms": 95757.883,
+        "decode_ms_per_token": 30.5827,
+        "decode_toks_per_s": 32.7,
+        "prefill_peak_gb": 20.187,
+        "decode_peak_gb": 16.468,
+        "prefill_kv_gb": 1.476,
+        "decode_kv_gb": 1.484
+      },
+      "binarypc_source_file": "binarypc_65536_gc08.json",
+      "prefill_ratio_binarypc_over_gpc": 2.784322122951824,
+      "decode_ratio_binarypc_over_gpc": 0.9993887530562349
+    }
+  ]
+}

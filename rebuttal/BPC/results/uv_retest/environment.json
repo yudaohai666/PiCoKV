@@ -1,0 +1,90 @@
+{
+  "created_at": "2026-11-10T17:57:20.587356+08:00",
+  "environment_manager": "uv",
+  "uv_environment": "/data/zxh/PiCoKV/.venv",
+  "uv_command": "uv run --project /data/zxh/PiCoKV2 --no-sync",
+  "UV_PROJECT_ENVIRONMENT": "/data/zxh/PiCoKV/.venv",
+  "python_executable": "/data/zxh/PiCoKV/.venv/bin/python3",
+  "python_prefix": "/data/zxh/PiCoKV/.venv",
+  "python_version": "3.12.13 (main, Jul 23 2026, 14:43:28) [Clang 22.1.3 ]",
+  "versions": {
+    "torch": "2.6.0+cu124",
+    "torchvision": "0.21.0+cu124",
+    "torchaudio": "2.6.0+cu124",
+    "transformers": "4.53.2",
+    "accelerate": "1.14.0",
+    "triton": "3.2.0",
+    "flash-attn": "2.7.4.post1",
+    "datasets": "5.0.1",
+    "huggingface-hub": "0.36.2",
+    "numpy": "2.4.4",
+    "safetensors": "0.8.0"
+  },
+  "tested_packages_match_project_lock": true,
+  "cuda_toolkit": "/usr/local/cuda-12.4",
+  "extensions": "fresh CUDA 12.4/Python3.12 build; PICOKV_DISABLE_PREBUILT=1",
+  "extension_cache": "/data/zxh/.cache/picokv_bpc_uv_extensions",
+  "source_sha256": {
+    "uv.lock": "3b2cbc4e1a8086236a5a606fa67fb0ae4a025f67ac9ff514f6ee40830d95780b",
+    "pyproject.toml": "764f08f857fef97bcdb63ee5668a3824f9a88d70a2c9a5310219ef5908836b2b",
+    "rebuttal/BPC/single_layer_prefill.py": "9f39856aa82fef3bb6a0df48482d70c2e858e1c2f3b2c3888ed50658d83bb467",
+    "rebuttal/BPC/run.py": "7331d0ad676abbd8d29574fa0fa7236f58e9a1c487a865a7bfeee2971cfa83b2",
+    "rebuttal/BPC/encoding.py": "a8ca10ef0cf3bdd8b8c8a440ef26256e6323538141546eed75cd003d23cba7cf",
+    "benchmarks/Efficiency/run_efficiency.py": "0b558489c326507b6d5b24be7ac9c64317c17919cf88c80c3e35305791ae02fa",
+    "benchmarks/common.py": "22d8d448036adcdbebb7d31a4bb2803799bb738561d60023afaf590324b14e98",
+    "picokv/picokv_standalone/online.py": "24edc1cb3d75048449431cb4244fbabab9ff4b6a821e52a1ce4e7bef0193b59b",
+    "picokv/picokv_standalone/prepare.py": "f9f8fef2a6b4d14c28376ca31a3894e9f12c0f31e182967eb055333dead8572f",
+    "picokv/picokv_standalone/transformers.py": "819ef05c6b41b76797fd129ccd401b9bb6128097da862b733a779640381f8a37",
+    "picokv/picokv_cuda_extension/cuda_kernel.cu": "6a56efd89ab34e225acd79be993d1a14ca6d0fa2998866992f3c25bbf6486bcf",
+    "picokv/picokv_prefill_cuda_extension/cuda_kernel.cu": "884d8e69006474f6ce325d1f127e3ebc50b3114e7b4932ba7192450c0df5c08a"
+  },
+  "single_layer": {
+    "lengths": [
+      16384,
+      32768,
+      65536,
+      131072,
+      262144
+    ],
+    "warmup": 2,
+    "repeats": 5,
+    "gpus": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "paired_encoding_order": "alternate GPC/BPC on same GPU"
+  },
+  "full_model": {
+    "lengths": [
+      16384,
+      32768,
+      65536
+    ],
+    "warmup": 1,
+    "repeats": 3,
+    "gpus": [
+      5,
+      6,
+      7
+    ],
+    "encodings": [
+      "gpc",
+      "binarypc"
+    ],
+    "decode_tokens": 64,
+    "strategy": "independent single-GPU task per length; sequential GPC then BPC on the same GPU",
+    "allocator_by_length": {
+      "16384": "expandable_segments:True",
+      "32768": "expandable_segments:True",
+      "65536": "expandable_segments:True,garbage_collection_threshold:0.8"
+    },
+    "64k_original_attempt": "both encodings OOM; native diagnostics reproduced RMSNorm allocation failure with 18.80 GiB allocated and 3.90 GiB reserved unused; standalone diagnostic with gc_threshold 0.8 passed",
+    "64k_formal_outputs": [
+      "full_model/gpc_65536_gc08.json",
+      "full_model/binarypc_65536_gc08.json"
+    ]
+  }
+}

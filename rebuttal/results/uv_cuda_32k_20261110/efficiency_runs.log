@@ -1,0 +1,8 @@
+starting efficiency dense
+finished efficiency dense {'prompt_len': 32768, 'prefill_ms': 11427.233, 'decode_ms_per_token': 41.9924, 'decode_toks_per_s': 23.81, 'prefill_peak_gb': 22.607, 'decode_peak_gb': 19.037, 'prefill_kv_gb': 4.0, 'decode_kv_gb': 4.008}
+starting efficiency packed
+finished efficiency packed {'prompt_len': 32768, 'prefill_ms': 12795.979, 'decode_ms_per_token': 27.6583, 'decode_toks_per_s': 36.16, 'prefill_peak_gb': 17.624, 'decode_peak_gb': 15.772, 'prefill_kv_gb': 0.783, 'decode_kv_gb': 0.791}
+starting efficiency unpacked_fused
+finished efficiency unpacked_fused {'prompt_len': 32768, 'prefill_ms': 12887.585, 'decode_ms_per_token': 30.1004, 'decode_toks_per_s': 33.22, 'prefill_peak_gb': 17.624, 'decode_peak_gb': 15.772, 'prefill_kv_gb': 0.783, 'decode_kv_gb': 0.791}
+starting efficiency reconstruct_cuda
+finished efficiency reconstruct_cuda {'prompt_len': 32768, 'prefill_ms': 12857.102, 'decode_ms_per_token': 48.3766, 'decode_toks_per_s': 20.67, 'prefill_peak_gb': 17.624, 'decode_peak_gb': 15.819, 'prefill_kv_gb': 0.783, 'decode_kv_gb': 0.791}

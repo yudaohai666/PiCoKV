@@ -1,0 +1,245 @@
+{
+  "cases": 30,
+  "results": [
+    {
+      "length": 0,
+      "k_bits": 128,
+      "v_bits": 192,
+      "reconstruct": false,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 0,
+      "k_bits": 128,
+      "v_bits": 192,
+      "reconstruct": true,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 1,
+      "k_bits": 128,
+      "v_bits": 192,
+      "reconstruct": false,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 1,
+      "k_bits": 128,
+      "v_bits": 192,
+      "reconstruct": true,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 31,
+      "k_bits": 256,
+      "v_bits": 320,
+      "reconstruct": false,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 31,
+      "k_bits": 256,
+      "v_bits": 320,
+      "reconstruct": true,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 32,
+      "k_bits": 320,
+      "v_bits": 256,
+      "reconstruct": false,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 32,
+      "k_bits": 320,
+      "v_bits": 256,
+      "reconstruct": true,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 33,
+      "k_bits": 320,
+      "v_bits": 320,
+      "reconstruct": false,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 33,
+      "k_bits": 320,
+      "v_bits": 320,
+      "reconstruct": true,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 63,
+      "k_bits": 320,
+      "v_bits": 320,
+      "reconstruct": false,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 63,
+      "k_bits": 320,
+      "v_bits": 320,
+      "reconstruct": true,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 64,
+      "k_bits": 320,
+      "v_bits": 320,
+      "reconstruct": false,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 64,
+      "k_bits": 320,
+      "v_bits": 320,
+      "reconstruct": true,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 65,
+      "k_bits": 320,
+      "v_bits": 320,
+      "reconstruct": false,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 65,
+      "k_bits": 320,
+      "v_bits": 320,
+      "reconstruct": true,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 127,
+      "k_bits": 320,
+      "v_bits": 320,
+      "reconstruct": false,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 127,
+      "k_bits": 320,
+      "v_bits": 320,
+      "reconstruct": true,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 128,
+      "k_bits": 320,
+      "v_bits": 320,
+      "reconstruct": false,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 128,
+      "k_bits": 320,
+      "v_bits": 320,
+      "reconstruct": true,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 129,
+      "k_bits": 320,
+      "v_bits": 320,
+      "reconstruct": false,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 129,
+      "k_bits": 320,
+      "v_bits": 320,
+      "reconstruct": true,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 511,
+      "k_bits": 512,
+      "v_bits": 128,
+      "reconstruct": false,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 511,
+      "k_bits": 512,
+      "v_bits": 128,
+      "reconstruct": true,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 512,
+      "k_bits": 320,
+      "v_bits": 320,
+      "reconstruct": false,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 512,
+      "k_bits": 320,
+      "v_bits": 320,
+      "reconstruct": true,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 513,
+      "k_bits": 128,
+      "v_bits": 512,
+      "reconstruct": false,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 513,
+      "k_bits": 128,
+      "v_bits": 512,
+      "reconstruct": true,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 32768,
+      "k_bits": 320,
+      "v_bits": 320,
+      "reconstruct": false,
+      "relative_rmse": 0.0,
+      "max_abs": 0.0
+    },
+    {
+      "length": 32768,
+      "k_bits": 320,
+      "v_bits": 320,
+      "reconstruct": true,
+      "relative_rmse": 3.121432746411301e-05,
+      "max_abs": 7.62939453125e-06
+    }
+  ]
+}
