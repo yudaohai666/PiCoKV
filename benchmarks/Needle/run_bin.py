@@ -406,7 +406,7 @@ def main() -> None:
     parser.add_argument(
         "--bpc-offline-proj-path",
         default=BPC_DEFAULT_OFFLINE_PROJ_PATH,
-        help="BPC: path to a learned offline hash-projection .pt (e.g. src/BPC/ckp/projections/*.pt); pass '' for the online (random) projection",
+        help="BPC: path to a learned offline hash-projection .pt (e.g. src/BPC/ckp/projections/*.pt); pass '' for the online projection fitted on each request's prefill keys",
     )
     # ── BitDecoding params (--method bitdecoding) ──
     # Only 4-bit/g128 is numerically correct in the released kernel; every other

@@ -14,6 +14,25 @@ export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH}"
 # max_memory_allocated unchanged. Must precede torch's allocator init, so it
 # cannot move into python. Keep identical across all benchmark launchers.
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# BPC JIT-compiles its binary_proj extension on the first modify() call. This venv
+# has no include/ dir, so cpp_extension emits -isystem /usr/include/python3.12,
+# which does not exist here -> "fatal error: Python.h: No such file or directory",
+# and BPC falls back to its PyTorch path with only a warning. Cache shapes stay
+# right but latency does not, so an unset CPATH yields quietly wrong numbers.
+# Point at the real headers; never add /usr/include (breaks libstdc++'s
+# #include_next). Keep identical across all benchmark launchers.
+export CPATH="/usr/local/include/python3.12${CPATH:+:${CPATH}}"
+# These launchers call bare `python`, which resolves to /usr/local/bin/python. That
+# interpreter has a newer transformers whose audio_utils hard-requires torchcodec
+# metadata, so every run dies at import with
+# "PackageNotFoundError: No package metadata was found for torchcodec" -- and since
+# the loop below spawns one process per length, each failure is per-length and the
+# launcher still exits 0, i.e. an empty sweep that looks successful. The venv
+# (transformers 4.53.2, torch 2.6.0+cu124, lm_eval 0.4.12) is the supported
+# interpreter. Keep identical across all benchmark launchers.
+if [ -x "${REPO_ROOT}/.venv/bin/python" ]; then
+  export PATH="${REPO_ROOT}/.venv/bin:${PATH}"
+fi
 # Safe for the numbers this launcher publishes: run_efficiency.py:66 reports
 # max_memory_allocated, which the allocator mode does not move (measured shift
 # ~1 MiB of 1450), so arms recorded before and after this line stay comparable.
@@ -84,6 +103,9 @@ POLAR_MODE="${POLAR_MODE:-mixed}"; POLAR_RBITS="${POLAR_RBITS:-3}"; POLAR_TBITS=
 # bpc (src/BPC); default = offline (python default picks the mixlen-mixdata projection)
 BPC_MASK_OUT="${BPC_MASK_OUT:-0.98}"; BPC_MIN_REMAIN="${BPC_MIN_REMAIN:-128}"; BPC_ERR_RATIO="${BPC_ERR_RATIO:-0.1}"; BPC_FIX_LAYERS="${BPC_FIX_LAYERS:-0,1}"
 BPC_OFFLINE_PROJ_PATH="${BPC_OFFLINE_PROJ_PATH:-}"
+# BPC_USE_OFFLINE=0 selects BPC's online mode: each request fits its own 64-bit
+# projection on its prefill keys, so prefill latency includes that fit.
+BPC_USE_OFFLINE="${BPC_USE_OFFLINE:-1}"
 # bitdecoding (src/BitDecoding). g128 for BOTH bit widths so the two rows differ
 # only in bit width (same reasoning as KIVI-2/KIVI-4 sharing g32/R128).
 BD_NUM_BITS="${BD_NUM_BITS:-4}"; BD_GROUP="${BD_GROUP:-128}"; BD_QUANT_MODE="${BD_QUANT_MODE:-k-channel}"
@@ -146,8 +168,18 @@ build_method_args() {
     bpc)
       METHOD_ARGS=(--bpc-mask-out "${BPC_MASK_OUT}" --bpc-min-remain "${BPC_MIN_REMAIN}"
         --bpc-err-ratio "${BPC_ERR_RATIO}" --bpc-fix-layers "${BPC_FIX_LAYERS}")
-      [ -n "${BPC_OFFLINE_PROJ_PATH}" ] && METHOD_ARGS+=(--bpc-offline-proj-path "${BPC_OFFLINE_PROJ_PATH}")
-      TAG="bpc_offline"
+      # BPC is a sparse-attention method, not KV compression: it keeps full bf16
+      # K/V plus one int64 hashcode per token per KV head, so its cache is
+      # LARGER than dense. Never put it in a memory column next to picokv/KIVI.
+      if [ "${BPC_USE_OFFLINE}" = "1" ] || [ -n "${BPC_OFFLINE_PROJ_PATH}" ]; then
+        # Empty path -> keep the flag off so the python default (the calibrated
+        # mixlen-mixdata .pt) applies.
+        [ -n "${BPC_OFFLINE_PROJ_PATH}" ] && METHOD_ARGS+=(--bpc-offline-proj-path "${BPC_OFFLINE_PROJ_PATH}")
+        TAG="bpc_offline"
+      else
+        METHOD_ARGS+=(--bpc-offline-proj-path "")
+        TAG="bpc_online"
+      fi
       ;;
     bitdecoding)
       METHOD_ARGS=(--num-bits "${BD_NUM_BITS}" --group-size "${BD_GROUP}" --quant-mode "${BD_QUANT_MODE}")

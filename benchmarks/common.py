@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import copy
-import functools
 import inspect
 import os
 import random
@@ -52,7 +51,10 @@ POLAR_SRC = Path(__file__).resolve().parents[1] / "src" / "PolarQuant"
 # sys.path so `import bpc.bpc.bpc` resolves.
 BPC_SRC = Path(__file__).resolve().parents[1] / "src" / "BPC"
 # Default offline hash-projection checkpoint (mixed-length + mixed-data
-# calibration); BPC's online (random) projection is not evaluated here.
+# calibration). Pass ``bpc_offline_proj_path=None`` for BPC's online mode, which
+# fits the projection on the actual prefill keys instead
+# (bpc.bpc.bpc.LayerCache.update -> find_binary_projection(keys, 64)); only the
+# initialization there is random, the directions are data-dependent.
 BPC_DEFAULT_OFFLINE_PROJ_PATH = str(
     BPC_SRC / "ckp" / "projections" / "llama3-1-8b-ins-projection-mixlen-mixdata.pt"
 )
@@ -152,7 +154,12 @@ def output_tag(
     if method == "oscar":
         return f"oscar_int{num_bits}"
     if method == "bpc":
-        return "bpc_offline"
+        # BPC's hash projection is either calibrated offline or fitted online on
+        # the prefill keys, and the two give different scores, so the mode has to
+        # be part of the identity of the result. Callers signal it with
+        # ``offline=(bpc_offline_proj_path is not None)``; the previously measured
+        # runs are all offline and keep their existing ``bpc_offline`` directories.
+        return "bpc_offline" if offline else "bpc_online"
     if method == "bitdecoding":
         return f"bitdecoding_{num_bits}bit_g{group_size if group_size is not None else '?'}"
     if method not in ("picokv", "picokv_recon"):
@@ -582,19 +589,25 @@ def _load_bpc_model(
 
     BPC's ``modify()`` replaces each layer's attention forward: prefill
     delegates to flash_attention_2 while also caching KV + a learned 64-bit
-    binary hash; decode selects top-k KV by hash score. ``make_cache`` hands
-    the runner a fresh ``AllCache`` (a ``transformers.Cache``) per call, same
-    shape as picokv's ``StandaloneLlamaCache`` factory. Only Llama / Mistral /
+    binary hash; decode selects top-k KV by hash score. Only Llama / Mistral /
     Qwen2 attention classes are patched (see bpc.bpc.bpc.SUPPORTED_ATTENTION_CLASSES);
     Qwen3 is not yet supported by this method.
 
+    Unlike every other method here, ``make_cache`` does NOT build a fresh cache:
+    ``modify()`` creates one ``AllCache``, attaches it to every attention module
+    and to the model, and the patched forward reads ``self._bpc_cache`` while
+    ignoring its ``past_key_value`` argument. A freshly constructed ``AllCache``
+    would therefore never be written to. So ``make_cache`` resets the real cache
+    and returns it.
+
     Defaults mirror src/BPC/config/llama3-1-8b-ins/extra_configs/llama3-1-8b-ins-bpc-offline.json
     (``fix_layers=[0, 1]``, ``use_cuda_kernel=True``, offline hash projection). Pass
-    ``offline_proj_path=None`` to fall back to BPC's online (random) projection instead.
+    ``offline_proj_path=None`` for BPC's online mode, which fits the 64-bit
+    projection on each request's own prefill keys.
     """
     if str(BPC_SRC) not in sys.path:
         sys.path.insert(0, str(BPC_SRC))
-    from bpc.bpc.bpc import modify, AllCache, load_offline_projections
+    from bpc.bpc.bpc import modify, reset_cache
 
     config = load_model_config(model_name)
     if torch.cuda.is_available() and torch.cuda.device_count() <= 1:
@@ -627,12 +640,18 @@ def _load_bpc_model(
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    # Load once here (not per make_cache() call) so every request's AllCache
-    # shares the same projection tensors instead of re-reading the .pt file.
-    offline_projs = load_offline_projections(offline_proj_path) if use_offline_proj else None
-
     def make_cache():
-        return AllCache(mask_out, min_remain, token_budget, err_ratio, use_cuda_kernel, offline_projs)
+        # Every consumer calls make_cache() immediately before a prefill, so the
+        # reset here is BPC's per-request boundary -- the same thing its own
+        # driver does (src/BPC/bpc/lmeval.py:444-446). In online mode this is
+        # what makes the 64-bit projection refit on each request's own keys
+        # (LayerCache.reset() clears self.proj; bpc.py fits only when proj is
+        # None), instead of silently reusing the first request's projection
+        # forever. Returning the real _bpc_cache (rather than a fresh AllCache,
+        # which the patched forward would never touch) is also what lets the
+        # Efficiency runner's KV accounting see BPC's actual tensors.
+        reset_cache(model)
+        return model._bpc_cache
 
     return model, tokenizer, make_cache
 
@@ -769,25 +788,35 @@ def _load_bitdecoding_model(
     )
     model.eval()
 
-    # evaluation/llama.py's forward still takes the pre-4.50 `num_logits_to_keep`
-    # (evaluation/qwen3.py already uses the current `logits_to_keep`), so the
-    # efficiency runner's logits_to_keep=1 would land in **kwargs and be dropped,
-    # materializing full-sequence fp32 logits at prefill (~65GB at 128K tokens).
-    # Bridge it here instead of editing the vendored file so the fix survives a
-    # re-vendor; functools.wraps keeps the original signature visible to
-    # prepare_inputs_for_generation, which introspects it to decide whether to
-    # pass position_ids.
+    # `generate` only skips the full-sequence lm_head when
+    # `GenerationMixin._supports_logits_to_keep` (transformers/generation/utils.py:2107)
+    # finds `logits_to_keep` in `inspect.signature(self.forward)`; only then does it
+    # inject `logits_to_keep=1` (utils.py:2468). So the parameter must be named
+    # `logits_to_keep` ON THE FORWARD ITSELF.
+    #
+    # A wrapper cannot supply it. The previous bridge here wrapped `forward` with
+    # `functools.wraps`, which sets `__wrapped__`, and `inspect.signature` follows
+    # `__wrapped__` by default -- so the check still saw the old
+    # `num_logits_to_keep` and returned False. The wrapper's `logits_to_keep` was
+    # never populated and the vendored default 0 was used; `hidden_states[:, -0:, :]`
+    # is the WHOLE sequence, so prefill ran lm_head over every position. At L=131072
+    # that is a 131072 x 128256 fp16 tensor = 31.31 GiB and 137.7 TFLOP of waste,
+    # which is why `prefill_peak_gb` in the pre-fix bitdecoding rows is ~31 GiB
+    # above the KV-implied value. The fix is the rename in evaluation/llama.py:1300.
+    #
+    # Fail loudly if a re-vendor reintroduces the old name: silently burning 31 GiB
+    # is far worse than refusing to run.
     fwd_params = inspect.signature(type(model).forward).parameters
-    if "logits_to_keep" not in fwd_params and "num_logits_to_keep" in fwd_params:
-        _bd_forward = model.forward
-
-        @functools.wraps(_bd_forward)
-        def _forward_with_logits_to_keep(*args, logits_to_keep=None, **kwargs):
-            if logits_to_keep is not None and "num_logits_to_keep" not in kwargs:
-                kwargs["num_logits_to_keep"] = logits_to_keep
-            return _bd_forward(*args, **kwargs)
-
-        model.forward = _forward_with_logits_to_keep
+    if "logits_to_keep" not in fwd_params:
+        raise RuntimeError(
+            f"{type(model).__name__}.forward has no `logits_to_keep` parameter "
+            f"(found: {'num_logits_to_keep' if 'num_logits_to_keep' in fwd_params else 'neither'}). "
+            "transformers >=4.50 keys its last-token-logits optimization off that exact "
+            "name, so prefill would materialize full-sequence logits (31.31 GiB at "
+            "L=131072 for Llama-3.1-8B). Rename the parameter in "
+            "src/BitDecoding/evaluation/llama.py; a functools.wraps bridge does not "
+            "work because inspect.signature follows __wrapped__."
+        )
 
     def make_cache():
         return BDDynamicCache()
@@ -892,8 +921,11 @@ def load_model(
                                  llama3-1-8b-ins-bpc-offline.json). ``bpc_offline_proj_path``
                                  defaults to the learned offline hash projection
                                  (``BPC_DEFAULT_OFFLINE_PROJ_PATH``); pass ``None`` to fall
-                                 back to BPC's online (random) projection.
-                                 ``make_cache`` returns a fresh ``AllCache`` per call.
+                                 back to the online projection fitted on the prefill keys.
+                                 ``make_cache`` resets and returns the model's own
+                                 ``_bpc_cache`` (BPC's patched forward ignores the
+                                 ``past_key_value`` it is handed), which is also BPC's
+                                 per-request boundary.
       * ``bitdecoding``       -> ``_load_bitdecoding_model`` (src/BitDecoding);
                                  ``num_bits`` / ``group_size`` / ``quant_mode`` set the
                                  KV quantization. ONLY ``num_bits=4, group_size=128,

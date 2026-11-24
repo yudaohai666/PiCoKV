@@ -102,8 +102,10 @@ _MODULE_KV_ATTRS = ("k_pack_new", "k_params_new", "v_pack_new", "v_params_new")
 def _module_kv_tensors(model) -> list:
     """Per-layer KV tensors held on modules rather than on the cache object.
 
-    Returns [] for every method that keeps all its state on ``past_key_values``
-    (picokv / kivi / bpc / oscar / dense), so this is a no-op outside BitDecoding.
+    Returns [] for every method whose cache object transitively owns all of its
+    KV state (picokv / kivi / oscar / dense, and bpc -- whose state lives on the
+    attention modules but is reachable because ``make_cache`` returns the
+    model's own ``_bpc_cache``), so this is a no-op outside BitDecoding.
     """
     found = []
     for module in model.modules():
@@ -128,6 +130,11 @@ def _kv_cache_bytes(pkv, extra=None) -> int:
 
     ``extra`` is an iterable of additional tensors to fold into the same
     deduplicated total (see ``_module_kv_tensors``).
+
+    For BPC the total is an honest end-to-end cache cost, charged the same way
+    picokv/KIVI are, but it is not pure K/V bytes: it includes the 256-slot
+    over-allocated KV buffer, one int64 hashcode per token per KV head,
+    ``err_topk`` and ``proj_T``. Footnote that if the number lands in a table.
     """
     if pkv is None and not extra:
         return 0
@@ -494,7 +501,11 @@ def run(args) -> None:
             )
 
     tag = output_tag(args.method, args.k_bits, args.v_bits, args.num_bits,
-                     offline=(args.offline or args.offline_proj_path is not None),
+                     # bpc_offline_proj_path defaults to a real path, so it must
+                     # only count for bpc; otherwise every picokv online run is
+                     # tagged "_offline" and collides with the offline row on merge.
+                     offline=(args.bpc_offline_proj_path is not None if args.method == "bpc"
+                              else (args.offline or args.offline_proj_path is not None)),
                      group_size=args.group_size)
     results = {}
     out = Path(args.output)
@@ -635,7 +646,13 @@ def merge(directory: str, out_path: str) -> None:
     d = Path(directory)
     lengths: dict[str, dict] = {}
     meta: dict = {}
-    for fp in sorted(d.glob("*.json")):
+    # Rows are keyed by tag only, so two models sharing one RESULT_DIR (e.g.
+    # Llama-3.1-8B-Instruct_flash_attention_2.json and Qwen3-8B_flash_attention_2.json)
+    # would overwrite each other. The launcher names the merged file
+    # {MODEL_TAG}_efficiency.json; keep only per-method files of that model.
+    out_name = Path(out_path).name
+    model_prefix = out_name[: -len("efficiency.json")] if out_name.endswith("_efficiency.json") else ""
+    for fp in sorted(d.glob(f"{model_prefix}*.json")):
         try:
             with open(fp, "r", encoding="utf-8") as f:
                 p = json.load(f)
@@ -667,7 +684,12 @@ def main() -> None:
                         help="transpose all per-method JSONs under this dir into one length->method file (see --merge-out)")
     parser.add_argument("--merge-out", default=None, help="output path for --merge-dir")
     parser.add_argument("--model", default="/data/Llama-3.1-8B-Instruct")
-    parser.add_argument("--method", default="picokv", help="picokv | oscar | kivi | bitdecoding | flash_attention_2 | sdpa | eager")
+    parser.add_argument("--method", default="picokv",
+                        help="picokv | oscar | kivi | bitdecoding | bpc | polar | "
+                             "flash_attention_2 | sdpa | eager. NOTE: bpc is a sparse-attention "
+                             "method, not a KV-compression one -- it keeps full bf16 K/V plus "
+                             "hashcodes, so its cache is LARGER than dense; it may share a "
+                             "quality column with the others but never a memory column.")
     parser.add_argument("--dataset", default=None,
                         help="path to a .jsonl file with 'text' fields; uses real text instead of random token ids")
     parser.add_argument("--lengths", default="4096,16384,32768", help="comma-separated prompt lengths")
@@ -715,7 +737,7 @@ def main() -> None:
     parser.add_argument("--bpc-err-ratio", type=float, default=0.1, help="BPC: err_topk = token_budget * err_ratio")
     parser.add_argument("--bpc-fix-layers", default="0,1", help="BPC: comma-separated layers skipping sparse attention (empty for none)")
     parser.add_argument("--bpc-use-cuda-kernel", action=argparse.BooleanOptionalAction, default=True, help="BPC: use the compiled CUDA kernel; PyTorch fallback on failure")
-    parser.add_argument("--bpc-offline-proj-path", default=BPC_DEFAULT_OFFLINE_PROJ_PATH, help="BPC: learned offline hash-projection .pt; pass '' for the online (random) projection")
+    parser.add_argument("--bpc-offline-proj-path", default=BPC_DEFAULT_OFFLINE_PROJ_PATH, help="BPC: learned offline hash-projection .pt; pass '' for the online projection fitted on each request's prefill keys")
     # ── BitDecoding params (--method bitdecoding); reuses --num-bits/--group-size/--quant-mode ──
     parser.add_argument("--bitdecoding-residual-block-size", type=int, default=None,
                         help="BitDecoding fp16 residual block (default 128 at 4-bit, 256 at 2-bit; must match the kernel's kBlockN_pack)")

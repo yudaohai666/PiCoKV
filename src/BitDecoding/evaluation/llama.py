@@ -1297,7 +1297,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
-        num_logits_to_keep: int = 0,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
         **kwargs: Unpack[KwargsForCausalLM],
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
@@ -1307,10 +1307,18 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
                 config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
                 (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
 
-            num_logits_to_keep (`int`, *optional*):
-                Calculate logits for the last `num_logits_to_keep` tokens. If `0`, calculate logits for all
+            logits_to_keep (`int` or `torch.Tensor`, *optional*):
+                Calculate logits for the last `logits_to_keep` tokens. If `0`, calculate logits for all
                 `input_ids` (special case). Only last token logits are needed for generation, and calculating them only for that
                 token can save memory, which becomes pretty significant for long sequences or large vocabulary size.
+
+                The name must stay `logits_to_keep`: `GenerationMixin._supports_logits_to_keep`
+                (transformers/generation/utils.py:2107) inspects this signature, and only
+                then does `generate` inject `logits_to_keep=1` (utils.py:2468). Under the old
+                `num_logits_to_keep` name the check failed silently, the default 0 was used,
+                and `hidden_states[:, -0:, :]` is the WHOLE sequence -- so prefill ran lm_head
+                over every position. At L=131072 that is a 131072 x 128256 fp16 logits tensor
+                = 31.31 GiB of wasted memory and an unnecessary 137.7 TFLOP.
 
         Returns:
 
@@ -1353,7 +1361,10 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
 
         hidden_states = outputs[0]
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-        logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
+        # Same slicing as transformers 4.53.2 modeling_llama.py:568, including the
+        # tensor form used by assisted decoding.
+        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
 
         loss = None
         if labels is not None:

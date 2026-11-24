@@ -16,10 +16,10 @@
       },
       "bitdecoding_2bit_g32": {
         "prompt_len": 16384,
-        "prefill_ms": 743.052,
-        "decode_ms_per_token": 18.6929,
-        "decode_toks_per_s": 53.5,
-        "prefill_peak_gb": 19.409,
+        "prefill_ms": 720.663,
+        "decode_ms_per_token": 18.3377,
+        "decode_toks_per_s": 54.53,
+        "prefill_peak_gb": 17.191,
         "decode_peak_gb": 15.38,
         "prefill_kv_gb": 0.381,
         "decode_kv_gb": 0.389
@@ -33,6 +33,26 @@
         "decode_peak_gb": 15.534,
         "prefill_kv_gb": 0.535,
         "decode_kv_gb": 0.543
+      },
+      "bpc_offline": {
+        "prompt_len": 16384,
+        "prefill_ms": 774.516,
+        "decode_ms_per_token": 19.7704,
+        "decode_toks_per_s": 50.58,
+        "prefill_peak_gb": 18.88,
+        "decode_peak_gb": 17.158,
+        "prefill_kv_gb": 2.07,
+        "decode_kv_gb": 2.102
+      },
+      "bpc_online": {
+        "prompt_len": 16384,
+        "prefill_ms": 1263.484,
+        "decode_ms_per_token": 20.3652,
+        "decode_toks_per_s": 49.1,
+        "prefill_peak_gb": 18.88,
+        "decode_peak_gb": 17.158,
+        "prefill_kv_gb": 2.07,
+        "decode_kv_gb": 2.102
       },
       "flash_attention_2": {
         "prompt_len": 16384,
@@ -108,10 +128,10 @@
       },
       "bitdecoding_2bit_g32": {
         "prompt_len": 32768,
-        "prefill_ms": 1933.574,
-        "decode_ms_per_token": 18.6863,
-        "decode_toks_per_s": 53.52,
-        "prefill_peak_gb": 23.824,
+        "prefill_ms": 1875.315,
+        "decode_ms_per_token": 18.6811,
+        "decode_toks_per_s": 53.53,
+        "prefill_peak_gb": 19.386,
         "decode_peak_gb": 15.755,
         "prefill_kv_gb": 0.756,
         "decode_kv_gb": 0.764
@@ -125,6 +145,26 @@
         "decode_peak_gb": 16.066,
         "prefill_kv_gb": 1.067,
         "decode_kv_gb": 1.075
+      },
+      "bpc_offline": {
+        "prompt_len": 32768,
+        "prefill_ms": 1918.586,
+        "decode_ms_per_token": 21.6491,
+        "decode_toks_per_s": 46.19,
+        "prefill_peak_gb": 22.732,
+        "decode_peak_gb": 19.254,
+        "prefill_kv_gb": 4.102,
+        "decode_kv_gb": 4.133
+      },
+      "bpc_online": {
+        "prompt_len": 32768,
+        "prefill_ms": 2861.124,
+        "decode_ms_per_token": 21.4354,
+        "decode_toks_per_s": 46.65,
+        "prefill_peak_gb": 22.732,
+        "decode_peak_gb": 19.254,
+        "prefill_kv_gb": 4.102,
+        "decode_kv_gb": 4.133
       },
       "flash_attention_2": {
         "prompt_len": 32768,
@@ -200,10 +240,10 @@
       },
       "bitdecoding_2bit_g32": {
         "prompt_len": 65536,
-        "prefill_ms": 5495.974,
-        "decode_ms_per_token": 18.5895,
-        "decode_toks_per_s": 53.79,
-        "prefill_peak_gb": 32.653,
+        "prefill_ms": 5398.42,
+        "decode_ms_per_token": 18.2915,
+        "decode_toks_per_s": 54.67,
+        "prefill_peak_gb": 23.778,
         "decode_peak_gb": 16.506,
         "prefill_kv_gb": 1.506,
         "decode_kv_gb": 1.514
@@ -217,6 +257,26 @@
         "decode_peak_gb": 17.129,
         "prefill_kv_gb": 2.129,
         "decode_kv_gb": 2.137
+      },
+      "bpc_offline": {
+        "prompt_len": 65536,
+        "prefill_ms": 5436.952,
+        "decode_ms_per_token": 21.1972,
+        "decode_toks_per_s": 47.18,
+        "prefill_peak_gb": 30.437,
+        "decode_peak_gb": 23.448,
+        "prefill_kv_gb": 8.164,
+        "decode_kv_gb": 8.196
+      },
+      "bpc_online": {
+        "prompt_len": 65536,
+        "prefill_ms": 7176.265,
+        "decode_ms_per_token": 21.3387,
+        "decode_toks_per_s": 46.86,
+        "prefill_peak_gb": 30.437,
+        "decode_peak_gb": 23.448,
+        "prefill_kv_gb": 8.164,
+        "decode_kv_gb": 8.196
       },
       "flash_attention_2": {
         "prompt_len": 65536,
@@ -292,10 +352,10 @@
       },
       "bitdecoding_2bit_g32": {
         "prompt_len": 131072,
-        "prefill_ms": 17908.215,
-        "decode_ms_per_token": 21.3161,
-        "decode_toks_per_s": 46.91,
-        "prefill_peak_gb": 50.312,
+        "prefill_ms": 17635.557,
+        "decode_ms_per_token": 21.2994,
+        "decode_toks_per_s": 46.95,
+        "prefill_peak_gb": 32.562,
         "decode_peak_gb": 18.009,
         "prefill_kv_gb": 3.006,
         "decode_kv_gb": 3.014
@@ -309,6 +369,26 @@
         "decode_peak_gb": 19.257,
         "prefill_kv_gb": 4.254,
         "decode_kv_gb": 4.262
+      },
+      "bpc_offline": {
+        "prompt_len": 131072,
+        "prefill_ms": 17804.984,
+        "decode_ms_per_token": 21.3271,
+        "decode_toks_per_s": 46.89,
+        "prefill_peak_gb": 45.846,
+        "decode_peak_gb": 31.834,
+        "prefill_kv_gb": 16.29,
+        "decode_kv_gb": 16.321
+      },
+      "bpc_online": {
+        "prompt_len": 131072,
+        "prefill_ms": 21278.26,
+        "decode_ms_per_token": 21.5634,
+        "decode_toks_per_s": 46.37,
+        "prefill_peak_gb": 45.846,
+        "decode_peak_gb": 31.834,
+        "prefill_kv_gb": 16.29,
+        "decode_kv_gb": 16.321
       },
       "flash_attention_2": {
         "prompt_len": 131072,
@@ -385,14 +465,13 @@
       },
       "bitdecoding_2bit_g32": {
         "prompt_len": 262144,
-        "error": "out_of_memory",
-        "prefill_ms": null,
-        "decode_ms_per_token": null,
-        "decode_toks_per_s": null,
-        "prefill_peak_gb": null,
-        "decode_peak_gb": null,
-        "prefill_kv_gb": null,
-        "decode_kv_gb": null
+        "prefill_ms": 64166.573,
+        "decode_ms_per_token": 30.3453,
+        "decode_toks_per_s": 32.95,
+        "prefill_peak_gb": 50.129,
+        "decode_peak_gb": 21.015,
+        "prefill_kv_gb": 6.006,
+        "decode_kv_gb": 6.014
       },
       "bitdecoding_4bit_g128": {
         "prompt_len": 262144,
@@ -404,6 +483,26 @@
         "decode_peak_gb": null,
         "prefill_kv_gb": null,
         "decode_kv_gb": null
+      },
+      "bpc_offline": {
+        "prompt_len": 262144,
+        "prefill_ms": 64669.798,
+        "decode_ms_per_token": 21.3491,
+        "decode_toks_per_s": 46.84,
+        "prefill_peak_gb": 76.664,
+        "decode_peak_gb": 48.608,
+        "prefill_kv_gb": 32.54,
+        "decode_kv_gb": 32.572
+      },
+      "bpc_online": {
+        "prompt_len": 262144,
+        "prefill_ms": 71519.641,
+        "decode_ms_per_token": 22.8624,
+        "decode_toks_per_s": 43.74,
+        "prefill_peak_gb": 76.664,
+        "decode_peak_gb": 48.608,
+        "prefill_kv_gb": 32.54,
+        "decode_kv_gb": 32.572
       },
       "flash_attention_2": {
         "prompt_len": 262144,

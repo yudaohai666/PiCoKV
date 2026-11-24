@@ -39,6 +39,12 @@ class StandaloneConfig:
     recon_ablation: bool = False
     quant_target: str = "both"
 
+    # Incremental decode (offline projections only). When > 0, every
+    # ``slide_tokens`` decode steps the oldest ``slide_tokens`` tokens of the
+    # recent dense region are quantized with the stored pair and appended to the
+    # packed global cache (no EAS). 0 keeps the global cache static.
+    slide_tokens: int = 0
+
     # Per-token CUDA decode. Pruning is off by default: it is a decode-time
     # approximation, and every benchmark run keeps the global scan exact.
     use_pruning: bool = False

@@ -8,6 +8,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# BPC JIT-compiles its binary_proj extension on the first modify() call. This venv
+# has no include/ dir, so cpp_extension emits -isystem /usr/include/python3.12,
+# which does not exist here -> "fatal error: Python.h: No such file or directory",
+# and BPC falls back to its PyTorch path with only a warning. Cache shapes stay
+# right but latency does not, so an unset CPATH yields quietly wrong numbers.
+# Point at the real headers; never add /usr/include (breaks libstdc++'s
+# #include_next). Keep identical across all benchmark launchers.
+export CPATH="/usr/local/include/python3.12${CPATH:+:${CPATH}}"
+# These launchers call bare `python`, which resolves to /usr/local/bin/python. That
+# interpreter's newer transformers hard-requires torchcodec metadata in audio_utils,
+# so runs die at import with
+# "PackageNotFoundError: No package metadata was found for torchcodec". The venv
+# (transformers 4.53.2, torch 2.6.0+cu124, lm_eval 0.4.12) is the supported
+# interpreter. Keep identical across all benchmark launchers.
+if [ -x "${REPO_ROOT}/.venv/bin/python" ]; then
+  export PATH="${REPO_ROOT}/.venv/bin:${PATH}"
+fi
 
 GPU="${GPU:-0}"
 MODEL="${MODEL:-/root/paddlejob/share-storage/gpfs/system-public/yudaohai/data/Llama-3.1-8B-Instruct}"

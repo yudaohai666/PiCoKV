@@ -141,7 +141,7 @@ def parse_arguments():
     parser.add_argument("--bpc-use-cuda-kernel", action=argparse.BooleanOptionalAction,
                         default=True, help="BPC: use the compiled CUDA kernel; PyTorch fallback on failure")
     parser.add_argument("--bpc-offline-proj-path", default=BPC_DEFAULT_OFFLINE_PROJ_PATH,
-                        help="BPC: learned offline hash-projection .pt; pass '' for the online (random) projection")
+                        help="BPC: learned offline hash-projection .pt; pass '' for the online projection fitted on each request's prefill keys")
 
     # Task configuration. Unlike RULER, InfiniteBench does not sweep lengths --
     # each task carries fixed-length examples from the shipped dataset.
@@ -206,6 +206,7 @@ def run_tag(args):
             tag += f"_eas{float(args.eas):g}"
         return tag
     return output_tag(args.method, args.k_bits, args.v_bits, args.num_bits,
+                      offline=(offline or args.bpc_offline_proj_path is not None),
                       group_size=args.group_size)
 
 

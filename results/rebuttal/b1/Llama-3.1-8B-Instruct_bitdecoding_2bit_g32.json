@@ -16,54 +16,53 @@
   "results": {
     "16384": {
       "prompt_len": 16384,
-      "prefill_ms": 743.052,
-      "decode_ms_per_token": 18.6929,
-      "decode_toks_per_s": 53.5,
-      "prefill_peak_gb": 19.409,
+      "prefill_ms": 720.663,
+      "decode_ms_per_token": 18.3377,
+      "decode_toks_per_s": 54.53,
+      "prefill_peak_gb": 17.191,
       "decode_peak_gb": 15.38,
       "prefill_kv_gb": 0.381,
       "decode_kv_gb": 0.389
     },
     "32768": {
       "prompt_len": 32768,
-      "prefill_ms": 1933.574,
-      "decode_ms_per_token": 18.6863,
-      "decode_toks_per_s": 53.52,
-      "prefill_peak_gb": 23.824,
+      "prefill_ms": 1875.315,
+      "decode_ms_per_token": 18.6811,
+      "decode_toks_per_s": 53.53,
+      "prefill_peak_gb": 19.386,
       "decode_peak_gb": 15.755,
       "prefill_kv_gb": 0.756,
       "decode_kv_gb": 0.764
     },
     "65536": {
       "prompt_len": 65536,
-      "prefill_ms": 5495.974,
-      "decode_ms_per_token": 18.5895,
-      "decode_toks_per_s": 53.79,
-      "prefill_peak_gb": 32.653,
+      "prefill_ms": 5398.42,
+      "decode_ms_per_token": 18.2915,
+      "decode_toks_per_s": 54.67,
+      "prefill_peak_gb": 23.778,
       "decode_peak_gb": 16.506,
       "prefill_kv_gb": 1.506,
       "decode_kv_gb": 1.514
     },
     "131072": {
       "prompt_len": 131072,
-      "prefill_ms": 17908.215,
-      "decode_ms_per_token": 21.3161,
-      "decode_toks_per_s": 46.91,
-      "prefill_peak_gb": 50.312,
+      "prefill_ms": 17635.557,
+      "decode_ms_per_token": 21.2994,
+      "decode_toks_per_s": 46.95,
+      "prefill_peak_gb": 32.562,
       "decode_peak_gb": 18.009,
       "prefill_kv_gb": 3.006,
       "decode_kv_gb": 3.014
     },
     "262144": {
       "prompt_len": 262144,
-      "error": "out_of_memory",
-      "prefill_ms": null,
-      "decode_ms_per_token": null,
-      "decode_toks_per_s": null,
-      "prefill_peak_gb": null,
-      "decode_peak_gb": null,
-      "prefill_kv_gb": null,
-      "decode_kv_gb": null
+      "prefill_ms": 64166.573,
+      "decode_ms_per_token": 30.3453,
+      "decode_toks_per_s": 32.95,
+      "prefill_peak_gb": 50.129,
+      "decode_peak_gb": 21.015,
+      "prefill_kv_gb": 6.006,
+      "decode_kv_gb": 6.014
     }
   }
 }

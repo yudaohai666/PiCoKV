@@ -139,6 +139,12 @@ def parse_arguments():
     #   oscar              -> OScaR quantized KV cache
     #   bitdecoding        -> BitDecoding low-bit KV cache (4-bit/g128 only; see
     #                         common._load_bitdecoding_model)
+    #   bpc                -> BPC 64-bit hash sparse attention (src/BPC); NOT a
+    #                         KV-compression method -- it keeps full bf16 K/V and
+    #                         uses the hashes only to pick a top-k token subset,
+    #                         so its score is comparable but its memory is not.
+    #                         Offline hash projection by default; pass
+    #                         --bpc-offline-proj-path '' for the online fit.
     #   flash_attention_2  -> dense full-precision baseline (flash-attn-2)
     #   sdpa / eager       -> dense full-precision baseline
     parser.add_argument(
@@ -148,6 +154,7 @@ def parse_arguments():
         help=(
             "evaluation method: 'picokv' (CUDA kernel) / 'picokv_recon' (dequant+flash ablation, "
             "see --quant-target) / 'kivi' / 'oscar' / 'polar' / 'bitdecoding' (quantized KV cache), "
+            "'bpc' (hash-based sparse attention), "
             "or a dense baseline attn impl 'flash_attention_2' / 'sdpa' / 'eager'"
         ),
     )
@@ -208,7 +215,7 @@ def parse_arguments():
     parser.add_argument("--bpc-err-ratio", type=float, default=0.1, help="BPC: err_topk = token_budget * err_ratio")
     parser.add_argument("--bpc-fix-layers", default="0,1", help="BPC: comma-separated layer indices that skip sparse attention (empty string for none)")
     parser.add_argument("--bpc-use-cuda-kernel", action=argparse.BooleanOptionalAction, default=True, help="BPC: use the compiled CUDA kernel; falls back to PyTorch on failure")
-    parser.add_argument("--bpc-offline-proj-path", default=BPC_DEFAULT_OFFLINE_PROJ_PATH, help="BPC: learned offline hash-projection .pt; pass '' for the online (random) projection")
+    parser.add_argument("--bpc-offline-proj-path", default=BPC_DEFAULT_OFFLINE_PROJ_PATH, help="BPC: learned offline hash-projection .pt; pass '' for the online projection fitted on each request's prefill keys")
     # ── BitDecoding params (--method bitdecoding); reuses --num-bits/--group-size/--quant-mode ──
     parser.add_argument("--bitdecoding-residual-block-size", type=int, default=None,
                         help="BitDecoding fp16 residual block (default 128 at 4-bit, 256 at 2-bit; must match the kernel's kBlockN_pack)")
@@ -292,6 +299,7 @@ def run_tag(args):
             tag += f"_eas{float(args.eas):g}"
         return tag
     return output_tag(args.method, args.k_bits, args.v_bits, args.num_bits,
+                      offline=(offline or args.bpc_offline_proj_path is not None),
                       group_size=args.group_size)
 
 

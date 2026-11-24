@@ -22,8 +22,9 @@ from .cache import PreparedKVCache
 from .config import StandaloneConfig
 from .constants import ONLINE_GROUP_BITS
 from .decode import decode_attention
-from .prepare import prepare_kv_cache
+from .prepare import _prepare_fixed_block32_cached, prepare_kv_cache
 from .recon import build_recon_dense_cache
+from .slide import SlidingWindow
 
 try:  # Match the flash_attention_2 baseline backend for a fair prefill comparison.
     from flash_attn import flash_attn_func as _flash_attn_func
@@ -207,6 +208,18 @@ class StandaloneLlamaCache(Cache):
         if value_decoders is not None and value_encoders is None:
             raise ValueError("value_decoders require value_encoders")
         self.config = config or StandaloneConfig()
+        if self.config.slide_tokens < 0:
+            raise ValueError("slide_tokens must be >= 0")
+        if self.config.slide_tokens > 0:
+            if any(
+                t is None
+                for t in (key_encoders, value_encoders, key_decoders, value_decoders)
+            ):
+                raise ValueError(
+                    "slide_tokens > 0 requires offline key/value encoders and decoders"
+                )
+            if self.config.recon_ablation:
+                raise ValueError("slide_tokens > 0 is not supported with recon_ablation")
         self.layers: dict[int, PreparedKVCache] = {}
         self.key_encoders = key_encoders
         self.value_encoders = value_encoders
@@ -220,6 +233,12 @@ class StandaloneLlamaCache(Cache):
         self._dense_layers: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
         self.seq_lengths: dict[int, int] = {}
         self.decode_calls = 0
+        # Sliding (slide_tokens > 0): prefill records each compressed layer's
+        # encoders; the first decode call then builds one SlidingWindow over
+        # all compressed layers, which slides them together on a side stream.
+        self._slide_encoders: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        self._slider: Optional[SlidingWindow] = None
+        self._slide_stream: Optional[torch.cuda.Stream] = None
         self._prepare_events: dict[int, tuple[torch.cuda.Event, torch.cuda.Event]] = {}
 
     def get_seq_length(self, layer_idx: int = 0) -> int:
@@ -329,6 +348,65 @@ class StandaloneLlamaCache(Cache):
         end.record(stream)
         self._prepare_events[layer_idx] = (start, end)
         self.seq_lengths[layer_idx] = int(key_states.shape[-2])
+        if self.config.slide_tokens > 0:
+            self._record_slide_encoders(layer_idx, key_states, heads)
+
+    def _record_slide_encoders(
+        self,
+        layer_idx: int,
+        key_states: torch.Tensor,
+        heads: int,
+    ) -> None:
+        """Record the ``[B,H,bits,D]`` encoders prefill used for this layer."""
+        if self._slider is not None:
+            raise RuntimeError("sliding cache: every layer must be prepared before decode")
+        cache = self.layers[layer_idx]
+        batch, dim = int(key_states.shape[0]), int(key_states.shape[-1])
+
+        def encoder(stack, bits):
+            # Same source slice and geometry as prepare_kv_cache, so this is a
+            # hit in the prepared-projection memo, not a new H2D copy.
+            return _prepare_fixed_block32_cached(
+                _layer_encoders(stack, layer_idx, heads),
+                batch, heads, bits, dim, key_states.device, key_states.dtype,
+            ).view(batch, heads, bits, dim)
+
+        self._slide_encoders[layer_idx] = (
+            encoder(self.key_encoders, cache.key_bits),
+            encoder(self.value_encoders, cache.value_bits),
+        )
+        if self._slide_stream is None:
+            self._slide_stream = torch.cuda.Stream(device=key_states.device)
+
+    def _get_slider(self) -> SlidingWindow:
+        if self._slider is None:
+            self._slider = SlidingWindow(
+                self.layers,
+                {i: enc[0] for i, enc in self._slide_encoders.items()},
+                {i: enc[1] for i, enc in self._slide_encoders.items()},
+                int(self.config.local_size),
+                int(self.config.slide_tokens),
+                int(self.config.zerorope),
+                self._slide_stream,
+            )
+            self._slide_encoders.clear()
+        return self._slider
+
+    @property
+    def slide_count(self) -> int:
+        """Total slides performed, summed over layers."""
+        if self._slider is None:
+            return 0
+        return self._slider.slides * len(self._slider.caches)
+
+    def wait_slides(self) -> None:
+        """Commit any in-flight slide so ``layers[i]`` can be read directly.
+
+        Decode handles this itself; call it only before reading
+        ``layers[i]`` outside of decode, after a full decode step.
+        """
+        if self._slider is not None:
+            self._slider.finish()
 
     def decode(
         self,
@@ -359,14 +437,24 @@ class StandaloneLlamaCache(Cache):
             return output
         if layer_idx not in self.layers:
             raise RuntimeError(f"layer {layer_idx} decode requested before prefill")
-        output = decode_attention(
-            query_states,
-            self.layers[layer_idx],
-            decode_key=key_states,
-            decode_value=value_states,
-            update_cache=True,
-            **self.config.decode_kwargs(),
-        )
+        if self.config.slide_tokens > 0:
+            slider = self._get_slider()
+            # In-place append into the fixed-capacity buffer, then attention
+            # over it (dense_key/dense_value already include this token).
+            slider.append(layer_idx, key_states, value_states)
+            output = decode_attention(
+                query_states, self.layers[layer_idx], **self.config.decode_kwargs()
+            )
+            slider.maybe_slide(layer_idx)
+        else:
+            output = decode_attention(
+                query_states,
+                self.layers[layer_idx],
+                decode_key=key_states,
+                decode_value=value_states,
+                update_cache=True,
+                **self.config.decode_kwargs(),
+            )
         self.seq_lengths[layer_idx] += int(key_states.shape[-2])
         self.decode_calls += 1
         return output

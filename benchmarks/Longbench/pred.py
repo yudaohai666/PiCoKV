@@ -312,7 +312,7 @@ def parse_args(argv=None):
     p.add_argument("--bpc-err-ratio", type=float, default=0.1, help="BPC: err_topk = token_budget * err_ratio")
     p.add_argument("--bpc-fix-layers", default="0,1", help="BPC: comma-separated layers skipping sparse attention (empty for none)")
     p.add_argument("--bpc-use-cuda-kernel", action=argparse.BooleanOptionalAction, default=True, help="BPC: use the compiled CUDA kernel; PyTorch fallback on failure")
-    p.add_argument("--bpc-offline-proj-path", default=BPC_DEFAULT_OFFLINE_PROJ_PATH, help="BPC: learned offline hash-projection .pt; pass '' for the online (random) projection")
+    p.add_argument("--bpc-offline-proj-path", default=BPC_DEFAULT_OFFLINE_PROJ_PATH, help="BPC: learned offline hash-projection .pt; pass '' for the online projection fitted on each request's prefill keys")
     # ── BitDecoding params (--method bitdecoding); reuses --num-bits/--group-size/--quant-mode ──
     p.add_argument("--bitdecoding-residual-block-size", type=int, default=None,
                    help="BitDecoding fp16 residual block (default 128 at 4-bit, 256 at 2-bit; must match the kernel's kBlockN_pack)")
@@ -354,7 +354,8 @@ def main() -> None:
 
     tag = args.output_tag or output_tag(
         args.method, args.k_bits, args.v_bits, args.num_bits,
-        offline=(args.offline or args.offline_proj_path is not None),
+        offline=(args.offline or args.offline_proj_path is not None
+                 or args.bpc_offline_proj_path is not None),
         full_tag=(args.method == "picokv"),
         group_size=args.group_size,
     )

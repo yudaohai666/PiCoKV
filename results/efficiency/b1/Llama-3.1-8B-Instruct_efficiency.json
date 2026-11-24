@@ -24,6 +24,26 @@
         "prefill_kv_gb": 0.535,
         "decode_kv_gb": 0.543
       },
+      "bpc_offline": {
+        "prompt_len": 16384,
+        "prefill_ms": 762.6,
+        "decode_ms_per_token": 19.9049,
+        "decode_toks_per_s": 50.24,
+        "prefill_peak_gb": 18.88,
+        "decode_peak_gb": 17.158,
+        "prefill_kv_gb": 2.07,
+        "decode_kv_gb": 2.102
+      },
+      "bpc_online": {
+        "prompt_len": 16384,
+        "prefill_ms": 1262.418,
+        "decode_ms_per_token": 19.4487,
+        "decode_toks_per_s": 51.42,
+        "prefill_peak_gb": 18.88,
+        "decode_peak_gb": 17.158,
+        "prefill_kv_gb": 2.07,
+        "decode_kv_gb": 2.102
+      },
       "picokv_k320_v320_offline": {
         "prompt_len": 16384,
         "prefill_ms": 692.033,
@@ -55,6 +75,26 @@
         "decode_peak_gb": 16.066,
         "prefill_kv_gb": 1.067,
         "decode_kv_gb": 1.075
+      },
+      "bpc_offline": {
+        "prompt_len": 32768,
+        "prefill_ms": 1918.767,
+        "decode_ms_per_token": 21.6267,
+        "decode_toks_per_s": 46.24,
+        "prefill_peak_gb": 22.732,
+        "decode_peak_gb": 19.254,
+        "prefill_kv_gb": 4.102,
+        "decode_kv_gb": 4.133
+      },
+      "bpc_online": {
+        "prompt_len": 32768,
+        "prefill_ms": 2856.179,
+        "decode_ms_per_token": 20.9628,
+        "decode_toks_per_s": 47.7,
+        "prefill_peak_gb": 22.732,
+        "decode_peak_gb": 19.254,
+        "prefill_kv_gb": 4.102,
+        "decode_kv_gb": 4.133
       },
       "picokv_k320_v320_offline": {
         "prompt_len": 32768,
@@ -88,6 +128,26 @@
         "prefill_kv_gb": 2.129,
         "decode_kv_gb": 2.137
       },
+      "bpc_offline": {
+        "prompt_len": 65536,
+        "prefill_ms": 5438.206,
+        "decode_ms_per_token": 21.3466,
+        "decode_toks_per_s": 46.85,
+        "prefill_peak_gb": 30.437,
+        "decode_peak_gb": 23.448,
+        "prefill_kv_gb": 8.164,
+        "decode_kv_gb": 8.196
+      },
+      "bpc_online": {
+        "prompt_len": 65536,
+        "prefill_ms": 7184.108,
+        "decode_ms_per_token": 21.1424,
+        "decode_toks_per_s": 47.3,
+        "prefill_peak_gb": 30.437,
+        "decode_peak_gb": 23.448,
+        "prefill_kv_gb": 8.164,
+        "decode_kv_gb": 8.196
+      },
       "picokv_k320_v320_offline": {
         "prompt_len": 65536,
         "prefill_ms": 5187.681,
@@ -119,6 +179,26 @@
         "decode_peak_gb": 19.257,
         "prefill_kv_gb": 4.254,
         "decode_kv_gb": 4.262
+      },
+      "bpc_offline": {
+        "prompt_len": 131072,
+        "prefill_ms": 17800.779,
+        "decode_ms_per_token": 21.7055,
+        "decode_toks_per_s": 46.07,
+        "prefill_peak_gb": 45.846,
+        "decode_peak_gb": 31.834,
+        "prefill_kv_gb": 16.29,
+        "decode_kv_gb": 16.321
+      },
+      "bpc_online": {
+        "prompt_len": 131072,
+        "prefill_ms": 21210.808,
+        "decode_ms_per_token": 21.5311,
+        "decode_toks_per_s": 46.44,
+        "prefill_peak_gb": 45.846,
+        "decode_peak_gb": 31.834,
+        "prefill_kv_gb": 16.29,
+        "decode_kv_gb": 16.321
       },
       "picokv_k320_v320_offline": {
         "prompt_len": 131072,
@@ -163,6 +243,28 @@
         "decode_peak_gb": 20.697,
         "prefill_kv_gb": 5.631,
         "decode_kv_gb": 5.639
+      }
+    },
+    "8192": {
+      "bpc_offline": {
+        "prompt_len": 8192,
+        "prefill_ms": 339.021,
+        "decode_ms_per_token": 20.8526,
+        "decode_toks_per_s": 47.96,
+        "prefill_peak_gb": 16.954,
+        "decode_peak_gb": 16.109,
+        "prefill_kv_gb": 1.055,
+        "decode_kv_gb": 1.086
+      },
+      "bpc_online": {
+        "prompt_len": 8192,
+        "prefill_ms": 698.013,
+        "decode_ms_per_token": 19.9108,
+        "decode_toks_per_s": 50.22,
+        "prefill_peak_gb": 16.954,
+        "decode_peak_gb": 16.109,
+        "prefill_kv_gb": 1.055,
+        "decode_kv_gb": 1.086
       }
     }
   }
