@@ -36,6 +36,12 @@ offline_projection/projections/*_k256_v320.pt
 .claude/
 memory/
 
+# Only the root README is tracked; experiment notes and per-module docs stay
+# local. Vendored third-party code under src/ keeps its own docs.
+*.md
+!/README.md
+!/src/**
+
 # Generated profiler traces
 results/efficiency/prof/
 offline_projection/data/proof-pile.json
