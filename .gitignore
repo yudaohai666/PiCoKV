@@ -40,7 +40,7 @@ memory/
 # local. Vendored third-party code under src/ keeps its own docs.
 *.md
 !/README.md
-!/src/**
+!/src/**/*.md
 
 # Generated profiler traces
 results/efficiency/prof/
